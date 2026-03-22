@@ -354,16 +354,19 @@ class RelicBotApp(tk.Tk):
         self.attempt_count = 0
         self._batch_log_path: str = ""   # set while a batch run is active
 
-        # Live-mode pause/resume after match found
-        self._decision_event = threading.Event()
-        self._decision: str = ""
-
         # Pause event: set = running, clear = paused
         self._pause_event = threading.Event()
         self._pause_event.set()
 
         # Backup/startup ready event
         self._ready_event = threading.Event()
+
+        # Overlay (Batch Mode only)
+        self._overlay = None
+        self._overlay_enabled_var = tk.BooleanVar(value=True)
+        self._ov_hits_33 = 0
+        self._ov_hits_23 = 0
+        self._ov_duds    = 0
 
         theme.apply(self)
         self._build_ui()
@@ -430,23 +433,9 @@ class RelicBotApp(tk.Tk):
         ttk.Button(profile_frame, text="Delete", command=self._delete_profile).grid(row=0, column=5, **pad)
         ttk.Button(profile_frame, text="Restore Defaults", command=self._reset_to_defaults).grid(row=0, column=6, **pad)
 
-        # ── Mode Selection ──────────────────────────────────────────── #
-        mode_frame = ttk.LabelFrame(inner, text="Mode")
-        mode_frame.grid(row=1, column=0, sticky="ew", **pad)
-
-        self.mode_var = tk.StringVar(value="batch")
-        ttk.Radiobutton(
-            mode_frame, text="Live Mode  (find → ask → keep or continue)",
-            variable=self.mode_var, value="live", command=self._on_mode_change,
-        ).grid(row=0, column=0, sticky="w", **pad)
-        ttk.Radiobutton(
-            mode_frame, text="Batch Mode  (run many iterations, review results later)",
-            variable=self.mode_var, value="batch", command=self._on_mode_change,
-        ).grid(row=1, column=0, sticky="w", **pad)
-
         # ── Save File & Game Configuration ──────────────────────────── #
         save_frame = ttk.LabelFrame(inner, text="Save File & Game Configuration")
-        save_frame.grid(row=2, column=0, sticky="ew", **pad)
+        save_frame.grid(row=1, column=0, sticky="ew", **pad)
 
         ttk.Label(save_frame, text="Save file:").grid(row=0, column=0, sticky="w", **pad)
         self.save_path_var = tk.StringVar()
@@ -477,7 +466,7 @@ class RelicBotApp(tk.Tk):
 
         # ── Sequence Phases ──────────────────────────────────────────── #
         seq_frame = ttk.LabelFrame(inner, text="Sequence Phases")
-        seq_frame.grid(row=7, column=0, sticky="ew", **pad)
+        seq_frame.grid(row=6, column=0, sticky="ew", **pad)
 
         # Relic type selector — determines murk cost per relic and auto-loads Phase 0
         rtype_frame = ttk.Frame(seq_frame)
@@ -520,11 +509,11 @@ class RelicBotApp(tk.Tk):
 
         # ── Relic Criteria (builder with Free Text / Exact / Pool tabs) ─ #
         self.relic_builder = RelicBuilderFrame(inner)
-        self.relic_builder.grid(row=3, column=0, sticky="ew", **pad)
+        self.relic_builder.grid(row=2, column=0, sticky="ew", **pad)
 
         # ── Relic Color Filter ───────────────────────────────────────── #
         color_frame = ttk.LabelFrame(inner, text="Relic Color Filter  (only relics of selected colors count as matches)")
-        color_frame.grid(row=4, column=0, sticky="ew", **pad)
+        color_frame.grid(row=3, column=0, sticky="ew", **pad)
 
         ttk.Label(
             color_frame,
@@ -580,7 +569,7 @@ class RelicBotApp(tk.Tk):
 
         # ── Curse Filter ─────────────────────────────────────────────── #
         curse_frame = ttk.LabelFrame(inner, text="Curse Filter  (relics with these curses are rejected)")
-        curse_frame.grid(row=5, column=0, sticky="ew", **pad)
+        curse_frame.grid(row=4, column=0, sticky="ew", **pad)
 
         ttk.Label(
             curse_frame,
@@ -639,15 +628,9 @@ class RelicBotApp(tk.Tk):
         cb_sb.pack(side="right", fill="y")
         self._blocked_curses_list: list[str] = []
 
-        # ── Live Mode Settings ──────────────────────────────────────── #
-        self.live_frame = ttk.LabelFrame(inner, text="Live Mode Settings")
-        ttk.Label(self.live_frame, text="Analysis delay (s):").grid(row=0, column=0, sticky="w", **pad)
-        self.live_delay_var = tk.StringVar(value="3.0")
-        ttk.Entry(self.live_frame, textvariable=self.live_delay_var, width=7).grid(row=0, column=1, **pad)
-
         # ── Batch Mode Settings ─────────────────────────────────────── #
         self.batch_frame = ttk.LabelFrame(inner, text="Batch Mode Settings")
-        # not gridded until mode switches
+        self.batch_frame.grid(row=5, column=0, sticky="ew", **pad)
 
         ttk.Label(self.batch_frame, text="Run for:").grid(row=0, column=0, sticky="w", **pad)
         self.batch_limit_type = tk.StringVar(value="loops")
@@ -670,9 +653,20 @@ class RelicBotApp(tk.Tk):
                                                                                         columnspan=3, **pad)
         ttk.Button(self.batch_frame, text="Browse", command=self._browse_batch_output).grid(row=2, column=4, **pad)
 
+        # Overlay toggle
+        ov_chk = ttk.Checkbutton(
+            self.batch_frame, text="Show HUD overlay while bot is running",
+            variable=self._overlay_enabled_var,
+        )
+        ov_chk.grid(row=3, column=0, columnspan=5, sticky="w", **pad)
+        _Tooltip(ov_chk,
+                 "Displays a translucent HUD in the bottom-left of your screen with live stats and log.\n"
+                 "Requires the game to run in Borderless or Fullscreen.\n"
+                 "Clicking the HUD does NOT steal focus from the game window.")
+
         # ── Bot Control ─────────────────────────────────────────────── #
         ctrl_frame = ttk.LabelFrame(inner, text="Bot Control")
-        ctrl_frame.grid(row=8, column=0, sticky="ew", **pad)
+        ctrl_frame.grid(row=7, column=0, sticky="ew", **pad)
 
         self.start_btn = ttk.Button(ctrl_frame, text="▶ START", command=self._start_bot,
                                     style="Start.TButton")
@@ -699,7 +693,7 @@ class RelicBotApp(tk.Tk):
 
         # ── Log ─────────────────────────────────────────────────────── #
         log_frame = ttk.LabelFrame(inner, text="Log")
-        log_frame.grid(row=9, column=0, sticky="ew", **pad)
+        log_frame.grid(row=8, column=0, sticky="ew", **pad)
         self.log_box = scrolledtext.ScrolledText(
             log_frame, height=10, width=82, state="disabled", wrap="word"
         )
@@ -710,25 +704,11 @@ class RelicBotApp(tk.Tk):
         ttk.Label(inner, text="Made by Pulgo",
                   foreground=theme.TEXT_MUTED,
                   font=("Segoe UI", 8)).grid(
-            row=10, column=0, sticky="e", padx=12, pady=(0, 4)
+            row=9, column=0, sticky="e", padx=12, pady=(0, 4)
         )
 
         # Auto-load standard sequences after UI is built
         self.after(100, self._auto_load_sequences)
-        # Apply initial mode (batch by default)
-        self._on_mode_change()
-
-    # ------------------------------------------------------------------ #
-    #  MODE SWITCHING
-    # ------------------------------------------------------------------ #
-
-    def _on_mode_change(self):
-        if self.mode_var.get() == "live":
-            self.batch_frame.grid_remove()
-            self.live_frame.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
-        else:
-            self.live_frame.grid_remove()
-            self.batch_frame.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
 
     # ------------------------------------------------------------------ #
     #  MANUAL SETUP WINDOW
@@ -974,8 +954,6 @@ class RelicBotApp(tk.Tk):
             "game_executable": self.game_exe_var.get(),
             "game_load_wait": self.game_load_wait_var.get(),
             "confirm_key": self.confirm_key_var.get(),
-            "mode": self.mode_var.get(),
-            "live_delay": self.live_delay_var.get(),
             "batch_limit_type": self.batch_limit_type.get(),
             "batch_limit": self.batch_limit_var.get(),
             "batch_delay": self.batch_delay_var.get(),
@@ -1002,9 +980,6 @@ class RelicBotApp(tk.Tk):
         self.game_exe_var.set(data.get("game_executable", ""))
         self.game_load_wait_var.set(str(data.get("game_load_wait", "30")))
         self.confirm_key_var.set(data.get("confirm_key", "e"))
-        self.mode_var.set(data.get("mode", "live"))
-        self._on_mode_change()
-        self.live_delay_var.set(str(data.get("live_delay", "3.0")))
         self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
         self.batch_limit_var.set(str(data.get("batch_limit", "20")))
         self.batch_delay_var.set(str(data.get("batch_delay", "3.0")))
@@ -1370,13 +1345,19 @@ class RelicBotApp(tk.Tk):
             )
             self.pause_btn.config(text=f"▶ RESUME  [{self._pause_hotkey_display}]")
             self._set_status("Paused — press PAUSE to resume", "orange")
+            if self._overlay:
+                self._overlay.set_paused(True)
         else:
             # Resume with countdown
             self.pause_btn.config(text=f"⏸ PAUSE  [{self._pause_hotkey_display}]", state="disabled")
             self._set_status("Resuming in 3…", "orange")
+            if self._overlay:
+                self._overlay.set_paused(True, countdown=3)
             def _countdown(n):
                 if n > 0:
                     self._set_status(f"Resuming in {n}…", "orange")
+                    if self._overlay:
+                        self._overlay.set_paused(True, countdown=n)
                     self.after(1000, _countdown, n - 1)
                 else:
                     self._pause_event.set()
@@ -1384,6 +1365,8 @@ class RelicBotApp(tk.Tk):
                     hint = self._current_phase_hint or "previous position"
                     self._log(f"▶ BOT RESUMED — returning to: [{hint}]")
                     self._set_status("Running…", "green")
+                    if self._overlay:
+                        self._overlay.set_paused(False)
             _countdown(3)
 
     def _check_pause_point(self, hint: str = ""):
@@ -1504,6 +1487,9 @@ class RelicBotApp(tk.Tk):
 
         self.bot_running = True
         self.attempt_count = 0
+        self._ov_hits_33 = 0
+        self._ov_hits_23 = 0
+        self._ov_duds    = 0
         self._pause_event.set()  # ensure not paused on start
         self._current_phase_hint = ""
         # Tell the player which exe to watch so inputs are blocked if game loses focus
@@ -1512,21 +1498,25 @@ class RelicBotApp(tk.Tk):
         self.stop_btn.config(state="normal")
         self.pause_btn.config(state="normal", text=f"⏸ PAUSE  [{self._pause_hotkey_display}]")
 
-        if self.mode_var.get() == "live":
-            self._set_status("Running (Live)…", "green")
-            self.bot_thread = threading.Thread(target=self._live_loop, daemon=True)
-        else:
-            self._set_status("Running (Batch)…", "green")
-            self.bot_thread = threading.Thread(target=self._batch_loop, daemon=True)
+        # Create overlay if enabled
+        if self._overlay_enabled_var.get():
+            from ui.overlay import BotOverlay
+            from bot.screen_capture import get_screen_size
+            sw, sh = get_screen_size()
+            self._overlay = BotOverlay(self)
+            self._overlay.build(sw, sh)
+            self._overlay.set_pause_callback(self._toggle_pause)
+            exe_frag = os.path.splitext(
+                os.path.basename(self.game_exe_var.get().strip()))[0].lower() or "nightreign"
+            self._overlay.start_game_watch(exe_frag)
 
+        self._set_status("Running (Batch)…", "green")
+        self.bot_thread = threading.Thread(target=self._batch_loop, daemon=True)
         self.bot_thread.start()
 
     def _stop_bot(self):
         self.bot_running = False
         self.player.stop()
-        # Unblock live-mode decision wait if it's stuck
-        self._decision = "stop"
-        self._decision_event.set()
         # Unblock backup ready wait if it's stuck
         self._ready_event.set()
         # Unblock any pause wait so the bot thread can exit
@@ -1536,123 +1526,9 @@ class RelicBotApp(tk.Tk):
         self.pause_btn.config(state="disabled", text=f"⏸ PAUSE  [{self._pause_hotkey_display}]")
         self._set_status("Stopped", "gray")
         self._log("Bot stopped by user.")
-
-    # ------------------------------------------------------------------ #
-    #  LIVE MODE LOOP
-    # ------------------------------------------------------------------ #
-
-    def _live_loop(self):
-        save_path = self.save_path_var.get()
-        backup_path = os.path.join(
-            self.backup_path_var.get(), os.path.basename(save_path)
-        )
-        criteria = self.relic_builder.get_criteria_dict()
-        criteria_summary = self.relic_builder.get_criteria_summary()
-        criteria["allowed_colors"] = self._get_allowed_colors()
-        region = self._get_region()
-        delay = float(self.live_delay_var.get())
-        load_wait = float(self.game_load_wait_var.get())
-
-        try:
-            save_manager.backup(save_path, backup_path)
-            self._log("Save file backed up.")
-        except Exception as e:
-            self._log(f"ERROR backing up save: {e}")
-            self.after(0, self._reset_controls)
-            return
-
-        self._ready_event.clear()
-        self.after(0, self._ask_backup_ready)
-        self._ready_event.wait()
-        if not self.bot_running:
-            self.after(0, self._reset_controls)
-            return
-
-        while self.bot_running:
-            self.attempt_count += 1
-            self.after(0, lambda n=self.attempt_count: self.attempt_var.set(f"Attempts: {n}"))
-            self._log(f"--- Attempt {self.attempt_count} ---")
-
-            self._set_status(f"Attempt {self.attempt_count}: closing game…", "orange")
-            if not self._close_game():
-                self._log("ERROR: Could not close game.")
-                self.after(0, self._reset_controls)
-                return
-            try:
-                save_manager.restore(save_path, backup_path)
-                self._log("Save restored.")
-            except Exception as e:
-                self._log(f"ERROR restoring save: {e}")
-                self.after(0, self._reset_controls)
-                return
-            self._set_status(f"Attempt {self.attempt_count}: launching game…", "orange")
-            self._launch_game()
-            self._log(f"Waiting {load_wait}s for game to load (spamming confirm key)…")
-            confirm_key = self.confirm_key_var.get().strip() or "e"
-            exe_name = os.path.basename(self.game_exe_var.get().strip())
-            focused = self._focus_game_window(exe_name)
-            if not focused:
-                self._log("WARNING: Could not focus game window — inputs may not reach the game.")
-            else:
-                self._log("Game window focused.")
-            for i in range(int(load_wait * 2)):
-                if not self.bot_running:
-                    self.after(0, self._reset_controls)
-                    return
-                # Re-focus every ~5s in case something stole focus
-                if i % 10 == 0 and exe_name:
-                    self._focus_game_window(exe_name, timeout=1.0)
-                self.player.tap(confirm_key)
-                time.sleep(0.45)
-
-            label = f"Attempt {self.attempt_count}"
-            relic_results = self._run_iteration_phases(
-                label, criteria, region, delay)
-
-            if relic_results is None:   # fatal error inside phases
-                self.after(0, self._reset_controls)
-                return
-
-            if not self.bot_running:
-                break
-
-            # Check for any match and ask the user
-            for result in relic_results:
-                if result.get("match"):
-                    self._decision_event.clear()
-                    self._decision = ""
-                    self.after(0, self._ask_keep_or_continue,
-                               result.get("matched_relic", "Unknown"),
-                               result.get("matched_passives", []),
-                               result.get("reason", ""))
-                    self._decision_event.wait()
-
-                    if self._decision == "keep" or not self.bot_running:
-                        self._set_status("Stopped – relic kept.", "red")
-                        self.after(0, self._reset_controls)
-                        return
-                    break   # user chose continue — skip remaining relics this attempt
-
-            if not self.bot_running:
-                break
-
-            self._log("Continuing search…")
-
-        self.after(0, self._reset_controls)
-
-    def _ask_keep_or_continue(self, matched_relic: str, matched_passives: list, reason: str):
-        """Called on the main thread. Shows a dialog; signals the bot thread via event."""
-        passives_str = "\n".join(f"  – {p}" for p in matched_passives) if matched_passives else "  (none listed)"
-        keep = messagebox.askyesno(
-            "Match Found!",
-            f"A matching relic was found on attempt {self.attempt_count}!\n\n"
-            f"Relic: {matched_relic}\n\nPassives:\n{passives_str}\n\n"
-            f"Details: {reason}\n\n"
-            "Click YES to keep this save and stop.\n"
-            "Click NO to discard it and keep searching.",
-        )
-        self._decision = "keep" if keep else "continue"
-        self._decision_event.set()
+        if self._overlay:
+            self._overlay.destroy()
+            self._overlay = None
 
     # ------------------------------------------------------------------ #
     #  BATCH MODE LOOP
@@ -1737,6 +1613,16 @@ class RelicBotApp(tk.Tk):
             iteration += 1
             self.attempt_count = iteration
             self.after(0, lambda n=iteration: self.attempt_var.set(f"Attempts: {n}"))
+
+            # Overlay: batch progress
+            if self._overlay:
+                if limit_type == "loops":
+                    _bs = f"Batch {iteration} / {int(limit_value)}"
+                else:
+                    _eh = (time.time() - start_time) / 3600
+                    _bs = f"{_eh:.1f}h / {limit_value:.1f}h"
+                ov = self._overlay
+                self.after(0, lambda s=_bs: ov.update(batch=s) if ov._win else None)
 
             # Pause checkpoint — blocks here if user has paused
             self._check_pause_point(f"start of iteration {iteration}")
@@ -1855,6 +1741,19 @@ class RelicBotApp(tk.Tk):
             # Screenshots already saved inside _run_iteration_phases as each relic was analyzed.
             screenshots = [rr.get("_screenshot_file", "") for rr in relic_results
                            if rr.get("_screenshot_file")]
+
+            # Update overlay hit counters
+            if self._overlay:
+                if num_matched >= 3:
+                    self._ov_hits_33 += 1
+                elif num_matched >= hit_min:
+                    self._ov_hits_23 += 1
+                else:
+                    self._ov_duds += 1
+                ov = self._overlay
+                h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
+                self.after(0, lambda: ov.update(
+                    hits_33=h33, hits_23=h23, duds=dds) if ov._win else None)
 
             if num_matched >= 3:
                 self._log(f"★★★ GOD ROLL — Iteration {iteration}: {matched_relic}")
@@ -2030,6 +1929,14 @@ class RelicBotApp(tk.Tk):
                     self._log(
                         f"  Murk: {murk_val}  →  {_p3_count} relic(s) to review "
                         f"({murk_cost} murk each).")
+                    if self._overlay:
+                        ov = self._overlay
+                        mv, pc = murk_val, _p3_count
+                        self.after(0, lambda: ov.update(
+                            murk=f"{mv:,}", to_buy=str(pc),
+                            bought="0 / " + str(pc),
+                            relic_num="—", analysing="—",
+                        ) if ov._win else None)
                     break
                 else:
                     self._log(f"  Murk read attempt {attempt}/3 returned 0.")
@@ -2143,6 +2050,12 @@ class RelicBotApp(tk.Tk):
 
                     self._set_status(
                         f"{label}: capturing relic {step_i + 1}/{total}…", "#006600")
+                    if self._overlay:
+                        ov = self._overlay
+                        si, tot = step_i + 1, total
+                        self.after(0, lambda: ov.update(
+                            relic_num=f"{si} / {tot}", analysing=str(si),
+                        ) if ov._win else None)
                     self.after(0, self._flash_capture)
                     try:
                         img = screen_capture.capture(region)
@@ -2285,36 +2198,28 @@ class RelicBotApp(tk.Tk):
             messagebox.showwarning("Invalid Load Wait", "Game load wait must be a number.")
             return False
 
-        # Mode-specific validation
-        if self.mode_var.get() == "live":
-            try:
-                float(self.live_delay_var.get())
-            except ValueError:
-                messagebox.showwarning("Invalid Delay", "Analysis delay must be a number.")
+        if not self.batch_output_var.get():
+            messagebox.showwarning("No Output Folder", "Choose an output folder for batch results.")
+            return False
+        try:
+            v = float(self.batch_limit_var.get())
+            if v <= 0:
+                raise ValueError
+            limit_type = self.batch_limit_type.get()
+            if limit_type == "loops" and v > 1000:
+                messagebox.showwarning("Limit Too High", "Maximum allowed loops is 1000.")
                 return False
-        else:
-            if not self.batch_output_var.get():
-                messagebox.showwarning("No Output Folder", "Choose an output folder for batch results.")
+            if limit_type == "hours" and v > 24:
+                messagebox.showwarning("Limit Too High", "Maximum allowed run time is 24 hours.")
                 return False
-            try:
-                v = float(self.batch_limit_var.get())
-                if v <= 0:
-                    raise ValueError
-                limit_type = self.batch_limit_type.get()
-                if limit_type == "loops" and v > 1000:
-                    messagebox.showwarning("Limit Too High", "Maximum allowed loops is 1000.")
-                    return False
-                if limit_type == "hours" and v > 24:
-                    messagebox.showwarning("Limit Too High", "Maximum allowed run time is 24 hours.")
-                    return False
-            except ValueError:
-                messagebox.showwarning("Invalid Limit", "Batch limit must be a positive number.")
-                return False
-            try:
-                float(self.batch_delay_var.get())
-            except ValueError:
-                messagebox.showwarning("Invalid Delay", "Analysis delay must be a number.")
-                return False
+        except ValueError:
+            messagebox.showwarning("Invalid Limit", "Batch limit must be a positive number.")
+            return False
+        try:
+            float(self.batch_delay_var.get())
+        except ValueError:
+            messagebox.showwarning("Invalid Delay", "Analysis delay must be a number.")
+            return False
         return True
 
     def _flash_capture(self):
@@ -2419,6 +2324,8 @@ class RelicBotApp(tk.Tk):
             self.log_box.insert("end", line)
             self.log_box.see("end")
             self.log_box.config(state="disabled")
+            if self._overlay:
+                self._overlay.append_log(line.rstrip())
         self.after(0, _write)
         if self._batch_log_path:
             try:
