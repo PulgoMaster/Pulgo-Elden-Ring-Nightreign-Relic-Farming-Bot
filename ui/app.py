@@ -2309,6 +2309,9 @@ class RelicBotApp(tk.Tk):
         self._pause_event.set()  # ensure not stuck paused
         self.bot_running = False
         self._batch_log_path = ""   # stop mirroring to file
+        if self._overlay:
+            self._overlay.destroy()
+            self._overlay = None
 
     def _set_status(self, text: str, color: str = "gray"):
         def _apply():
