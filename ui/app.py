@@ -582,7 +582,7 @@ class RelicBotApp(tk.Tk):
 
         ttk.Label(
             curse_frame,
-            text="Select curses to block. Relics that have any blocked curse will not count as matches. Leave empty to allow all.",
+            text="Select curses to block. Relics carrying any blocked curse will not count as matches. Leave empty to allow all.",
             foreground=theme.TEXT_MUTED, wraplength=700, justify="left",
         ).pack(anchor="w", padx=6, pady=(4, 2))
 
@@ -591,16 +591,16 @@ class RelicBotApp(tk.Tk):
         curse_content.columnconfigure(0, weight=3)
         curse_content.columnconfigure(2, weight=2)
 
-        # Left: searchable all-passives list
-        curse_left = ttk.LabelFrame(curse_content, text="All Passives / Curses")
+        # Left: curses-only list
+        curse_left = ttk.LabelFrame(curse_content, text="Curses")
         curse_left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
 
-        from bot.passives import ALL_PASSIVES_SORTED as _ALL_P
+        from bot.passives import ALL_CURSES as _ALL_CURSES
         self._curse_search_var = tk.StringVar()
         self._curse_search_var.trace_add("write", self._curse_filter_list)
         _curse_entry = ttk.Entry(curse_left, textvariable=self._curse_search_var)
         _curse_entry.pack(fill="x", padx=4, pady=(4, 2))
-        _Tooltip(_curse_entry, "Search and select passives to block. Relics with any blocked curse are rejected regardless of passive match.")
+        _Tooltip(_curse_entry, "Search and select curses to block. Relics carrying any blocked curse are rejected even if their passives match.")
 
         curse_src_body = ttk.Frame(curse_left)
         curse_src_body.pack(fill="both", expand=True, padx=4, pady=(0, 4))
@@ -612,7 +612,7 @@ class RelicBotApp(tk.Tk):
         self._curse_src_lb.configure(yscrollcommand=cs_sb.set)
         self._curse_src_lb.pack(side="left", fill="both", expand=True)
         cs_sb.pack(side="right", fill="y")
-        self._curse_all_passives = _ALL_P
+        self._curse_all_passives = _ALL_CURSES
         for p in self._curse_all_passives:
             self._curse_src_lb.insert("end", p)
 
@@ -2084,7 +2084,7 @@ class RelicBotApp(tk.Tk):
                 self.player.play_fast(self.phase_events[3])
                 if not self.bot_running:
                     return relic_results
-                time.sleep(0.3)
+                time.sleep(0.15)
                 self.after(0, self._flash_capture)
                 try:
                     img = screen_capture.capture(region)

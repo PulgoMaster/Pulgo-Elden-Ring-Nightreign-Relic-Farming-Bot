@@ -733,6 +733,12 @@ for _cat, _entries in CATEGORIES.items():
 # Sorted for display (alphabetical)
 ALL_PASSIVES_SORTED: list = sorted(ALL_PASSIVES, key=str.casefold)
 
+# Curses only — the Demerit categories that appear as negative effects on relics
+ALL_CURSES: list = sorted(
+    [p for cat, items in CATEGORIES.items() if "Demerit" in cat for p in items],
+    key=str.casefold,
+)
+
 
 # ── Compatibility / Stackability Rules ───────────────────────────────────── #
 # Passives in the same exclusive group CANNOT appear on the same relic.

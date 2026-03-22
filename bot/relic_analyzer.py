@@ -30,8 +30,24 @@ def _get_reader():
 
 # ── Image helpers ─────────────────────────────────────────────────────── #
 
-def _to_array(image_bytes: bytes) -> np.ndarray:
-    return np.array(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+# Per-function OCR widths:
+#   analyze()        960 px  — ~1.8× faster than 1280 px; passive names are large
+#                              enough to read accurately at this resolution.
+#   read_murk()        0     — full resolution; murk digits are small HUD text.
+#   check_condition()  0     — full resolution; only called a few times per iteration
+#                              so speed doesn't matter, and "sell" text must be reliable.
+_ANALYZE_WIDTH   = 960
+
+
+def _to_array(image_bytes: bytes, max_width: int = 0) -> np.ndarray:
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    if max_width and img.width > max_width:
+        scale = max_width / img.width
+        img = img.resize(
+            (int(img.width * scale), int(img.height * scale)),
+            Image.LANCZOS,
+        )
+    return np.array(img)
 
 
 # ── Color classification ──────────────────────────────────────────────── #
@@ -215,7 +231,7 @@ def analyze(image_bytes: bytes, criteria: dict) -> dict:
     from bot.passives import ALL_PASSIVES_SORTED
 
     reader = _get_reader()
-    img = _to_array(image_bytes)
+    img = _to_array(image_bytes, max_width=_ANALYZE_WIDTH)
     results = reader.readtext(img)
 
     passives, curses = [], []
@@ -278,7 +294,7 @@ def read_murk(image_bytes: bytes) -> int:
     Returns 0 if the amount cannot be reliably determined.
     """
     reader = _get_reader()
-    img = _to_array(image_bytes)
+    img = _to_array(image_bytes, max_width=0)   # full resolution — murk digits are small
 
     # Try top-right quarter first — that's where the HUD currency typically sits.
     h, w = img.shape[:2]
@@ -315,7 +331,7 @@ def check_condition(image_bytes: bytes, condition_text: str) -> bool:
     Returns True if found, False otherwise.
     """
     reader = _get_reader()
-    img = _to_array(image_bytes)
+    img = _to_array(image_bytes, max_width=0)   # full resolution — called rarely, must be reliable
     results = reader.readtext(img)
 
     all_text = " ".join(t for _, t, c in results if c > 0.3).lower()
