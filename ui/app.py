@@ -28,7 +28,8 @@ from ui import theme, relic_images
 from ui.relic_builder import RelicBuilderFrame
 
 
-_PROFILES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "profiles")
+_REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROFILES_DIR = os.path.join(_REPO_ROOT, "profiles")
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -371,6 +372,7 @@ class RelicBotApp(tk.Tk):
 
         os.makedirs(_PROFILES_DIR, exist_ok=True)
         self._refresh_profile_list()
+        self.after(200, self._log_screen_resolution)
 
     # ------------------------------------------------------------------ #
     #  UI CONSTRUCTION
@@ -452,7 +454,7 @@ class RelicBotApp(tk.Tk):
         ttk.Button(save_frame, text="Browse", command=self._browse_save).grid(row=0, column=2, **pad)
 
         ttk.Label(save_frame, text="Backup folder:").grid(row=1, column=0, sticky="w", **pad)
-        self.backup_path_var = tk.StringVar()
+        self.backup_path_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "save_backups"))
         ttk.Entry(save_frame, textvariable=self.backup_path_var, width=52).grid(row=1, column=1, **pad)
         ttk.Button(save_frame, text="Browse", command=self._browse_backup).grid(row=1, column=2, **pad)
 
@@ -475,7 +477,7 @@ class RelicBotApp(tk.Tk):
 
         # ── Sequence Phases ──────────────────────────────────────────── #
         seq_frame = ttk.LabelFrame(inner, text="Sequence Phases")
-        seq_frame.grid(row=3, column=0, sticky="ew", **pad)
+        seq_frame.grid(row=7, column=0, sticky="ew", **pad)
 
         # Relic type selector — determines murk cost per relic and auto-loads Phase 0
         rtype_frame = ttk.Frame(seq_frame)
@@ -518,11 +520,11 @@ class RelicBotApp(tk.Tk):
 
         # ── Relic Criteria (builder with Free Text / Exact / Pool tabs) ─ #
         self.relic_builder = RelicBuilderFrame(inner)
-        self.relic_builder.grid(row=4, column=0, sticky="ew", **pad)
+        self.relic_builder.grid(row=3, column=0, sticky="ew", **pad)
 
         # ── Relic Color Filter ───────────────────────────────────────── #
         color_frame = ttk.LabelFrame(inner, text="Relic Color Filter  (only relics of selected colors count as matches)")
-        color_frame.grid(row=5, column=0, sticky="ew", **pad)
+        color_frame.grid(row=4, column=0, sticky="ew", **pad)
 
         ttk.Label(
             color_frame,
@@ -578,7 +580,7 @@ class RelicBotApp(tk.Tk):
 
         # ── Curse Filter ─────────────────────────────────────────────── #
         curse_frame = ttk.LabelFrame(inner, text="Curse Filter  (relics with these curses are rejected)")
-        curse_frame.grid(row=6, column=0, sticky="ew", **pad)
+        curse_frame.grid(row=5, column=0, sticky="ew", **pad)
 
         ttk.Label(
             curse_frame,
@@ -663,7 +665,7 @@ class RelicBotApp(tk.Tk):
         _Tooltip(_bd_entry, "Wait time after inputs before taking the relic screenshot.\nIncrease if relics haven't fully loaded when captured.")
 
         ttk.Label(self.batch_frame, text="Output folder:").grid(row=2, column=0, sticky="w", **pad)
-        self.batch_output_var = tk.StringVar()
+        self.batch_output_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "batch_output"))
         ttk.Entry(self.batch_frame, textvariable=self.batch_output_var, width=52).grid(row=2, column=1,
                                                                                         columnspan=3, **pad)
         ttk.Button(self.batch_frame, text="Browse", command=self._browse_batch_output).grid(row=2, column=4, **pad)
@@ -723,10 +725,10 @@ class RelicBotApp(tk.Tk):
     def _on_mode_change(self):
         if self.mode_var.get() == "live":
             self.batch_frame.grid_remove()
-            self.live_frame.grid(row=7, column=0, sticky="ew", padx=8, pady=4)
+            self.live_frame.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
         else:
             self.live_frame.grid_remove()
-            self.batch_frame.grid(row=7, column=0, sticky="ew", padx=8, pady=4)
+            self.batch_frame.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
 
     # ------------------------------------------------------------------ #
     #  MANUAL SETUP WINDOW
@@ -776,8 +778,7 @@ class RelicBotApp(tk.Tk):
                     "Navigates from Roundtable Hold to the Relic Rites merchant buy screen.\n\n"
                     "Default sequence assumes:\n"
                     "  • You own the DLC (Nightreign)\n"
-                    "  • All shops in Roundtable Hold are unlocked\n"
-                    "  • Your character is Duchess\n\n"
+                    "  • All shops in Roundtable Hold are unlocked\n\n"
                     "⚠  If you don't have the DLC or not all shops are unlocked,\n"
                     "    RE-RECORD this phase to match your own menu layout."
                 ),
@@ -876,14 +877,13 @@ class RelicBotApp(tk.Tk):
     def _auto_load_sequences(self):
         """Load all standard sequence files on startup."""
         rtype = self.relic_type_var.get()
-        phase0_file = ("phase0_navigate_to_relic_buy_screen.json"
-                       if rtype == "night" else "phase0_normal.json")
+        phase0_file = ("phase0_setup_don.json" if rtype == "night" else "phase0_setup_normal.json")
         files = [
             phase0_file,
-            "phase1_buy_one_batch_of_10_relics.json",
-            "phase3_review_setup.json",             # Phase 2: navigate to Relic Rites (Esc+M+down+F)
-            "phase2_navigate_to_sell.json",         # Phase 3: F2 loop until sell page
-            "phase4_review_step.json",              # Phase 4: right arrow through relics
+            "phase1_buy_loop.json",
+            "phase2_relic_rites_nav.json",
+            "phase3_navigate_to_sell.json",
+            "phase4_review_step.json",
         ]
         for i, fname in enumerate(files):
             path = os.path.join(self._SEQ_DIR, fname)
@@ -902,8 +902,7 @@ class RelicBotApp(tk.Tk):
     def _on_relic_type_change(self):
         """Swap Phase 0 sequence when the user switches relic type."""
         rtype = self.relic_type_var.get()
-        fname = ("phase0_navigate_to_relic_buy_screen.json"
-                 if rtype == "night" else "phase0_normal.json")
+        fname = ("phase0_setup_don.json" if rtype == "night" else "phase0_setup_normal.json")
         path = os.path.join(self._SEQ_DIR, fname)
         if os.path.exists(path):
             try:
@@ -914,6 +913,17 @@ class RelicBotApp(tk.Tk):
                 self._log(f"Phase 0 (Setup) swapped to {rtype} sequence ({n} events).")
             except Exception as e:
                 self._log(f"WARNING: Could not load Phase 0 for '{rtype}': {e}")
+
+    def _log_screen_resolution(self):
+        """Log detected screen resolution so the user can verify the crop is correct."""
+        from bot.screen_capture import get_screen_size
+        w, h = get_screen_size()
+        self._log(
+            f"Screen resolution detected: {w}×{h}. "
+            f"Relic panel crop: left={int(w*0.45)}px, top={int(h*0.65)}px "
+            f"→ {w - int(w*0.45)}×{h - int(h*0.65)}px region. "
+            f"Run in borderless or fullscreen for best results."
+        )
 
     # ------------------------------------------------------------------ #
     #  SAVE FILE HELPERS
@@ -985,8 +995,10 @@ class RelicBotApp(tk.Tk):
         }
 
     def _dict_to_profile(self, data: dict):
+        _default_backup = os.path.join(_REPO_ROOT, "save_backups")
+        _default_output = os.path.join(_REPO_ROOT, "batch_output")
         self.save_path_var.set(data.get("save_path", ""))
-        self.backup_path_var.set(data.get("backup_folder", ""))
+        self.backup_path_var.set(data.get("backup_folder", _default_backup))
         self.game_exe_var.set(data.get("game_executable", ""))
         self.game_load_wait_var.set(str(data.get("game_load_wait", "30")))
         self.confirm_key_var.set(data.get("confirm_key", "e"))
@@ -996,7 +1008,7 @@ class RelicBotApp(tk.Tk):
         self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
         self.batch_limit_var.set(str(data.get("batch_limit", "20")))
         self.batch_delay_var.set(str(data.get("batch_delay", "3.0")))
-        self.batch_output_var.set(data.get("batch_output", ""))
+        self.batch_output_var.set(data.get("batch_output", _default_output))
         # Load phase events (support old single-sequence profiles via "input_sequence")
         if "phase_events" in data:
             loaded = data["phase_events"]

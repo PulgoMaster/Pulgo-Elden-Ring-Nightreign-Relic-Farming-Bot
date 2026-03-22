@@ -28,15 +28,22 @@ def _get_reader():
     return _reader
 
 
-# ── Image helpers ─────────────────────────────────────────────────────── #
+# ── Relic panel crop ─────────────────────────────────────────────────── #
+#
+# The relic info panel (name + passives) always occupies the bottom-right of
+# the Relic Rites sell screen.  Using fractions of the image dimensions keeps
+# the crop correct at any screen resolution (1080p, 1440p, 4K, etc.) as long
+# as the game runs in borderless or fullscreen mode.
+#
+# Geometry (derived from the sell-screen layout):
+#   left edge  ≈ 45 % from left  — just before the vertical centre line
+#   top  edge  ≈ 65 % from top   — upper boundary of the panel row
+#
+# Adjust these two constants if your UI layout differs (e.g. an ultrawide aspect
+# ratio with pillarboxing may need a different left fraction).
 
-# Per-function OCR widths:
-#   analyze()        960 px  — ~1.8× faster than 1280 px; passive names are large
-#                              enough to read accurately at this resolution.
-#   read_murk()        0     — full resolution; murk digits are small HUD text.
-#   check_condition()  0     — full resolution; only called a few times per iteration
-#                              so speed doesn't matter, and "sell" text must be reliable.
-_ANALYZE_WIDTH   = 960
+_CROP_LEFT_FRAC = 0.45   # fraction of image width  to skip from the left
+_CROP_TOP_FRAC  = 0.65   # fraction of image height to skip from the top
 
 
 def _to_array(image_bytes: bytes, max_width: int = 0) -> np.ndarray:
@@ -231,7 +238,15 @@ def analyze(image_bytes: bytes, criteria: dict) -> dict:
     from bot.passives import ALL_PASSIVES_SORTED
 
     reader = _get_reader()
-    img = _to_array(image_bytes, max_width=_ANALYZE_WIDTH)
+    img = _to_array(image_bytes, max_width=0)   # full resolution — we crop, not downscale
+
+    # Crop to the relic info panel (bottom-right quadrant of the sell screen).
+    # Fraction-based so it scales correctly for any resolution.
+    h, w = img.shape[:2]
+    left = int(w * _CROP_LEFT_FRAC)
+    top  = int(h * _CROP_TOP_FRAC)
+    img  = img[top:, left:]
+
     results = reader.readtext(img)
 
     passives, curses = [], []

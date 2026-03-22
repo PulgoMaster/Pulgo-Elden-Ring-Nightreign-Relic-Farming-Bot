@@ -9,14 +9,19 @@ from PIL import Image
 import mss
 import mss.tools
 
-# Cap width so EasyOCR processes a reasonably-sized image without excess RAM use.
-_MAX_WIDTH = 1280
 _JPEG_QUALITY = 85
+
+
+def get_screen_size() -> Tuple[int, int]:
+    """Return (width, height) of the primary monitor in pixels."""
+    with mss.mss() as sct:
+        m = sct.monitors[1]
+        return m["width"], m["height"]
 
 
 def capture(region: Optional[Tuple[int, int, int, int]] = None) -> bytes:
     """
-    Capture a screenshot and return JPEG bytes.
+    Capture a screenshot and return JPEG bytes at native resolution.
 
     Args:
         region: (left, top, width, height) in screen coordinates.
@@ -35,13 +40,6 @@ def capture(region: Optional[Tuple[int, int, int, int]] = None) -> bytes:
         screenshot = sct.grab(monitor)
 
     img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
-
-    if img.width > _MAX_WIDTH:
-        scale = _MAX_WIDTH / img.width
-        img = img.resize(
-            (int(img.width * scale), int(img.height * scale)),
-            Image.LANCZOS,
-        )
 
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
