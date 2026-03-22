@@ -1,0 +1,112 @@
+[
+  {
+    "type": "key_press",
+    "key": "m",
+    "time": 0.6143
+  },
+  {
+    "type": "key_release",
+    "key": "m",
+    "time": 0.6883
+  },
+  {
+    "type": "key_press",
+    "key": "Key.down",
+    "time": 1.2177
+  },
+  {
+    "type": "key_release",
+    "key": "Key.down",
+    "time": 1.3405
+  },
+  {
+    "type": "key_press",
+    "key": "Key.down",
+    "time": 1.4446
+  },
+  {
+    "type": "key_release",
+    "key": "Key.down",
+    "time": 1.5622
+  },
+  {
+    "type": "key_press",
+    "key": "Key.down",
+    "time": 1.6589
+  },
+  {
+    "type": "key_release",
+    "key": "Key.down",
+    "time": 1.7775
+  },
+  {
+    "type": "key_press",
+    "key": "Key.down",
+    "time": 1.8976
+  },
+  {
+    "type": "key_release",
+    "key": "Key.down",
+    "time": 2.0151
+  },
+  {
+    "type": "key_press",
+    "key": "Key.down",
+    "time": 2.1166
+  },
+  {
+    "type": "key_release",
+    "key": "Key.down",
+    "time": 2.2276
+  },
+  {
+    "type": "key_press",
+    "key": "Key.down",
+    "time": 2.3421
+  },
+  {
+    "type": "key_release",
+    "key": "Key.down",
+    "time": 2.4441
+  },
+  {
+    "type": "key_press",
+    "key": "f",
+    "time": 2.5323
+  },
+  {
+    "type": "key_release",
+    "key": "f",
+    "time": 2.6112
+  },
+  {
+    "type": "key_press",
+    "key": "Key.up",
+    "time": 4.0317
+  },
+  {
+    "type": "key_release",
+    "key": "Key.up",
+    "time": 4.1857
+  },
+  {
+    "type": "key_press",
+    "key": "Key.right",
+    "time": 4.3912
+  },
+  {
+    "type": "key_release",
+    "key": "Key.right",
+    "time": 4.5227
+  },
+  {
+    "type": "key_press",
+    "key": "Key.right",
+    "time": 4.6896
+  },
+  {
+    "type": "key_release",
+    "key": "Key.right",
+    "time": 4.7906
+  }
+]

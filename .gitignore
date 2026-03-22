@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller build output
+build/
+dist/
+*.spec
+
+# User-specific profiles (save paths, input sequences, settings)
+profiles/
+
+# Runtime output folders — keep the folder, ignore the contents
+save_backups/*
+!save_backups/.gitkeep
+batch_output/*
+!batch_output/.gitkeep
+
+# Environment / secret files
+.env
+.env.*
+*.env
+secrets.json
+config.local.json
+
+# Dev-only / local files — never publish
+CLAUDE.md
+*.bat
+assets/icon_preview.png
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

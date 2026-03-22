@@ -1,0 +1,12 @@
+[
+  {
+    "type": "key_press",
+    "key": "Key.f2",
+    "time": 0.9168
+  },
+  {
+    "type": "key_release",
+    "key": "Key.f2",
+    "time": 1.0507
+  }
+]

@@ -1,0 +1,2441 @@
+"""
+Main UI for the Elden Ring Nightreign Relic Bot.
+
+Two modes:
+  Live Mode  – runs continuously; pauses when a match is found and asks the
+               user to keep it or keep searching.
+  Batch Mode – runs for a fixed number of loops or a fixed duration; saves
+               every iteration's save file to its own folder, then writes a
+               README.txt summarising matches (with passives + screenshots).
+"""
+
+import concurrent.futures
+import ctypes
+import json
+import math
+import os
+import shutil
+import subprocess
+import threading
+import time
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+
+from pynput import keyboard as _kb
+
+from bot import input_controller, relic_analyzer, save_manager, screen_capture
+from ui import theme, relic_images
+from ui.relic_builder import RelicBuilderFrame
+
+
+_PROFILES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "profiles")
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+#  README GENERATOR (Batch Mode)
+# ─────────────────────────────────────────────────────────────────────────── #
+
+def generate_readme(
+    output_dir: str,
+    criteria: str,
+    run_mode: str,
+    run_limit,
+    results: list,
+    hit_min: int = 2,
+) -> None:
+    """Write README.txt into output_dir summarising a completed batch run."""
+    total = len(results)
+
+    def _tier(r):
+        n = len(r.get("matched_passives", []))
+        if n > 0:
+            return n
+        near = r.get("near_misses", [])
+        if near:
+            return max(nm.get("matching_passive_count", 0) for nm in near)
+        return 0
+
+    god_rolls = [r for r in results if _tier(r) >= 3]
+    hits      = [r for r in results if _tier(r) == 2]
+    near_miss = [r for r in results if _tier(r) == 1]
+    garbage   = [r for r in results if _tier(r) == 0]
+
+    def _find_relic_num(r, name):
+        """Return the 1-based position of `name` in relics_found, or None."""
+        for i, relic in enumerate(r.get("relics_found", []), 1):
+            if isinstance(relic, dict) and relic.get("name") == name:
+                return i
+        return None
+
+    def _hit_detail_block(r, indent="  "):
+        """Full detail block for a matched or near-miss relic.
+        Only marks passives with * when the matching count meets hit_min."""
+        out = []
+        matched_name = r.get("matched_relic")
+        matched_passives = set(r.get("matched_passives", []))
+        match_count = len(matched_passives)
+
+        # If no full match, use best near-miss
+        if not matched_name:
+            best = max(
+                r.get("near_misses", []),
+                key=lambda nm: nm.get("matching_passive_count", 0),
+                default=None,
+            )
+            if best:
+                matched_name = best.get("relic_name")
+                matched_passives = set(best.get("matching_passives", []))
+                match_count = best.get("matching_passive_count", len(matched_passives))
+
+        relic_num = _find_relic_num(r, matched_name)
+        num_str = f"Relic #{relic_num}" if relic_num else "Relic #?"
+        out.append(f"{indent}{num_str}: {matched_name or 'Unknown'}")
+
+        mark = match_count >= hit_min
+        for relic in r.get("relics_found", []):
+            if isinstance(relic, dict) and relic.get("name") == matched_name:
+                for p in relic.get("passives", []):
+                    marker = "* " if (mark and p in matched_passives) else "  "
+                    out.append(f"{indent}  {marker}{p}")
+                for c in relic.get("curses", []):
+                    out.append(f"{indent}  [CURSE] {c}")
+                break
+        return out
+
+    def _all_relics_block(r):
+        out = []
+        for relic in r.get("relics_found", []):
+            if isinstance(relic, dict):
+                out.append(f"  {relic.get('name', 'Unknown')}")
+                for p in relic.get("passives", []):
+                    out.append(f"    • {p}")
+        return out
+
+    lines = [
+        "ELDEN RING NIGHTREIGN – RELIC FARMING RESULTS",
+        "=" * 60,
+        f"Date        : {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Mode        : {run_mode} ({run_limit})",
+        f"Total runs  : {total}",
+        f"God Rolls   : {len(god_rolls)}",
+        f"Hits (2/3)  : {len(hits)}",
+        f"Near Miss   : {len(near_miss)}",
+        f"No Match    : {len(garbage)}",
+        "",
+        "CRITERIA",
+        "-" * 60,
+        criteria.strip(),
+        "",
+    ]
+
+    # ── HITS SUMMARY (most important — read this first) ───────────────── #
+    lines += ["=" * 60, "HITS SUMMARY  (open these save files)", "=" * 60, ""]
+    notable = god_rolls + hits
+    if notable:
+        for r in notable:
+            tier = "GOD ROLL" if _tier(r) >= 3 else "HIT"
+            lines.append(f"  [{tier}]  Batch: {r['folder']}  |  Iteration #{r['iteration']:03d}")
+            lines += _hit_detail_block(r, indent="    ")
+            for ss in r.get("screenshots", []):
+                lines.append(f"    Screenshot: {r['folder']}/{ss}")
+            lines.append("")
+    else:
+        lines += ["  No hits yet.", ""]
+
+    # ── DETAILED BREAKDOWN ────────────────────────────────────────────── #
+    lines += ["=" * 60, "DETAILED BREAKDOWN", "=" * 60, ""]
+
+    lines += ["", "★★★ GOD ROLL — ALL 3 PASSIVES MATCH ★★★", "-" * 60, ""]
+    if god_rolls:
+        for r in god_rolls:
+            lines.append(f"  Iteration #{r['iteration']:03d}  |  Folder: {r['folder']}")
+            lines += _hit_detail_block(r)
+            lines.append("")
+    else:
+        lines += ["  None.", ""]
+
+    lines += ["", "★★ HITS — 2 PASSIVES MATCH", "-" * 60, ""]
+    if hits:
+        for r in hits:
+            lines.append(f"  Iteration #{r['iteration']:03d}  |  Folder: {r['folder']}")
+            lines += _hit_detail_block(r)
+            lines.append("")
+    else:
+        lines += ["  None.", ""]
+
+    lines += ["", "NEAR MISS — 1 PASSIVE MATCH (save not flagged)", "-" * 60, ""]
+    if near_miss:
+        for r in near_miss:
+            lines.append(f"  Iteration #{r['iteration']:03d}  |  Folder: {r['folder']}")
+            lines += _hit_detail_block(r)
+            lines.append("")
+    else:
+        lines += ["  None.", ""]
+
+    lines += ["", "NO MATCH", "-" * 60, ""]
+    if garbage:
+        for r in garbage:
+            lines.append(f"  Iteration #{r['iteration']:03d}  |  Folder: {r['folder']}")
+            lines += _all_relics_block(r)
+            lines.append("")
+    else:
+        lines += ["  None.", ""]
+
+    readme_path = os.path.join(output_dir, "README.txt")
+    with open(readme_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def write_iter_info(iter_dir: str, iteration: int, relic_results: list, hit_min: int = 2) -> None:
+    """Write info.txt inside an iteration folder.
+    Uses per-relic results directly so the MATCH/NEAR MISS labels are always
+    accurate regardless of whether multiple relics share the same OCR name."""
+    lines = [f"Iteration #{iteration:03d}", "=" * 40, ""]
+    for relic_num, rr in enumerate(relic_results, 1):
+        relic = (rr.get("relics_found") or [{}])[0]
+        if not isinstance(relic, dict):
+            continue
+        name    = relic.get("name", "Unknown")
+        passives = relic.get("passives", [])
+        curses   = relic.get("curses", [])
+
+        is_match       = rr.get("match", False)
+        matched_ps     = set(rr.get("matched_passives", []))
+        nms            = rr.get("near_misses", [])
+        best_nm        = max(nms, key=lambda n: n.get("matching_passive_count", 0), default={})
+        best_nm_count  = best_nm.get("matching_passive_count", 0)
+        best_nm_ps     = set(best_nm.get("matching_passives", []))
+
+        if is_match and len(matched_ps) >= hit_min:
+            lines.append(f"* Relic #{relic_num}: {name}  <-- MATCH")
+            mark_ps, mark = matched_ps, True
+        elif best_nm_count >= hit_min:
+            lines.append(f"* Relic #{relic_num}: {name}  <-- NEAR MISS")
+            mark_ps, mark = best_nm_ps, True
+        else:
+            lines.append(f"  Relic #{relic_num}: {name}")
+            mark_ps, mark = set(), False
+
+        for p in passives:
+            marker = "  * " if (mark and p in mark_ps) else "    "
+            lines.append(f"{marker}{p}")
+        for c in curses:
+            lines.append(f"    [CURSE] {c}")
+        lines.append("")
+    with open(os.path.join(iter_dir, "info.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def generate_priority_summary(output_dir: str, results: list) -> None:
+    """
+    Write PRIORITY.txt at the run root.
+
+    Lists every save that has any value: perfect matches (match=true) and
+    near misses (relics with 2+ of the desired passives). Relics with only
+    1 matching passive are ignored — they are worth nothing.
+    Each save gets one plain summary line so the player can decide which
+    to open for manual review.
+    """
+    lines = [
+        "SAVE FILE SUMMARY – notable saves from this batch run",
+        "=" * 60,
+        "  Perfect match = relic fully satisfied your criteria",
+        "  Near miss     = relic had 2+ of your desired passives but not enough to be a full hit",
+        "  (Relics with only 1 matching passive are ignored)",
+        "=" * 60,
+        "",
+    ]
+
+    notable = []
+    for r in results:
+        perfect = 1 if r["match"] else 0
+        # Count near-miss relics: must have 2+ matching passives
+        near_miss_count = sum(
+            1 for nm in r.get("near_misses", [])
+            if nm.get("matching_passive_count", len(nm.get("matching_passives", []))) >= 2
+        )
+        if perfect or near_miss_count:
+            notable.append((r, perfect, near_miss_count))
+
+    if notable:
+        for r, perfect, near_miss_count in notable:
+            parts = []
+            if perfect:
+                parts.append(f"{perfect} perfect match")
+            if near_miss_count:
+                parts.append(f"{near_miss_count} near miss{'es' if near_miss_count != 1 else ''}")
+            summary = " and ".join(parts)
+            lines.append(f"  {r['folder']:<14}  –  {summary}")
+        lines.append("")
+        lines.append(f"  {len(notable)} save(s) worth reviewing out of {len(results)} total.")
+    else:
+        lines.append("  No saves with notable passives found in this run.")
+
+    skipped = len(results) - len(notable)
+    if skipped:
+        lines.append(f"  {skipped} save(s) had nothing matching your criteria — skip them.")
+
+    with open(os.path.join(output_dir, "PRIORITY.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+#  MAIN APPLICATION
+# ─────────────────────────────────────────────────────────────────────────── #
+
+class _Tooltip:
+    """Lightweight hover tooltip for tkinter widgets."""
+    def __init__(self, widget, text: str):
+        self._widget = widget
+        self._text = text
+        self._win = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _event=None):
+        if self._win:
+            return
+        x = self._widget.winfo_rootx() + 16
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+        self._win = tw = tk.Toplevel(self._widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            tw, text=self._text, background="#2a2a2a", foreground="#dddddd",
+            relief="solid", borderwidth=1, font=("Segoe UI", 8),
+            wraplength=280, justify="left", padx=6, pady=4,
+        ).pack()
+
+    def _hide(self, _event=None):
+        if self._win:
+            self._win.destroy()
+            self._win = None
+
+
+class RelicBotApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Elden Ring Nightreign – Relic Bot  |  Made by Pulgo")
+        self.resizable(True, True)
+
+        # App icon
+        _icon_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "assets", "icon.ico",
+        )
+        if os.path.exists(_icon_path):
+            self.iconbitmap(_icon_path)
+
+        # Input recording
+        self.recorder = input_controller.InputRecorder()
+        self.player = input_controller.InputPlayer()
+        # phase_events[0] = Setup, [1] = Buy Loop, [2] = Relic Rites nav, [3] = F2 sell loop, [4] = Review Step
+        self.phase_events: list = [[], [], [], [], []]
+        self._active_phase: int = 0
+        self._rec_blink = False
+
+        # Relic type — controls murk cost per relic for the Phase 3 count calculation
+        self.relic_type_var = tk.StringVar(value="night")   # "night" or "normal"
+
+        # Global hotkey (works even when the game window has focus)
+        self._hotkey_str = "Key.f9"       # pynput key string
+        self._hotkey_display = "F9"        # human-readable label
+        self._global_kb_listener = None    # persistent pynput Listener
+
+        # Pause/resume hotkey
+        self._pause_hotkey_str = "Key.f8"
+        self._pause_hotkey_display = "F8"
+        self._current_phase_hint = ""      # what the bot was doing when paused
+
+        # Bot state
+        self.bot_thread: threading.Thread | None = None
+        self.bot_running = False
+        self.attempt_count = 0
+        self._batch_log_path: str = ""   # set while a batch run is active
+
+        # Live-mode pause/resume after match found
+        self._decision_event = threading.Event()
+        self._decision: str = ""
+
+        # Pause event: set = running, clear = paused
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+
+        # Backup/startup ready event
+        self._ready_event = threading.Event()
+
+        theme.apply(self)
+        self._build_ui()
+        self._start_global_hotkey_listener()
+        self.protocol("WM_DELETE_WINDOW", self._on_app_close)
+
+        os.makedirs(_PROFILES_DIR, exist_ok=True)
+        self._refresh_profile_list()
+
+    # ------------------------------------------------------------------ #
+    #  UI CONSTRUCTION
+    # ------------------------------------------------------------------ #
+
+    def _build_ui(self):
+        pad = {"padx": 8, "pady": 4}
+
+        # Scrollable canvas so the window can be smaller than its content
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        _canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0, bg=theme.BG)
+        _vsb = ttk.Scrollbar(self, orient="vertical", command=_canvas.yview)
+        _canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.grid(row=0, column=1, sticky="ns")
+        _canvas.grid(row=0, column=0, sticky="nsew")
+
+        # Inner frame lives inside the canvas
+        inner = ttk.Frame(_canvas)
+        _canvas_window = _canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_frame_configure(event):
+            _canvas.configure(scrollregion=_canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            _canvas.itemconfig(_canvas_window, width=event.width)
+
+        inner.bind("<Configure>", _on_frame_configure)
+        _canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse-wheel scrolling — yscrollincrement=20 means each "unit" = 20px;
+        # delta/120 per notch * 3 units = 60px per scroll notch.
+        _canvas.configure(yscrollincrement=20)
+        def _on_mousewheel(event):
+            _canvas.yview_scroll(int(-1 * (event.delta / 120)) * 3, "units")
+        _canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # All widgets go into `inner` instead of `self`
+        self._inner = inner
+
+        # ── Profile ─────────────────────────────────────────────────── #
+        profile_frame = ttk.LabelFrame(inner, text="Profile")
+        profile_frame.grid(row=0, column=0, sticky="ew", **pad)
+
+        ttk.Label(profile_frame, text="Profile:").grid(row=0, column=0, sticky="w", **pad)
+        self._profile_var = tk.StringVar()
+        self._profile_cb = ttk.Combobox(
+            profile_frame, textvariable=self._profile_var, state="readonly", width=30
+        )
+        self._profile_cb.grid(row=0, column=1, **pad)
+        ttk.Button(profile_frame, text="Load", command=self._load_profile).grid(row=0, column=2, **pad)
+        ttk.Button(profile_frame, text="Save", command=self._save_profile).grid(row=0, column=3, **pad)
+        ttk.Button(profile_frame, text="Save As…", command=self._save_profile_as).grid(row=0, column=4, **pad)
+        ttk.Button(profile_frame, text="Delete", command=self._delete_profile).grid(row=0, column=5, **pad)
+        ttk.Button(profile_frame, text="Restore Defaults", command=self._reset_to_defaults).grid(row=0, column=6, **pad)
+
+        # ── Mode Selection ──────────────────────────────────────────── #
+        mode_frame = ttk.LabelFrame(inner, text="Mode")
+        mode_frame.grid(row=1, column=0, sticky="ew", **pad)
+
+        self.mode_var = tk.StringVar(value="batch")
+        ttk.Radiobutton(
+            mode_frame, text="Live Mode  (find → ask → keep or continue)",
+            variable=self.mode_var, value="live", command=self._on_mode_change,
+        ).grid(row=0, column=0, sticky="w", **pad)
+        ttk.Radiobutton(
+            mode_frame, text="Batch Mode  (run many iterations, review results later)",
+            variable=self.mode_var, value="batch", command=self._on_mode_change,
+        ).grid(row=1, column=0, sticky="w", **pad)
+
+        # ── Save File & Game Configuration ──────────────────────────── #
+        save_frame = ttk.LabelFrame(inner, text="Save File & Game Configuration")
+        save_frame.grid(row=2, column=0, sticky="ew", **pad)
+
+        ttk.Label(save_frame, text="Save file:").grid(row=0, column=0, sticky="w", **pad)
+        self.save_path_var = tk.StringVar()
+        ttk.Entry(save_frame, textvariable=self.save_path_var, width=52).grid(row=0, column=1, **pad)
+        ttk.Button(save_frame, text="Browse", command=self._browse_save).grid(row=0, column=2, **pad)
+
+        ttk.Label(save_frame, text="Backup folder:").grid(row=1, column=0, sticky="w", **pad)
+        self.backup_path_var = tk.StringVar()
+        ttk.Entry(save_frame, textvariable=self.backup_path_var, width=52).grid(row=1, column=1, **pad)
+        ttk.Button(save_frame, text="Browse", command=self._browse_backup).grid(row=1, column=2, **pad)
+
+        ttk.Label(save_frame, text="Game executable:").grid(row=2, column=0, sticky="w", **pad)
+        self.game_exe_var = tk.StringVar()
+        ttk.Entry(save_frame, textvariable=self.game_exe_var, width=52).grid(row=2, column=1, **pad)
+        ttk.Button(save_frame, text="Browse", command=self._browse_game_exe).grid(row=2, column=2, **pad)
+
+        ttk.Label(save_frame, text="Game load wait (s):").grid(row=3, column=0, sticky="w", **pad)
+        self.game_load_wait_var = tk.StringVar(value="30")
+        _glw_entry = ttk.Entry(save_frame, textvariable=self.game_load_wait_var, width=7)
+        _glw_entry.grid(row=3, column=1, sticky="w", **pad)
+        _Tooltip(_glw_entry, "Seconds to wait after launch before sending inputs.\nAdjust in small increments based on your PC speed — lower if the game loads fast, higher if inputs arrive too early.")
+
+        ttk.Label(save_frame, text="Confirm key:").grid(row=4, column=0, sticky="w", **pad)
+        self.confirm_key_var = tk.StringVar(value="f")
+        _ck_entry = ttk.Entry(save_frame, textvariable=self.confirm_key_var, width=5)
+        _ck_entry.grid(row=4, column=1, sticky="w", **pad)
+        _Tooltip(_ck_entry, "The key used to confirm/interact in-game.\nSpammed automatically during the load wait to skip title screens and navigate menus.")
+
+        # ── Sequence Phases ──────────────────────────────────────────── #
+        seq_frame = ttk.LabelFrame(inner, text="Sequence Phases")
+        seq_frame.grid(row=3, column=0, sticky="ew", **pad)
+
+        # Relic type selector — determines murk cost per relic and auto-loads Phase 0
+        rtype_frame = ttk.Frame(seq_frame)
+        rtype_frame.grid(row=0, column=0, sticky="w", **pad)
+        ttk.Label(rtype_frame, text="Relic type:").pack(side="left", padx=(0, 6))
+        ttk.Radiobutton(rtype_frame, text="Deep of Night  (1800 murk each)",
+                        variable=self.relic_type_var, value="night",
+                        command=self._on_relic_type_change).pack(side="left", padx=4)
+        ttk.Radiobutton(rtype_frame, text="Normal  (600 murk each)",
+                        variable=self.relic_type_var, value="normal",
+                        command=self._on_relic_type_change).pack(side="left", padx=4)
+        _Tooltip(rtype_frame, "Deep of Night relics cost 1800 murk each and have stronger passives.\nNormal relics cost 600 murk each. This also auto-loads the correct Setup sequence.")
+
+        # Per-phase status labels (event counts)
+        self.phase_stop_text_vars = [None, tk.StringVar(value="Insufficient murk"),
+                                     None, None, None]
+        self.phase_max_vars   = [None, tk.StringVar(value="50"),
+                                 None, None, tk.StringVar(value="30")]
+        self.phase_settle_vars = [None, tk.StringVar(value="0"),
+                                  None, None, tk.StringVar(value="0.45")]
+        self.phase_count_vars = [tk.StringVar(value="0 events")
+                                 for _ in self._PHASE_NAMES]
+
+        status_row = ttk.Frame(seq_frame)
+        status_row.grid(row=1, column=0, sticky="w", **pad)
+        for i, name in enumerate(self._PHASE_NAMES):
+            ttk.Label(status_row, text=f"{name}:", foreground=theme.TEXT_MUTED).pack(
+                side="left", padx=(12 if i else 0, 2))
+            ttk.Label(status_row, textvariable=self.phase_count_vars[i]).pack(side="left", padx=(0, 8))
+
+        self._manual_setup_expanded = False
+        self._manual_toggle_btn = ttk.Button(
+            seq_frame, text="Manual Key Recording ▼",
+            command=self._toggle_manual_setup)
+        self._manual_toggle_btn.grid(row=2, column=0, sticky="w", **pad)
+
+        # Collapsible recording frame (hidden by default)
+        self._manual_setup_frame = ttk.Frame(seq_frame)
+        self._build_manual_setup_frame()
+
+        # ── Relic Criteria (builder with Free Text / Exact / Pool tabs) ─ #
+        self.relic_builder = RelicBuilderFrame(inner)
+        self.relic_builder.grid(row=4, column=0, sticky="ew", **pad)
+
+        # ── Relic Color Filter ───────────────────────────────────────── #
+        color_frame = ttk.LabelFrame(inner, text="Relic Color Filter  (only relics of selected colors count as matches)")
+        color_frame.grid(row=5, column=0, sticky="ew", **pad)
+
+        ttk.Label(
+            color_frame,
+            text="Select which relic colors you are hunting for. At least one color must be enabled.",
+            foreground=theme.TEXT_MUTED, wraplength=700,
+        ).pack(anchor="w", padx=6, pady=(4, 2))
+
+        # Game mode toggle — switches gem image variant (Normal vs Deep of Night)
+        mode_row = ttk.Frame(color_frame)
+        mode_row.pack(anchor="w", padx=6, pady=(0, 4))
+        ttk.Label(mode_row, text="Relic Mode:").pack(side="left")
+        self._gem_mode_var = tk.StringVar(value="normal")
+        ttk.Radiobutton(
+            mode_row, text="Normal", variable=self._gem_mode_var, value="normal",
+            command=self._on_gem_mode_change,
+        ).pack(side="left", padx=(6, 2))
+        ttk.Radiobutton(
+            mode_row, text="Deep of Night", variable=self._gem_mode_var, value="don",
+            command=self._on_gem_mode_change,
+        ).pack(side="left", padx=2)
+        _Tooltip(mode_row,
+                 "Deep of Night relics have a darker colour variant.\n"
+                 "Switch here so the images match the mode you're farming.")
+
+        RELIC_COLORS = ["Red", "Blue", "Green", "Yellow"]
+        color_row = ttk.Frame(color_frame)
+        color_row.pack(fill="x", padx=6, pady=(0, 6))
+        self._color_vars:     dict[str, tk.BooleanVar] = {}
+        self._gem_img_labels: dict[str, tk.Label]      = {}
+
+        for color in RELIC_COLORS:
+            var = tk.BooleanVar(value=True)
+            self._color_vars[color] = var
+
+            cell = ttk.Frame(color_row)
+            cell.pack(side="left", padx=10)
+
+            img_lbl = tk.Label(cell, bg=theme.SURFACE, cursor="hand2")
+            img_lbl.pack()
+            img_lbl.bind("<Button-1>", lambda _e, c=color: self._toggle_color(c))
+            self._gem_img_labels[color] = img_lbl
+
+            ttk.Checkbutton(cell, text=color, variable=var,
+                            command=self._on_color_change).pack()
+
+        _Tooltip(color_row, "Relics are identified by a keyword in their name:\nRed = Burning, Blue = Drizzly, Green = Tranquil, Yellow = Luminous.\nDeselect colors you don't want — only matching colors will count as hits.")
+
+        self._color_warn = ttk.Label(color_frame, text="", foreground="#ff6666")
+        self._color_warn.pack(anchor="w", padx=6)
+
+        # Populate gem images after widget hierarchy is ready
+        self.after(0, self._refresh_gem_images)
+
+        # ── Curse Filter ─────────────────────────────────────────────── #
+        curse_frame = ttk.LabelFrame(inner, text="Curse Filter  (relics with these curses are rejected)")
+        curse_frame.grid(row=6, column=0, sticky="ew", **pad)
+
+        ttk.Label(
+            curse_frame,
+            text="Select curses to block. Relics that have any blocked curse will not count as matches. Leave empty to allow all.",
+            foreground=theme.TEXT_MUTED, wraplength=700, justify="left",
+        ).pack(anchor="w", padx=6, pady=(4, 2))
+
+        curse_content = ttk.Frame(curse_frame)
+        curse_content.pack(fill="both", expand=False, padx=6, pady=(0, 6))
+        curse_content.columnconfigure(0, weight=3)
+        curse_content.columnconfigure(2, weight=2)
+
+        # Left: searchable all-passives list
+        curse_left = ttk.LabelFrame(curse_content, text="All Passives / Curses")
+        curse_left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+
+        from bot.passives import ALL_PASSIVES_SORTED as _ALL_P
+        self._curse_search_var = tk.StringVar()
+        self._curse_search_var.trace_add("write", self._curse_filter_list)
+        _curse_entry = ttk.Entry(curse_left, textvariable=self._curse_search_var)
+        _curse_entry.pack(fill="x", padx=4, pady=(4, 2))
+        _Tooltip(_curse_entry, "Search and select passives to block. Relics with any blocked curse are rejected regardless of passive match.")
+
+        curse_src_body = ttk.Frame(curse_left)
+        curse_src_body.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self._curse_src_lb = tk.Listbox(curse_src_body, height=5, selectmode="browse",
+                                         exportselection=False, activestyle="none")
+        from ui.theme import style_listbox as _sl
+        _sl(self._curse_src_lb)
+        cs_sb = ttk.Scrollbar(curse_src_body, orient="vertical", command=self._curse_src_lb.yview)
+        self._curse_src_lb.configure(yscrollcommand=cs_sb.set)
+        self._curse_src_lb.pack(side="left", fill="both", expand=True)
+        cs_sb.pack(side="right", fill="y")
+        self._curse_all_passives = _ALL_P
+        for p in self._curse_all_passives:
+            self._curse_src_lb.insert("end", p)
+
+        # Centre: buttons
+        curse_mid = ttk.Frame(curse_content)
+        curse_mid.grid(row=0, column=1, padx=6)
+        ttk.Button(curse_mid, text="Block →",   command=self._curse_add,    width=10).pack(pady=4)
+        ttk.Button(curse_mid, text="← Remove",  command=self._curse_remove, width=10).pack(pady=4)
+        ttk.Button(curse_mid, text="Clear All",  command=self._curse_clear,  width=10).pack(pady=8)
+
+        # Right: blocked curses list
+        curse_right = ttk.LabelFrame(curse_content, text="Blocked Curses")
+        curse_right.grid(row=0, column=2, sticky="nsew")
+        curse_body = ttk.Frame(curse_right)
+        curse_body.pack(fill="both", expand=True, padx=4, pady=4)
+        self._blocked_curses_lb = tk.Listbox(curse_body, height=5, selectmode="browse",
+                                              exportselection=False, activestyle="none")
+        _sl(self._blocked_curses_lb)
+        cb_sb = ttk.Scrollbar(curse_body, orient="vertical", command=self._blocked_curses_lb.yview)
+        self._blocked_curses_lb.configure(yscrollcommand=cb_sb.set)
+        self._blocked_curses_lb.pack(side="left", fill="both", expand=True)
+        cb_sb.pack(side="right", fill="y")
+        self._blocked_curses_list: list[str] = []
+
+        # ── Live Mode Settings ──────────────────────────────────────── #
+        self.live_frame = ttk.LabelFrame(inner, text="Live Mode Settings")
+        ttk.Label(self.live_frame, text="Analysis delay (s):").grid(row=0, column=0, sticky="w", **pad)
+        self.live_delay_var = tk.StringVar(value="3.0")
+        ttk.Entry(self.live_frame, textvariable=self.live_delay_var, width=7).grid(row=0, column=1, **pad)
+
+        # ── Batch Mode Settings ─────────────────────────────────────── #
+        self.batch_frame = ttk.LabelFrame(inner, text="Batch Mode Settings")
+        # not gridded until mode switches
+
+        ttk.Label(self.batch_frame, text="Run for:").grid(row=0, column=0, sticky="w", **pad)
+        self.batch_limit_type = tk.StringVar(value="loops")
+        ttk.Radiobutton(self.batch_frame, text="Loops (max 1000)", variable=self.batch_limit_type,
+                        value="loops").grid(row=0, column=1, **pad)
+        ttk.Radiobutton(self.batch_frame, text="Hours (max 24)", variable=self.batch_limit_type,
+                        value="hours").grid(row=0, column=2, **pad)
+        self.batch_limit_var = tk.StringVar(value="20")
+        ttk.Entry(self.batch_frame, textvariable=self.batch_limit_var, width=7).grid(row=0, column=3, **pad)
+
+        ttk.Label(self.batch_frame, text="Analysis delay (s):").grid(row=1, column=0, sticky="w", **pad)
+        self.batch_delay_var = tk.StringVar(value="3.0")
+        _bd_entry = ttk.Entry(self.batch_frame, textvariable=self.batch_delay_var, width=7)
+        _bd_entry.grid(row=1, column=1, **pad)
+        _Tooltip(_bd_entry, "Wait time after inputs before taking the relic screenshot.\nIncrease if relics haven't fully loaded when captured.")
+
+        ttk.Label(self.batch_frame, text="Output folder:").grid(row=2, column=0, sticky="w", **pad)
+        self.batch_output_var = tk.StringVar()
+        ttk.Entry(self.batch_frame, textvariable=self.batch_output_var, width=52).grid(row=2, column=1,
+                                                                                        columnspan=3, **pad)
+        ttk.Button(self.batch_frame, text="Browse", command=self._browse_batch_output).grid(row=2, column=4, **pad)
+
+        # ── Bot Control ─────────────────────────────────────────────── #
+        ctrl_frame = ttk.LabelFrame(inner, text="Bot Control")
+        ctrl_frame.grid(row=8, column=0, sticky="ew", **pad)
+
+        self.start_btn = ttk.Button(ctrl_frame, text="▶ START", command=self._start_bot,
+                                    style="Start.TButton")
+        self.start_btn.grid(row=0, column=0, padx=12, pady=6)
+        self.stop_btn = ttk.Button(ctrl_frame, text="■ STOP", command=self._stop_bot,
+                                   state="disabled", style="Stop.TButton")
+        self.stop_btn.grid(row=0, column=1, padx=12, pady=6)
+
+        self.pause_btn = ttk.Button(ctrl_frame, text=f"⏸ PAUSE  [{self._pause_hotkey_display}]",
+                                    command=self._toggle_pause, state="disabled")
+        self.pause_btn.grid(row=0, column=2, padx=8, pady=6)
+
+        self.status_var = tk.StringVar(value="Status: Idle")
+        self.status_label = ttk.Label(ctrl_frame, textvariable=self.status_var,
+                                      foreground=theme.TEXT_MUTED)
+        self.status_label.grid(row=0, column=3, padx=16)
+
+        self.attempt_var = tk.StringVar(value="Attempts: 0")
+        ttk.Label(ctrl_frame, textvariable=self.attempt_var).grid(row=0, column=4, **pad)
+
+        # Screen capture indicator
+        self.capture_lbl = ttk.Label(ctrl_frame, text="📷", foreground=theme.TEXT_MUTED)
+        self.capture_lbl.grid(row=0, column=5, padx=8)
+
+        # ── Log ─────────────────────────────────────────────────────── #
+        log_frame = ttk.LabelFrame(inner, text="Log")
+        log_frame.grid(row=9, column=0, sticky="ew", **pad)
+        self.log_box = scrolledtext.ScrolledText(
+            log_frame, height=10, width=82, state="disabled", wrap="word"
+        )
+        theme.style_text(self.log_box)
+        self.log_box.grid(row=0, column=0, **pad)
+
+        # ── Credit ──────────────────────────────────────────────────── #
+        ttk.Label(inner, text="Made by Pulgo",
+                  foreground=theme.TEXT_MUTED,
+                  font=("Segoe UI", 8)).grid(
+            row=10, column=0, sticky="e", padx=12, pady=(0, 4)
+        )
+
+        # Auto-load standard sequences after UI is built
+        self.after(100, self._auto_load_sequences)
+        # Apply initial mode (batch by default)
+        self._on_mode_change()
+
+    # ------------------------------------------------------------------ #
+    #  MODE SWITCHING
+    # ------------------------------------------------------------------ #
+
+    def _on_mode_change(self):
+        if self.mode_var.get() == "live":
+            self.batch_frame.grid_remove()
+            self.live_frame.grid(row=7, column=0, sticky="ew", padx=8, pady=4)
+        else:
+            self.live_frame.grid_remove()
+            self.batch_frame.grid(row=7, column=0, sticky="ew", padx=8, pady=4)
+
+    # ------------------------------------------------------------------ #
+    #  MANUAL SETUP WINDOW
+    # ------------------------------------------------------------------ #
+
+    def _build_manual_setup_frame(self):
+        """Build recording UI inside the collapsible frame."""
+        frame = self._manual_setup_frame
+        pad = {"padx": 8, "pady": 4}
+
+        # F9 recording hotkey enable toggle
+        self._recording_enabled_var = tk.BooleanVar(value=False)
+        hk_row = ttk.Frame(frame)
+        hk_row.pack(fill="x", padx=4, pady=(6, 2))
+        hk_cb = ttk.Checkbutton(hk_row, text="Enable recording hotkey (F9)",
+                                 variable=self._recording_enabled_var)
+        hk_cb.pack(side="left")
+        _Tooltip(hk_cb, "When enabled, F9 starts/stops recording while this panel is open.\nDisabled by default to prevent accidental recordings during normal use.")
+
+        # Stop recording + status + hotkey buttons
+        hdr = ttk.Frame(frame)
+        hdr.pack(fill="x", **pad)
+        self.stop_rec_btn = ttk.Button(hdr, text="⏹ Stop Recording",
+                                       command=self._stop_recording, state="disabled")
+        self.stop_rec_btn.pack(side="left", padx=4)
+        self.rec_status_var = tk.StringVar(value="")
+        ttk.Label(hdr, textvariable=self.rec_status_var,
+                  foreground="#ff6666", font=("Segoe UI", 9, "bold")).pack(side="left", padx=4)
+        self._hotkey_btn = ttk.Button(hdr, text=f"Rec Hotkey: {self._hotkey_display}",
+                                      command=self._set_hotkey_dialog, width=18)
+        self._hotkey_btn.pack(side="left", padx=(12, 0))
+        self._pause_hotkey_btn = ttk.Button(hdr, text=f"Pause Hotkey: {self._pause_hotkey_display}",
+                                            command=self._set_pause_hotkey_dialog, width=20)
+        self._pause_hotkey_btn.pack(side="left", padx=(8, 0))
+
+        # Phase notebook
+        nb = ttk.Notebook(frame)
+        nb.pack(fill="both", expand=True, **pad)
+        self._phase_notebook = nb
+
+        _phase_labels = [
+            (
+                "Setup",
+                "Plays once — navigates from Roundtable Hold to the Relic Rites buy menu.",
+                (
+                    "Phase 0 — Setup\n"
+                    "Navigates from Roundtable Hold to the Relic Rites merchant buy screen.\n\n"
+                    "Default sequence assumes:\n"
+                    "  • You own the DLC (Nightreign)\n"
+                    "  • All shops in Roundtable Hold are unlocked\n"
+                    "  • Your character is Duchess\n\n"
+                    "⚠  If you don't have the DLC or not all shops are unlocked,\n"
+                    "    RE-RECORD this phase to match your own menu layout."
+                ),
+                False,
+            ),
+            (
+                "Buy Loop",
+                "Repeats — buys one relic. Stops on 'Insufficient murk' popup.",
+                (
+                    "Phase 1 — Buy Loop\n"
+                    "Presses confirm to purchase relics one by one.\n"
+                    "Stops automatically when the game shows the 'Insufficient murk' message.\n\n"
+                    "Works for all setups — no re-recording needed."
+                ),
+                True,
+            ),
+            (
+                "Relic Rites Nav",
+                "Plays once — opens the Relic Rites review screen (Esc → Map → down → F).",
+                (
+                    "Phase 2 — Relic Rites Nav\n"
+                    "After buying, opens the Relic Rites review screen via the pause menu.\n"
+                    "Sequence: Esc → Map tab → scroll down to Relic Rites → F to confirm.\n\n"
+                    "⚠  If you don't have all shops unlocked, the menu layout may differ.\n"
+                    "    RE-RECORD this phase if navigation fails to land on the sell screen."
+                ),
+                False,
+            ),
+            (
+                "Navigate to Sell",
+                "Repeats F2 until OCR confirms the Sell tab is open — universal across setups.",
+                (
+                    "Phase 3 — Navigate to Sell\n"
+                    "Presses F2 repeatedly until OCR detects that the Sell tab is active.\n"
+                    "Fully OCR-driven — adapts automatically to how long the menu takes to open.\n\n"
+                    "Works for all setups — no re-recording needed."
+                ),
+                False,
+            ),
+            (
+                "Review Step",
+                "Repeats — advances to the next relic. Stops after reviewing all purchased relics.",
+                (
+                    "Phase 4 — Review Step\n"
+                    "Presses the right arrow to move from one relic to the next.\n"
+                    "Stops automatically after reviewing all relics (count = murk spent ÷ relic cost).\n\n"
+                    "Works for all setups — no re-recording needed."
+                ),
+                True,
+            ),
+        ]
+        self.phase_rec_btns = []
+
+        for phase_idx, (tab_title, hint_text, tooltip_text, has_stop) in enumerate(_phase_labels):
+            tab = ttk.Frame(nb)
+            nb.add(tab, text=tab_title)
+
+            hint_lbl = ttk.Label(tab, text=hint_text, foreground=theme.TEXT_MUTED)
+            hint_lbl.grid(row=0, column=0, columnspan=5, sticky="w", padx=6, pady=2)
+            _Tooltip(hint_lbl, tooltip_text)
+
+            rec_btn = ttk.Button(tab, text="⏺ Record",
+                                 command=lambda p=phase_idx: self._start_recording(p))
+            rec_btn.grid(row=1, column=0, **pad)
+            self.phase_rec_btns.append(rec_btn)
+
+            ttk.Button(tab, text="▶ Test",
+                       command=lambda p=phase_idx: self._test_play(p)).grid(row=1, column=1, **pad)
+            ttk.Button(tab, text="Load",
+                       command=lambda p=phase_idx: self._load_sequence(p)).grid(row=1, column=2, **pad)
+            ttk.Button(tab, text="Save",
+                       command=lambda p=phase_idx: self._save_sequence(p)).grid(row=1, column=3, **pad)
+            ttk.Label(tab, textvariable=self.phase_count_vars[phase_idx]).grid(row=1, column=4, **pad)
+
+            if has_stop:
+                ttk.Label(tab, text="Settle (s):").grid(row=2, column=0, sticky="w", **pad)
+                ttk.Entry(tab, textvariable=self.phase_settle_vars[phase_idx],
+                          width=6).grid(row=2, column=1, **pad)
+
+    def _toggle_manual_setup(self):
+        if self._manual_setup_expanded:
+            self._manual_setup_frame.grid_remove()
+            self._manual_setup_expanded = False
+            self._manual_toggle_btn.config(text="Manual Key Recording ▼")
+        else:
+            self._manual_setup_frame.grid(row=3, column=0, sticky="ew", padx=8, pady=2)
+            self._manual_setup_expanded = True
+            self._manual_toggle_btn.config(text="Manual Key Recording ▲")
+
+    # ------------------------------------------------------------------ #
+    #  SEQUENCE AUTO-LOAD
+    # ------------------------------------------------------------------ #
+
+    _SEQ_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sequences")
+
+    def _auto_load_sequences(self):
+        """Load all standard sequence files on startup."""
+        rtype = self.relic_type_var.get()
+        phase0_file = ("phase0_navigate_to_relic_buy_screen.json"
+                       if rtype == "night" else "phase0_normal.json")
+        files = [
+            phase0_file,
+            "phase1_buy_one_batch_of_10_relics.json",
+            "phase3_review_setup.json",             # Phase 2: navigate to Relic Rites (Esc+M+down+F)
+            "phase2_navigate_to_sell.json",         # Phase 3: F2 loop until sell page
+            "phase4_review_step.json",              # Phase 4: right arrow through relics
+        ]
+        for i, fname in enumerate(files):
+            path = os.path.join(self._SEQ_DIR, fname)
+            if os.path.exists(path):
+                try:
+                    self.recorder.load(path)
+                    self.phase_events[i] = list(self.recorder.events)
+                    n = len(self.phase_events[i])
+                    self.phase_count_vars[i].set(f"{n} events")
+                    self._log(f"Auto-loaded Phase {i} ({self._PHASE_NAMES[i]}): {n} events from {fname}")
+                except Exception as e:
+                    self._log(f"WARNING: Failed to auto-load Phase {i} ({fname}): {e}")
+            else:
+                self._log(f"WARNING: Sequence file not found for Phase {i}: {path}")
+
+    def _on_relic_type_change(self):
+        """Swap Phase 0 sequence when the user switches relic type."""
+        rtype = self.relic_type_var.get()
+        fname = ("phase0_navigate_to_relic_buy_screen.json"
+                 if rtype == "night" else "phase0_normal.json")
+        path = os.path.join(self._SEQ_DIR, fname)
+        if os.path.exists(path):
+            try:
+                self.recorder.load(path)
+                self.phase_events[0] = list(self.recorder.events)
+                n = len(self.phase_events[0])
+                self.phase_count_vars[0].set(f"{n} events")
+                self._log(f"Phase 0 (Setup) swapped to {rtype} sequence ({n} events).")
+            except Exception as e:
+                self._log(f"WARNING: Could not load Phase 0 for '{rtype}': {e}")
+
+    # ------------------------------------------------------------------ #
+    #  SAVE FILE HELPERS
+    # ------------------------------------------------------------------ #
+
+    def _browse_save(self):
+        path = filedialog.askopenfilename(title="Select save file")
+        if path:
+            self.save_path_var.set(path)
+
+    def _browse_backup(self):
+        path = filedialog.askdirectory(title="Choose backup folder")
+        if path:
+            self.backup_path_var.set(path)
+
+    def _browse_batch_output(self):
+        path = filedialog.askdirectory(title="Choose batch output folder")
+        if path:
+            self.batch_output_var.set(path)
+
+    def _browse_game_exe(self):
+        path = filedialog.askopenfilename(
+            title="Select game executable",
+            filetypes=[("Executable", "*.exe"), ("All", "*.*")]
+        )
+        if path:
+            self.game_exe_var.set(path)
+
+    # ------------------------------------------------------------------ #
+    #  PROFILE MANAGEMENT
+    # ------------------------------------------------------------------ #
+
+    def _profile_path(self, name: str) -> str:
+        safe = "".join(c for c in name if c.isalnum() or c in " _-").strip()
+        return os.path.join(_PROFILES_DIR, f"{safe}.json")
+
+    def _refresh_profile_list(self):
+        try:
+            names = [os.path.splitext(f)[0] for f in sorted(os.listdir(_PROFILES_DIR)) if f.endswith(".json")]
+        except FileNotFoundError:
+            names = []
+        self._profile_cb["values"] = names
+
+    def _profile_to_dict(self) -> dict:
+        return {
+            "save_path": self.save_path_var.get(),
+            "backup_folder": self.backup_path_var.get(),
+            "game_executable": self.game_exe_var.get(),
+            "game_load_wait": self.game_load_wait_var.get(),
+            "confirm_key": self.confirm_key_var.get(),
+            "mode": self.mode_var.get(),
+            "live_delay": self.live_delay_var.get(),
+            "batch_limit_type": self.batch_limit_type.get(),
+            "batch_limit": self.batch_limit_var.get(),
+            "batch_delay": self.batch_delay_var.get(),
+            "batch_output": self.batch_output_var.get(),
+            "phase_events": self.phase_events,
+            "phase1_stop_text": self.phase_stop_text_vars[1].get(),
+            "phase1_max_loops": self.phase_max_vars[1].get(),
+            "phase1_settle": self.phase_settle_vars[1].get(),
+            "phase4_settle": self.phase_settle_vars[4].get(),
+            "relic_type": self.relic_type_var.get(),
+            "hotkey_str": self._hotkey_str,
+            "hotkey_display": self._hotkey_display,
+            "blocked_curses": list(self._blocked_curses_list),
+            "allowed_colors": self._get_allowed_colors(),
+            "gem_mode": self._gem_mode_var.get(),
+            "criteria": self.relic_builder.get_state(),
+        }
+
+    def _dict_to_profile(self, data: dict):
+        self.save_path_var.set(data.get("save_path", ""))
+        self.backup_path_var.set(data.get("backup_folder", ""))
+        self.game_exe_var.set(data.get("game_executable", ""))
+        self.game_load_wait_var.set(str(data.get("game_load_wait", "30")))
+        self.confirm_key_var.set(data.get("confirm_key", "e"))
+        self.mode_var.set(data.get("mode", "live"))
+        self._on_mode_change()
+        self.live_delay_var.set(str(data.get("live_delay", "3.0")))
+        self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
+        self.batch_limit_var.set(str(data.get("batch_limit", "20")))
+        self.batch_delay_var.set(str(data.get("batch_delay", "3.0")))
+        self.batch_output_var.set(data.get("batch_output", ""))
+        # Load phase events (support old single-sequence profiles via "input_sequence")
+        if "phase_events" in data:
+            loaded = data["phase_events"]
+            for i in range(5):
+                self.phase_events[i] = loaded[i] if i < len(loaded) else []
+        else:
+            # Legacy: treat old recorded sequence as Phase 0 (Setup)
+            self.phase_events = [data.get("input_sequence", []), [], [], [], []]
+        for i, var in enumerate(self.phase_count_vars):
+            var.set(f"{len(self.phase_events[i])} events")
+        self.phase_stop_text_vars[1].set(data.get("phase1_stop_text", "Insufficient murk"))
+        self.phase_max_vars[1].set(str(data.get("phase1_max_loops", "50")))
+        self.phase_settle_vars[1].set(str(data.get("phase1_settle", "0.5")))
+        self.phase_settle_vars[4].set(str(data.get("phase4_settle", data.get("phase3_settle", "0.5"))))
+        self.relic_type_var.set(data.get("relic_type", "night"))
+        if "hotkey_str" in data:
+            self._hotkey_str = data["hotkey_str"]
+            self._hotkey_display = data.get("hotkey_display", self._hotkey_str.replace("Key.", "").upper())
+            self._hotkey_btn.config(text=f"Rec Hotkey: {self._hotkey_display}")
+            self._start_global_hotkey_listener()
+        if "blocked_curses" in data:
+            self._curse_clear()
+            saved = data["blocked_curses"]
+            # Support old format (newline-separated string) and new (list)
+            if isinstance(saved, str):
+                items = [s.strip() for s in saved.splitlines() if s.strip()]
+            else:
+                items = list(saved)
+            for item in items:
+                self._blocked_curses_list.append(item)
+                self._blocked_curses_lb.insert("end", item)
+        if "allowed_colors" in data:
+            saved = data["allowed_colors"]
+            for color, var in self._color_vars.items():
+                var.set(color in saved)
+        if "gem_mode" in data:
+            self._gem_mode_var.set(data["gem_mode"])
+            self._refresh_gem_images()
+        if "criteria" in data:
+            self.relic_builder.set_state(data["criteria"])
+
+    def _load_profile(self):
+        name = self._profile_var.get().strip()
+        if not name:
+            messagebox.showwarning("No Profile Selected", "Select a profile from the list first.")
+            return
+        try:
+            with open(self._profile_path(name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._dict_to_profile(data)
+            self._log(f"Profile '{name}' loaded.")
+        except Exception as e:
+            messagebox.showerror("Load Error", str(e))
+
+    def _save_profile(self):
+        name = self._profile_var.get().strip()
+        if not name:
+            self._save_profile_as()
+            return
+        self._write_profile(name)
+
+    def _save_profile_as(self):
+        path = filedialog.asksaveasfilename(
+            title="Save Profile As",
+            initialdir=_PROFILES_DIR,
+            defaultextension=".json",
+            filetypes=[("Profile", "*.json"), ("All", "*.*")],
+        )
+        if not path:
+            return
+        name = os.path.splitext(os.path.basename(path))[0]
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._profile_to_dict(), f, indent=2)
+            self._refresh_profile_list()
+            self._profile_var.set(name)
+            self._log(f"Profile '{name}' saved to {path}.")
+        except Exception as e:
+            messagebox.showerror("Save Error", str(e))
+
+    def _write_profile(self, name: str):
+        os.makedirs(_PROFILES_DIR, exist_ok=True)
+        try:
+            with open(self._profile_path(name), "w", encoding="utf-8") as f:
+                json.dump(self._profile_to_dict(), f, indent=2)
+            self._refresh_profile_list()
+            self._log(f"Profile '{name}' saved.")
+        except Exception as e:
+            messagebox.showerror("Save Error", str(e))
+
+    def _delete_profile(self):
+        name = self._profile_var.get().strip()
+        if not name:
+            messagebox.showwarning("No Profile Selected", "Select a profile to delete.")
+            return
+        if not messagebox.askyesno("Delete Profile", f"Delete profile '{name}'?"):
+            return
+        try:
+            os.remove(self._profile_path(name))
+            self._profile_var.set("")
+            self._refresh_profile_list()
+            self._log(f"Profile '{name}' deleted.")
+        except Exception as e:
+            messagebox.showerror("Delete Error", str(e))
+
+    def _reset_to_defaults(self):
+        """Restore all settings to their out-of-the-box defaults."""
+        if not messagebox.askyesno(
+            "Restore Defaults",
+            "Reset all settings to their defaults?\n\n"
+            "This will clear your save/backup paths, criteria, filters, and sequences.\n"
+            "Your saved profiles will not be affected.",
+        ):
+            return
+        self._dict_to_profile({})   # empty dict → every field falls back to its default
+        self._auto_load_sequences()
+        self._log("Settings restored to defaults.")
+
+    # ------------------------------------------------------------------ #
+    #  GAME MANAGEMENT
+    # ------------------------------------------------------------------ #
+
+    def _is_game_running(self, exe_name: str) -> bool:
+        try:
+            result = subprocess.run(
+                ["tasklist", "/fi", f"imagename eq {exe_name}"],
+                capture_output=True, text=True
+            )
+            return exe_name.lower() in result.stdout.lower()
+        except Exception:
+            return False
+
+    def _close_game(self) -> bool:
+        exe_path = self.game_exe_var.get().strip()
+        if not exe_path:
+            return True
+        exe_name = os.path.basename(exe_path)
+        if not self._is_game_running(exe_name):
+            self._log("Game is not running.")
+            return True
+        self._log(f"Closing game ({exe_name})…")
+        subprocess.run(["taskkill", "/f", "/im", exe_name], capture_output=True)
+        for _ in range(30):  # wait up to 15s
+            time.sleep(0.5)
+            if not self.bot_running:
+                return False
+            if not self._is_game_running(exe_name):
+                self._log("Game closed.")
+                return True
+        self._log("WARNING: Game did not close within 15s.")
+        return False
+
+    _STEAM_APP_ID = "2622380"
+
+    def _launch_game(self):
+        exe_path = self.game_exe_var.get().strip()
+        self._log(f"Launching via Steam (App ID: {self._STEAM_APP_ID})…")
+        os.startfile(f"steam://rungameid/{self._STEAM_APP_ID}")
+        if exe_path:
+            # Also store exe path so focus can find the process window
+            pass
+
+    def _focus_game_window(self, exe_name: str, timeout: float = 15.0) -> bool:
+        """Find the game window by process exe name and bring it to the foreground.
+        Polls until the window appears or timeout expires. Returns True on success."""
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        target = exe_name.lower()
+        deadline = time.time() + timeout
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        while time.time() < deadline:
+            if not self.bot_running:
+                return False
+
+            found = []
+
+            def _cb(hwnd, _):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                pid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                h = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+                if h:
+                    buf = ctypes.create_unicode_buffer(260)
+                    sz = ctypes.c_ulong(260)
+                    if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(sz)):
+                        if os.path.basename(buf.value).lower() == target:
+                            found.append(hwnd)
+                    kernel32.CloseHandle(h)
+                return True
+
+            user32.EnumWindows(EnumWindowsProc(_cb), None)
+
+            if found:
+                hwnd = found[0]
+                user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+                user32.SetForegroundWindow(hwnd)
+                return True
+
+            time.sleep(0.5)
+
+        return False
+
+    # ------------------------------------------------------------------ #
+    #  BACKUP READY CONFIRMATION
+    # ------------------------------------------------------------------ #
+
+    def _ask_backup_ready(self):
+        msg = (
+            "Backup complete!\n\n"
+            "The bot will automatically close the game, restore your save, "
+            "and relaunch it at the start of each iteration.\n\n"
+            "Click OK to begin."
+        )
+        messagebox.showinfo("Backup Ready", msg)
+        self._ready_event.set()
+
+    # ------------------------------------------------------------------ #
+    #  INPUT RECORDING
+    # ------------------------------------------------------------------ #
+
+    _PHASE_NAMES = ["Setup", "Buy Loop", "Relic Rites Nav", "Navigate to Sell", "Review Step"]
+
+    def _start_recording(self, phase: int):
+        self._active_phase = phase
+        for btn in self.phase_rec_btns:
+            btn.config(state="disabled")
+        self.stop_rec_btn.config(state="disabled")
+        self._log(f"Recording Phase {phase} ({self._PHASE_NAMES[phase]}) in 3s — switch to game.")
+        self._rec_countdown(3)
+
+    def _rec_countdown(self, n: int):
+        if n > 0:
+            self.rec_status_var.set(f"Starting in {n}…")
+            self.after(1000, self._rec_countdown, n - 1)
+            return
+        bot_hwnd = self.winfo_id()
+        def _game_only():
+            try:
+                return ctypes.windll.user32.GetForegroundWindow() != bot_hwnd
+            except Exception:
+                return True
+        self.recorder.filter_fn = _game_only
+        self.recorder.suppress_keys = {self._hotkey_str}
+        self.recorder.start()
+        self._rec_blink = True
+        self.stop_rec_btn.config(state="normal")
+        self.rec_status_var.set("")
+        self._log("Recording active — inputs only captured while the game window is focused.")
+        self._poll_event_count()
+
+    def _poll_event_count(self):
+        if self.recorder.recording:
+            p = self._active_phase
+            self.phase_count_vars[p].set(f"{len(self.recorder.events)} events")
+            self.rec_status_var.set("● RECORDING" if self._rec_blink else "○ RECORDING")
+            self._rec_blink = not self._rec_blink
+            self.after(500, self._poll_event_count)
+
+    # ------------------------------------------------------------------ #
+    #  GLOBAL HOTKEY  (works while game window has focus)
+    # ------------------------------------------------------------------ #
+
+    def _start_global_hotkey_listener(self):
+        """Start (or restart) the persistent listener that watches for the hotkey."""
+        if self._global_kb_listener is not None:
+            try:
+                self._global_kb_listener.stop()
+            except Exception:
+                pass
+
+        hotkey = self._hotkey_str
+        pause_hotkey = self._pause_hotkey_str
+
+        def _on_press(key):
+            try:
+                k = key.char if (hasattr(key, "char") and key.char) else str(key)
+            except Exception:
+                k = str(key)
+            if k == hotkey:
+                self.after(0, self._hotkey_pressed)
+            elif k == pause_hotkey:
+                self.after(0, self._toggle_pause)
+
+        self._global_kb_listener = _kb.Listener(on_press=_on_press, daemon=True)
+        self._global_kb_listener.start()
+
+    def _hotkey_pressed(self):
+        """Toggle recording — only active when recording is enabled in Manual Key Recording."""
+        if not (hasattr(self, "_recording_enabled_var") and self._recording_enabled_var.get()):
+            return
+        if not self._manual_setup_expanded:
+            return
+        if self.recorder.recording:
+            self._stop_recording()
+        elif not self.bot_running:
+            try:
+                phase = self._phase_notebook.index(self._phase_notebook.select())
+            except Exception:
+                phase = 0
+            self._start_recording(phase)
+
+    def _set_hotkey_dialog(self):
+        """Show a small dialog that captures the next keypress as the new hotkey."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Set Recording Hotkey")
+        dlg.geometry("290x115")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.transient(self)
+
+        tk.Label(dlg, text="Press any key to use as the\nrecording toggle hotkey:").pack(pady=8)
+        lbl = tk.Label(dlg, text="Waiting for key…", font=("", 11, "bold"))
+        lbl.pack()
+
+        done = [False]
+        temp_listener = [None]
+
+        def _capture(key):
+            if done[0]:
+                return False
+            done[0] = True
+            try:
+                k = key.char if (hasattr(key, "char") and key.char) else str(key)
+            except Exception:
+                k = str(key)
+            display = k.replace("Key.", "").upper() if k.startswith("Key.") else k.upper()
+            self._hotkey_str = k
+            self._hotkey_display = display
+
+            def _finish():
+                lbl.config(text=f"Set to: {display}")
+                self._hotkey_btn.config(text=f"Rec Hotkey: {display}")
+                self._start_global_hotkey_listener()
+                dlg.after(700, dlg.destroy)
+
+            self.after(0, _finish)
+            return False  # stops this temporary listener
+
+        listener = _kb.Listener(on_press=_capture, daemon=True)
+        temp_listener[0] = listener
+        listener.start()
+        dlg.protocol("WM_DELETE_WINDOW", lambda: (listener.stop(), dlg.destroy()))
+
+    def _toggle_pause(self):
+        """Pause or resume the bot. Safe to call from any thread via self.after()."""
+        if not self.bot_running:
+            return
+        if self._pause_event.is_set():
+            # Pause
+            self._pause_event.clear()
+            self._log(
+                f"⏸ BOT PAUSED — was in: [{self._current_phase_hint or 'idle'}]. "
+                f"Press {self._pause_hotkey_display} or the PAUSE button again to resume. "
+                f"Make sure the game is back in that state before resuming!"
+            )
+            self.pause_btn.config(text=f"▶ RESUME  [{self._pause_hotkey_display}]")
+            self._set_status("Paused — press PAUSE to resume", "orange")
+        else:
+            # Resume with countdown
+            self.pause_btn.config(text=f"⏸ PAUSE  [{self._pause_hotkey_display}]", state="disabled")
+            self._set_status("Resuming in 3…", "orange")
+            def _countdown(n):
+                if n > 0:
+                    self._set_status(f"Resuming in {n}…", "orange")
+                    self.after(1000, _countdown, n - 1)
+                else:
+                    self._pause_event.set()
+                    self.pause_btn.config(state="normal")
+                    hint = self._current_phase_hint or "previous position"
+                    self._log(f"▶ BOT RESUMED — returning to: [{hint}]")
+                    self._set_status("Running…", "green")
+            _countdown(3)
+
+    def _check_pause_point(self, hint: str = ""):
+        """
+        Call this inside bot threads at safe pause points.
+        Updates the current phase hint and blocks until resumed if paused.
+        """
+        if hint:
+            self._current_phase_hint = hint
+        self._pause_event.wait()
+
+    def _set_pause_hotkey_dialog(self):
+        """Show a small dialog that captures the next keypress as the pause hotkey."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Set Pause Hotkey")
+        dlg.geometry("290x115")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.transient(self)
+
+        tk.Label(dlg, text="Press any key to use as the\npause/resume hotkey:").pack(pady=8)
+        lbl = tk.Label(dlg, text="Waiting for key…", font=("", 11, "bold"))
+        lbl.pack()
+
+        done = [False]
+
+        def _capture(key):
+            if done[0]:
+                return False
+            done[0] = True
+            try:
+                k = key.char if (hasattr(key, "char") and key.char) else str(key)
+            except Exception:
+                k = str(key)
+            display = k.replace("Key.", "").upper() if k.startswith("Key.") else k.upper()
+            self._pause_hotkey_str = k
+            self._pause_hotkey_display = display
+
+            def _finish():
+                lbl.config(text=f"Set to: {display}")
+                self._pause_hotkey_btn.config(text=f"Pause Hotkey: {display}")
+                self.pause_btn.config(text=f"⏸ PAUSE  [{display}]")
+                self._start_global_hotkey_listener()
+                dlg.after(700, dlg.destroy)
+
+            self.after(0, _finish)
+            return False
+
+        listener = _kb.Listener(on_press=_capture, daemon=True)
+        listener.start()
+        dlg.protocol("WM_DELETE_WINDOW", lambda: (listener.stop(), dlg.destroy()))
+
+    def _on_app_close(self):
+        """Stop the global hotkey listener then close the window."""
+        if self._global_kb_listener is not None:
+            try:
+                self._global_kb_listener.stop()
+            except Exception:
+                pass
+        self.destroy()
+
+    def _stop_recording(self):
+        self.recorder.stop()
+        self.recorder.filter_fn = None
+        p = self._active_phase
+        self.phase_events[p] = list(self.recorder.events)
+        for btn in self.phase_rec_btns:
+            btn.config(state="normal")
+        self.stop_rec_btn.config(state="disabled")
+        self.rec_status_var.set("")
+        n = len(self.phase_events[p])
+        self.phase_count_vars[p].set(f"{n} events")
+        self._log(f"Phase {p} ({self._PHASE_NAMES[p]}) recording stopped. {n} events captured.")
+
+    def _test_play(self, phase: int):
+        if not self.phase_events[phase]:
+            messagebox.showwarning("No Sequence", f"Record or load Phase {phase} first.")
+            return
+        threading.Thread(target=self.player.play,
+                         args=(self.phase_events[phase],), daemon=True).start()
+        self._log(f"Test playback: Phase {phase} ({self._PHASE_NAMES[phase]})…")
+
+    def _load_sequence(self, phase: int):
+        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            self.recorder.load(path)
+            self.phase_events[phase] = list(self.recorder.events)
+            n = len(self.phase_events[phase])
+            self.phase_count_vars[phase].set(f"{n} events")
+            self._log(f"Phase {phase} loaded from {path} ({n} events).")
+        except Exception as e:
+            messagebox.showerror("Load Error", str(e))
+
+    def _save_sequence(self, phase: int):
+        if not self.phase_events[phase]:
+            messagebox.showwarning("No Sequence", f"Phase {phase} has no events to save.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".json",
+                                             filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            self.recorder.events = self.phase_events[phase]
+            self.recorder.save(path)
+            self._log(f"Phase {phase} saved to {path}.")
+        except Exception as e:
+            messagebox.showerror("Save Error", str(e))
+
+    # ------------------------------------------------------------------ #
+    #  BOT ENTRY POINT
+    # ------------------------------------------------------------------ #
+
+    def _start_bot(self):
+        if not self._validate():
+            return
+
+        self.bot_running = True
+        self.attempt_count = 0
+        self._pause_event.set()  # ensure not paused on start
+        self._current_phase_hint = ""
+        # Tell the player which exe to watch so inputs are blocked if game loses focus
+        self.player.game_exe = os.path.basename(self.game_exe_var.get().strip())
+        self.start_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        self.pause_btn.config(state="normal", text=f"⏸ PAUSE  [{self._pause_hotkey_display}]")
+
+        if self.mode_var.get() == "live":
+            self._set_status("Running (Live)…", "green")
+            self.bot_thread = threading.Thread(target=self._live_loop, daemon=True)
+        else:
+            self._set_status("Running (Batch)…", "green")
+            self.bot_thread = threading.Thread(target=self._batch_loop, daemon=True)
+
+        self.bot_thread.start()
+
+    def _stop_bot(self):
+        self.bot_running = False
+        self.player.stop()
+        # Unblock live-mode decision wait if it's stuck
+        self._decision = "stop"
+        self._decision_event.set()
+        # Unblock backup ready wait if it's stuck
+        self._ready_event.set()
+        # Unblock any pause wait so the bot thread can exit
+        self._pause_event.set()
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+        self.pause_btn.config(state="disabled", text=f"⏸ PAUSE  [{self._pause_hotkey_display}]")
+        self._set_status("Stopped", "gray")
+        self._log("Bot stopped by user.")
+
+    # ------------------------------------------------------------------ #
+    #  LIVE MODE LOOP
+    # ------------------------------------------------------------------ #
+
+    def _live_loop(self):
+        save_path = self.save_path_var.get()
+        backup_path = os.path.join(
+            self.backup_path_var.get(), os.path.basename(save_path)
+        )
+        criteria = self.relic_builder.get_criteria_dict()
+        criteria_summary = self.relic_builder.get_criteria_summary()
+        criteria["allowed_colors"] = self._get_allowed_colors()
+        region = self._get_region()
+        delay = float(self.live_delay_var.get())
+        load_wait = float(self.game_load_wait_var.get())
+
+        try:
+            save_manager.backup(save_path, backup_path)
+            self._log("Save file backed up.")
+        except Exception as e:
+            self._log(f"ERROR backing up save: {e}")
+            self.after(0, self._reset_controls)
+            return
+
+        self._ready_event.clear()
+        self.after(0, self._ask_backup_ready)
+        self._ready_event.wait()
+        if not self.bot_running:
+            self.after(0, self._reset_controls)
+            return
+
+        while self.bot_running:
+            self.attempt_count += 1
+            self.after(0, lambda n=self.attempt_count: self.attempt_var.set(f"Attempts: {n}"))
+            self._log(f"--- Attempt {self.attempt_count} ---")
+
+            self._set_status(f"Attempt {self.attempt_count}: closing game…", "orange")
+            if not self._close_game():
+                self._log("ERROR: Could not close game.")
+                self.after(0, self._reset_controls)
+                return
+            try:
+                save_manager.restore(save_path, backup_path)
+                self._log("Save restored.")
+            except Exception as e:
+                self._log(f"ERROR restoring save: {e}")
+                self.after(0, self._reset_controls)
+                return
+            self._set_status(f"Attempt {self.attempt_count}: launching game…", "orange")
+            self._launch_game()
+            self._log(f"Waiting {load_wait}s for game to load (spamming confirm key)…")
+            confirm_key = self.confirm_key_var.get().strip() or "e"
+            exe_name = os.path.basename(self.game_exe_var.get().strip())
+            focused = self._focus_game_window(exe_name)
+            if not focused:
+                self._log("WARNING: Could not focus game window — inputs may not reach the game.")
+            else:
+                self._log("Game window focused.")
+            for i in range(int(load_wait * 2)):
+                if not self.bot_running:
+                    self.after(0, self._reset_controls)
+                    return
+                # Re-focus every ~5s in case something stole focus
+                if i % 10 == 0 and exe_name:
+                    self._focus_game_window(exe_name, timeout=1.0)
+                self.player.tap(confirm_key)
+                time.sleep(0.45)
+
+            label = f"Attempt {self.attempt_count}"
+            relic_results = self._run_iteration_phases(
+                label, criteria, region, delay)
+
+            if relic_results is None:   # fatal error inside phases
+                self.after(0, self._reset_controls)
+                return
+
+            if not self.bot_running:
+                break
+
+            # Check for any match and ask the user
+            for result in relic_results:
+                if result.get("match"):
+                    self._decision_event.clear()
+                    self._decision = ""
+                    self.after(0, self._ask_keep_or_continue,
+                               result.get("matched_relic", "Unknown"),
+                               result.get("matched_passives", []),
+                               result.get("reason", ""))
+                    self._decision_event.wait()
+
+                    if self._decision == "keep" or not self.bot_running:
+                        self._set_status("Stopped – relic kept.", "red")
+                        self.after(0, self._reset_controls)
+                        return
+                    break   # user chose continue — skip remaining relics this attempt
+
+            if not self.bot_running:
+                break
+
+            self._log("Continuing search…")
+
+        self.after(0, self._reset_controls)
+
+    def _ask_keep_or_continue(self, matched_relic: str, matched_passives: list, reason: str):
+        """Called on the main thread. Shows a dialog; signals the bot thread via event."""
+        passives_str = "\n".join(f"  – {p}" for p in matched_passives) if matched_passives else "  (none listed)"
+        keep = messagebox.askyesno(
+            "Match Found!",
+            f"A matching relic was found on attempt {self.attempt_count}!\n\n"
+            f"Relic: {matched_relic}\n\nPassives:\n{passives_str}\n\n"
+            f"Details: {reason}\n\n"
+            "Click YES to keep this save and stop.\n"
+            "Click NO to discard it and keep searching.",
+        )
+        self._decision = "keep" if keep else "continue"
+        self._decision_event.set()
+
+    # ------------------------------------------------------------------ #
+    #  BATCH MODE LOOP
+    # ------------------------------------------------------------------ #
+
+    def _batch_loop(self):
+        save_path = self.save_path_var.get()
+        backup_path = os.path.join(
+            self.backup_path_var.get(), os.path.basename(save_path)
+        )
+        criteria = self.relic_builder.get_criteria_dict()
+        criteria_summary = self.relic_builder.get_criteria_summary()
+        criteria["allowed_colors"] = self._get_allowed_colors()
+        region = self._get_region()
+        delay = float(self.batch_delay_var.get())
+        limit_type = self.batch_limit_type.get()
+        limit_value = float(self.batch_limit_var.get())
+        base_output = self.batch_output_var.get()
+        load_wait = float(self.game_load_wait_var.get())
+        # Minimum passive count for a result to be labelled a "HIT" tier.
+        # If the user's criteria requires all 3 passives, 2/3 near-misses are
+        # not counted as hits and won't get a HIT folder or ★★ log message.
+        hit_min = self.relic_builder.get_min_hit_threshold()
+
+        # The run folder is created lazily — only when the first iteration actually runs.
+        # This prevents empty batch_run_* folders when the bot is stopped before any iteration.
+        run_stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        run_dir = os.path.join(base_output, f"batch_run_{run_stamp}")
+        live_log_path = os.path.join(run_dir, "live_log.txt")
+        batch_log_path = os.path.join(run_dir, "run_log.txt")
+        _run_dir_created = [False]
+
+        def _ensure_run_dir():
+            if not _run_dir_created[0]:
+                os.makedirs(run_dir, exist_ok=True)
+                _run_dir_created[0] = True
+                # run_log.txt: full copy of everything logged to the UI
+                try:
+                    with open(batch_log_path, "w", encoding="utf-8") as _f:
+                        _f.write(f"Run Log — {run_stamp}\n")
+                        _f.write("=" * 60 + "\n")
+                    self._batch_log_path = batch_log_path
+                except Exception:
+                    pass
+                # live_log.txt: per-relic analysis summary only
+                try:
+                    with open(live_log_path, "w", encoding="utf-8") as _f:
+                        _f.write(f"Live Analysis Log — {run_stamp}\n")
+                        _f.write("=" * 60 + "\n")
+                except Exception:
+                    pass
+                self._log(f"Batch output folder: {run_dir}")
+
+        try:
+            save_manager.backup(save_path, backup_path)
+            self._log("Save file backed up.")
+        except Exception as e:
+            self._log(f"ERROR backing up save: {e}")
+            self.after(0, self._reset_controls)
+            return
+
+        self._ready_event.clear()
+        self.after(0, self._ask_backup_ready)
+        self._ready_event.wait()
+        if not self.bot_running:
+            self.after(0, self._reset_controls)
+            return
+
+        results = []
+        start_time = time.time()
+        iteration = 0
+        save_filename = os.path.basename(save_path)
+        _prev_save_dir = None  # iteration folder waiting for its save copy
+
+        while self.bot_running:
+            # Check stopping condition
+            if limit_type == "loops" and iteration >= int(limit_value):
+                break
+            if limit_type == "hours" and (time.time() - start_time) / 3600 >= limit_value:
+                break
+
+            iteration += 1
+            self.attempt_count = iteration
+            self.after(0, lambda n=iteration: self.attempt_var.set(f"Attempts: {n}"))
+
+            # Pause checkpoint — blocks here if user has paused
+            self._check_pause_point(f"start of iteration {iteration}")
+            if not self.bot_running:
+                break
+
+            # Create the run folder on first use
+            _ensure_run_dir()
+
+            try:
+                with open(live_log_path, "a", encoding="utf-8") as _f:
+                    _f.write(f"\n--- Iteration {iteration} ---\n")
+            except Exception:
+                pass
+
+            folder_name = f"{iteration:03d}"
+            iter_dir = os.path.join(run_dir, folder_name)
+            os.makedirs(iter_dir, exist_ok=True)
+
+            self._log(f"--- Iteration {iteration} ---")
+
+            self._set_status(f"Iteration {iteration}: closing game…", "orange")
+            if not self._close_game():
+                self._log("ERROR: Could not close game.")
+                self.after(0, self._reset_controls)
+                return
+            # Game is now closed — safe to copy the rolled save from the
+            # previous iteration (file is no longer locked by the game).
+            if _prev_save_dir is not None:
+                try:
+                    shutil.copy2(save_path, os.path.join(_prev_save_dir, save_filename))
+                except Exception as e:
+                    self._log(f"WARNING: could not copy save to {_prev_save_dir}: {e}")
+                _prev_save_dir = None
+            try:
+                save_manager.restore(save_path, backup_path)
+                self._log("Save restored.")
+            except Exception as e:
+                self._log(f"ERROR restoring save: {e}")
+                self.after(0, self._reset_controls)
+                return
+            self._set_status(f"Iteration {iteration}: launching game…", "orange")
+            self._launch_game()
+            self._log(f"Waiting {load_wait}s for game to load (spamming confirm key)…")
+            confirm_key = self.confirm_key_var.get().strip() or "e"
+            exe_name = os.path.basename(self.game_exe_var.get().strip())
+            focused = self._focus_game_window(exe_name)
+            if not focused:
+                self._log("WARNING: Could not focus game window — inputs may not reach the game.")
+            else:
+                self._log("Game window focused.")
+            for i in range(int(load_wait * 2)):
+                if not self.bot_running:
+                    self.after(0, self._reset_controls)
+                    return
+                if i % 10 == 0 and exe_name:
+                    self._focus_game_window(exe_name, timeout=1.0)
+                self.player.tap(confirm_key)
+                time.sleep(0.45)
+
+            label = f"Iteration {iteration}"
+            relic_results = self._run_iteration_phases(
+                label, criteria, region, delay,
+                iter_dir=iter_dir, hit_min=hit_min,
+                live_log_path=live_log_path)
+
+            if relic_results is None:
+                # Fatal error inside phases — abort
+                self.after(0, self._reset_controls)
+                return
+
+            if not self.bot_running:
+                break
+
+            # Merge all relic results for this iteration into one summary result
+            blocked_curses = self._get_blocked_curses()
+            any_match = any(
+                r.get("match") and not self._is_curse_blocked(r, blocked_curses)
+                for r in relic_results
+            )
+            all_relics = [rf for r in relic_results for rf in r.get("relics_found", [])]
+            all_near_misses = [nm for r in relic_results for nm in r.get("near_misses", [])]
+            matched_result = next(
+                (r for r in relic_results
+                 if r.get("match") and not self._is_curse_blocked(r, blocked_curses)),
+                None
+            )
+            matched_relic = matched_result.get("matched_relic") if matched_result else None
+            matched_passives = matched_result.get("matched_passives", []) if matched_result else []
+            matched_curses = matched_result.get("matched_relic_curses", []) if matched_result else []
+            reason = "; ".join(r.get("reason", "") for r in relic_results if r.get("reason"))
+
+            combined = {
+                "match": any_match,
+                "matched_relic": matched_relic,
+                "matched_passives": matched_passives,
+                "matched_relic_curses": matched_curses,
+                "near_misses": all_near_misses,
+                "relics_found": all_relics,
+                "reason": reason,
+            }
+
+            # Copy save file (deferred until next iteration when game closes and releases file lock)
+            _prev_save_dir = iter_dir
+
+            # Effective tier: consider full matches AND near-misses with hit_min+ passives.
+            # hit_min is 2 normally, but 3 when the user requires ALL passives to match —
+            # in that case a 2/3 near-miss is not a HIT and won't get a folder rename.
+            num_matched = len(matched_passives)
+            if num_matched == 0 and all_near_misses:
+                num_matched = max(
+                    nm.get("matching_passive_count", len(nm.get("matching_passives", [])))
+                    for nm in all_near_misses
+                )
+
+            # Screenshots already saved inside _run_iteration_phases as each relic was analyzed.
+            screenshots = [rr.get("_screenshot_file", "") for rr in relic_results
+                           if rr.get("_screenshot_file")]
+
+            if num_matched >= 3:
+                self._log(f"★★★ GOD ROLL — Iteration {iteration}: {matched_relic}")
+            elif num_matched >= hit_min:
+                hit_name = matched_relic or (
+                    max(all_near_misses,
+                        key=lambda nm: nm.get("matching_passive_count", 0),
+                        default={}).get("relic_name", "Unknown")
+                )
+                self._log(f"★★ HIT — Iteration {iteration}: {hit_name}")
+
+            # Write per-iteration info.txt (use combined summary)
+            try:
+                write_iter_info(iter_dir, iteration, relic_results, hit_min)
+            except Exception as e:
+                self._log(f"WARNING: could not write info.txt: {e}")
+
+            # Rename folder based on effective tier
+            if num_matched >= 3:
+                tier_name = f"GOD ROLL {iteration:03d}"
+            elif num_matched >= hit_min:
+                tier_name = f"HIT {iteration:03d}"
+            else:
+                tier_name = None
+
+            if tier_name:
+                tier_dir = os.path.join(run_dir, tier_name)
+                try:
+                    os.rename(iter_dir, tier_dir)
+                    iter_dir = tier_dir
+                    folder_name = tier_name
+                    self._log(f"Folder renamed to: {tier_name}")
+                except Exception as e:
+                    self._log(f"WARNING: could not rename folder: {e}")
+
+            results.append({
+                "iteration": iteration,
+                "folder": folder_name,
+                "match": any_match,
+                "matched_relic": matched_relic,
+                "matched_passives": matched_passives,
+                "near_misses": all_near_misses,
+                "reason": reason,
+                "relics_found": all_relics,
+                "screenshots": screenshots,
+                "save_copy": save_filename,
+            })
+
+            # Write README after every iteration so a cancelled run is never lost
+            mode_desc = "loops" if limit_type == "loops" else "hours"
+            try:
+                generate_readme(run_dir, criteria_summary, mode_desc, limit_value, results, hit_min)
+            except Exception:
+                pass
+            try:
+                generate_priority_summary(run_dir, results)
+            except Exception:
+                pass
+
+        # Copy the last iteration's save (game is still running after final analysis).
+        if _prev_save_dir is not None:
+            self._set_status("Closing game to save final iteration…", "orange")
+            self._close_game()
+            try:
+                shutil.copy2(save_path, os.path.join(_prev_save_dir, save_filename))
+            except Exception as e:
+                self._log(f"WARNING: could not copy final save: {e}")
+            _prev_save_dir = None
+
+        # Batch finished – generate README and PRIORITY.txt
+        if results and _run_dir_created[0]:
+            mode_desc = "loops" if limit_type == "loops" else "hours"
+            try:
+                generate_readme(run_dir, criteria_summary, mode_desc, limit_value, results, hit_min)
+                self._log(f"README.txt written to {run_dir}")
+            except Exception as e:
+                self._log(f"WARNING: could not write README: {e}")
+            try:
+                generate_priority_summary(run_dir, results)
+                self._log(f"PRIORITY.txt written to {run_dir}")
+            except Exception as e:
+                self._log(f"WARNING: could not write PRIORITY.txt: {e}")
+
+        match_count = sum(1 for r in results if r["match"])
+        self._log(
+            f"Batch complete. {len(results)} iterations run, {match_count} match(es) found."
+        )
+        self._set_status("Batch complete.", "gray")
+
+        if results and _run_dir_created[0]:
+            self.after(0, self._show_batch_summary, run_dir, len(results), match_count)
+        else:
+            self.after(0, self._reset_controls)
+
+    def _show_batch_summary(self, run_dir: str, total: int, matches: int):
+        self._reset_controls()
+        messagebox.showinfo(
+            "Batch Complete",
+            f"Batch run finished!\n\n"
+            f"Total iterations : {total}\n"
+            f"Matches found    : {matches}\n\n"
+            f"Results saved to:\n{run_dir}\n\n"
+            "Review README.txt for the full breakdown.",
+        )
+
+    # ------------------------------------------------------------------ #
+    #  PHASE EXECUTION ENGINE
+    # ------------------------------------------------------------------ #
+
+    def _run_iteration_phases(self, label: str, criteria: dict,
+                              region, delay: float,
+                              iter_dir: str = "", hit_min: int = 2,
+                              live_log_path: str = "") -> list | None:
+        """
+        Run all configured sequence phases for one bot iteration.
+
+        Phases:
+          0 – Setup            : plays once
+          1 – Buy Loop         : repeats until Phase 1 stop text detected (internal failsafe: 500)
+          2 – Navigate to Sell : loops input until OCR detects sell page (internal failsafe: 30)
+          3 – Review Setup     : plays once
+          4 – Review Step      : repeats; analyzes each relic (internal failsafe: 200)
+
+        Returns a list of result dicts (one per relic analyzed).
+        Each dict has the usual analyze() keys plus a private '_image_bytes' entry.
+        Returns None on fatal error.
+        """
+        p1_stop   = self.phase_stop_text_vars[1].get().strip()
+        _P1_FAILSAFE = 500          # internal only — never shown in UI
+        p1_settle = float(self.phase_settle_vars[1].get() or "0")
+        _P2_FAILSAFE = 30           # max navigation steps before giving up on sell page
+        _P4_FAILSAFE = 200          # internal only — never shown in UI
+        p4_settle = float(self.phase_settle_vars[4].get() or "0")
+        murk_cost = 1800 if self.relic_type_var.get() == "night" else 600
+        _p3_count = None            # set by murk read below; None = use failsafe
+
+        relic_results = []
+
+        # ── Phase 0: Setup ──────────────────────────────────────────── #
+        if self.phase_events[0]:
+            self._set_status(f"{label}: setup…", "green")
+            self._check_pause_point(f"{label}: setup phase")
+            if not self.bot_running:
+                return relic_results
+            self.player.play(self.phase_events[0])
+            if not self.bot_running:
+                return relic_results
+
+        # ── Read murk before buying (used to calculate Phase 3 count) ── #
+        # Required when both Phase 1 and Phase 3 are configured.
+        # 4-second post-setup delay lets the shop screen fully load.
+        # Up to 3 attempts; aborts the iteration if all fail.
+        if self.phase_events[1] and self.phase_events[4]:
+            self._set_status(f"{label}: waiting for shop screen…", "green")
+            time.sleep(1)
+
+            murk_val = 0
+            for attempt in range(1, 4):
+                if not self.bot_running:
+                    return relic_results
+                self._set_status(
+                    f"{label}: reading murk (attempt {attempt}/3)…", "green")
+                self.after(0, self._flash_capture)
+                try:
+                    murk_img = screen_capture.capture(region)
+                    murk_val = relic_analyzer.read_murk(murk_img)
+                except Exception as e:
+                    self._log(f"  Murk read attempt {attempt}/3 error: {e}")
+                    murk_val = 0
+
+                if murk_val > 0:
+                    _p3_count = murk_val // murk_cost
+                    self._log(
+                        f"  Murk: {murk_val}  →  {_p3_count} relic(s) to review "
+                        f"({murk_cost} murk each).")
+                    break
+                else:
+                    self._log(f"  Murk read attempt {attempt}/3 returned 0.")
+
+            if murk_val == 0:
+                self._log("  ERROR: Murk could not be read after 3 attempts — aborting.")
+                return None
+
+        # ── Phase 1: Buy Loop ────────────────────────────────────────── #
+        if self.phase_events[1]:
+            if _p3_count is not None:
+                # We know exactly how many relics we can afford from the murk read.
+                # floor(murk / cost) = relics available; ceil(relics / 10) = buy batches.
+                buy_count = math.ceil(_p3_count / 10)
+                self._set_status(
+                    f"{label}: buying relics ({buy_count} batch(es) of 10)…", "green")
+                self._log(
+                    f"  {_p3_count} relic(s) available → {buy_count} buy batch(es).")
+                for buy_i in range(buy_count):
+                    if not self.bot_running:
+                        return relic_results
+                    self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.25)
+                    if p1_settle > 0:
+                        time.sleep(p1_settle)
+            else:
+                # Fallback: no murk data — run until stop condition is detected.
+                self._set_status(f"{label}: buying relics…", "green")
+                for buy_i in range(_P1_FAILSAFE):
+                    if not self.bot_running:
+                        return relic_results
+                    self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.25)
+                    if p1_settle > 0:
+                        time.sleep(p1_settle)
+                    if not self.bot_running:
+                        return relic_results
+                    if p1_stop:
+                        self.after(0, self._flash_capture)
+                        try:
+                            img = screen_capture.capture(region)
+                            stopped = relic_analyzer.check_condition(img, p1_stop)
+                        except Exception as e:
+                            self._log(f"WARNING: buy condition check failed: {e}")
+                            stopped = False
+                        if stopped:
+                            self._log(f"  Buy stop condition met after {buy_i + 1} purchase(s).")
+                            break
+            if not self.bot_running:
+                return relic_results
+
+        # ── Phase 2: Relic Rites Nav (Esc → M → down arrows → F) ───────── #
+        if self.phase_events[2]:
+            self._set_status(f"{label}: navigating to Relic Rites menu…", "green")
+            self.player.play(self.phase_events[2])
+            if not self.bot_running:
+                return relic_results
+
+        # ── Phase 3: Navigate to Sell (F2 loop until sell page detected) ─ #
+        if self.phase_events[3]:
+            self._set_status(f"{label}: navigating to sell page…", "green")
+            sell_reached = False
+            for nav_i in range(_P2_FAILSAFE):
+                if not self.bot_running:
+                    return relic_results
+                self.player.play_fast(self.phase_events[3])
+                if not self.bot_running:
+                    return relic_results
+                time.sleep(0.3)
+                self.after(0, self._flash_capture)
+                try:
+                    img = screen_capture.capture(region)
+                    on_sell_page = relic_analyzer.check_condition(img, "sell")
+                except Exception as e:
+                    self._log(f"WARNING: sell page check failed: {e}")
+                    on_sell_page = False
+                if on_sell_page:
+                    self._log(f"  Sell page reached after {nav_i + 1} step(s).")
+                    sell_reached = True
+                    break
+            if not sell_reached:
+                self._log("  WARNING: Sell page not detected after failsafe — continuing anyway.")
+            if not self.bot_running:
+                return relic_results
+
+        # ── Phase 4: Review Step Loop (analyze each relic) ─────────── #
+        if self.phase_events[4]:
+            total = _p3_count if _p3_count is not None else _P4_FAILSAFE
+            ordered = [None] * total
+
+            # Pipelined capture + analysis: submit each screenshot for analysis
+            # immediately after capturing it, so analysis runs in the background
+            # while the bot navigates to the next relic.  max_workers=1 keeps
+            # EasyOCR calls sequential (thread-safe) while still overlapping
+            # navigation time with analysis time.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future_to_step: dict = {}
+
+                for step_i in range(total):
+                    if not self.bot_running:
+                        return relic_results
+
+                    self._check_pause_point(f"{label}: capturing relic {step_i + 1}/{total}")
+                    if not self.bot_running:
+                        return relic_results
+
+                    if step_i > 0:
+                        self.player.play_fast(self.phase_events[4])
+                        if p4_settle > 0:
+                            time.sleep(p4_settle)
+                        if not self.bot_running:
+                            return relic_results
+
+                    self._set_status(
+                        f"{label}: capturing relic {step_i + 1}/{total}…", "#006600")
+                    self.after(0, self._flash_capture)
+                    try:
+                        img = screen_capture.capture(region)
+                    except Exception as e:
+                        self._log(f"ERROR capturing relic {step_i + 1}: {e}")
+                        return None
+
+                    # Submit for analysis immediately — runs while we move to next relic
+                    future = executor.submit(relic_analyzer.analyze, img, criteria)
+                    future_to_step[future] = (step_i, img)
+
+                if not self.bot_running:
+                    return relic_results
+
+                # Collect results — most will already be done since analysis ran
+                # in parallel with navigation.
+                pending = len(future_to_step)
+                self._set_status(
+                    f"{label}: finishing analysis ({pending} relic(s))…", "#0066cc")
+
+                for future in concurrent.futures.as_completed(future_to_step):
+                    step_i, img = future_to_step[future]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        self._log(f"ERROR analyzing relic {step_i + 1}: {e}")
+                        return None
+
+                    self._log(f"  Relic {step_i + 1}:")
+                    self._log_result(result)
+
+                    # Save screenshot if match or near-miss; discard otherwise
+                    saved_fname = ""
+                    if iter_dir and img:
+                        is_match = result.get("match", False)
+                        best_nm = max(
+                            (nm.get("matching_passive_count",
+                                    len(nm.get("matching_passives", [])))
+                             for nm in result.get("near_misses", [])),
+                            default=0,
+                        )
+                        tag = "MATCH" if is_match else ("HIT" if best_nm >= hit_min else "")
+                        if tag:
+                            saved_fname = f"relic_{step_i + 1:02d}_{tag}.jpg"
+                            try:
+                                with open(os.path.join(iter_dir, saved_fname), "wb") as _f:
+                                    _f.write(img)
+                                self._log(f"  Screenshot saved: {saved_fname}")
+                            except Exception as _e:
+                                self._log(f"WARNING: could not save screenshot: {_e}")
+                                saved_fname = ""
+
+                    result["_image_bytes"] = None   # free memory
+                    result["_screenshot_file"] = saved_fname
+
+                    if live_log_path:
+                        try:
+                            relics = result.get("relics_found", [])
+                            r0 = relics[0] if relics else {}
+                            rname = r0.get("name", "Unknown") if isinstance(r0, dict) else str(r0)
+                            passives = r0.get("passives", []) if isinstance(r0, dict) else []
+                            status = "MATCH" if result.get("match") else "no match"
+                            line = (f"  Relic {step_i + 1:02d}: [{status}] {rname}"
+                                    f"  | {', '.join(passives) or '—'}")
+                            if saved_fname:
+                                line += f"  → {saved_fname}"
+                            with open(live_log_path, "a", encoding="utf-8") as _f:
+                                _f.write(line + "\n")
+                        except Exception:
+                            pass
+
+                    ordered[step_i] = result
+
+            for result in ordered:
+                if result is not None:
+                    relic_results.append(result)
+
+            return relic_results
+
+        # ── No Phase 4: fall back to single capture + analyze ────────── #
+        self._set_status(f"{label}: waiting for relic screen…", "green")
+        time.sleep(delay)
+        if not self.bot_running:
+            return relic_results
+
+        self._set_status(f"{label}: capturing…", "#006600")
+        self.after(0, self._flash_capture)
+        try:
+            img = screen_capture.capture(region)
+        except Exception as e:
+            self._log(f"ERROR during capture: {e}")
+            return None
+
+        self._set_status(f"{label}: analyzing…", "#0066cc")
+        try:
+            result = relic_analyzer.analyze(img, criteria)
+        except Exception as e:
+            self._log(f"ERROR during analysis: {e}")
+            return None
+
+        result["_image_bytes"] = img
+        self._log_result(result)
+        relic_results.append(result)
+        return relic_results
+
+    # ------------------------------------------------------------------ #
+    #  SHARED HELPERS
+    # ------------------------------------------------------------------ #
+
+    def _validate(self) -> bool:
+        if not any(self.phase_events):
+            messagebox.showwarning("No Sequence",
+                "Record or load at least one phase sequence (Setup tab) first.")
+            return False
+        if not self.save_path_var.get():
+            messagebox.showwarning("No Save Path", "Set the save file path.")
+            return False
+        if not self.backup_path_var.get():
+            messagebox.showwarning("No Backup Path", "Set the backup file path.")
+            return False
+        if not self.relic_builder.is_valid():
+            messagebox.showwarning("No Criteria", "Set your relic criteria (Build Exact Relic or Passive Pool tab).")
+            return False
+        if self.relic_builder.has_compat_errors():
+            messagebox.showwarning(
+                "Incompatible Passives",
+                "One or more relic targets in the 'Build Exact Relic' tab contains "
+                "passives that cannot appear on the same relic (same exclusive category).\n\n"
+                "Please fix the highlighted conflicts before starting.",
+            )
+            return False
+
+        if not self.game_exe_var.get().strip():
+            messagebox.showwarning("No Game Executable",
+                "Set the game executable path so the bot can close the game.")
+            return False
+        try:
+            float(self.game_load_wait_var.get())
+        except ValueError:
+            messagebox.showwarning("Invalid Load Wait", "Game load wait must be a number.")
+            return False
+
+        # Mode-specific validation
+        if self.mode_var.get() == "live":
+            try:
+                float(self.live_delay_var.get())
+            except ValueError:
+                messagebox.showwarning("Invalid Delay", "Analysis delay must be a number.")
+                return False
+        else:
+            if not self.batch_output_var.get():
+                messagebox.showwarning("No Output Folder", "Choose an output folder for batch results.")
+                return False
+            try:
+                v = float(self.batch_limit_var.get())
+                if v <= 0:
+                    raise ValueError
+                limit_type = self.batch_limit_type.get()
+                if limit_type == "loops" and v > 1000:
+                    messagebox.showwarning("Limit Too High", "Maximum allowed loops is 1000.")
+                    return False
+                if limit_type == "hours" and v > 24:
+                    messagebox.showwarning("Limit Too High", "Maximum allowed run time is 24 hours.")
+                    return False
+            except ValueError:
+                messagebox.showwarning("Invalid Limit", "Batch limit must be a positive number.")
+                return False
+            try:
+                float(self.batch_delay_var.get())
+            except ValueError:
+                messagebox.showwarning("Invalid Delay", "Analysis delay must be a number.")
+                return False
+        return True
+
+    def _flash_capture(self):
+        """Briefly highlight the 📷 indicator when a screenshot is taken."""
+        self.capture_lbl.config(foreground="green")
+        self.after(600, lambda: self.capture_lbl.config(foreground="lightgray"))
+
+    def _get_region(self):
+        return None
+
+    def _on_color_change(self):
+        enabled = [c for c, v in self._color_vars.items() if v.get()]
+        if not enabled:
+            # Enforce at least one
+            for var in self._color_vars.values():
+                var.set(True)
+            self._color_warn.configure(text="At least one color must be enabled.")
+        else:
+            self._color_warn.configure(text="")
+
+    def _toggle_color(self, color: str):
+        """Toggle a relic colour checkbox when its gem image is clicked."""
+        var = self._color_vars.get(color)
+        if var:
+            var.set(not var.get())
+            self._on_color_change()
+
+    def _on_gem_mode_change(self):
+        """Swap gem images when the Normal / Deep of Night radio changes."""
+        self._refresh_gem_images()
+
+    def _refresh_gem_images(self):
+        """Update all gem image labels to match the current gem mode."""
+        don = self._gem_mode_var.get() == "don"
+        for color, lbl in self._gem_img_labels.items():
+            photo = relic_images.get_gem(color, don=don)
+            lbl.configure(image=photo)
+            lbl.image = photo   # keep reference
+
+    def _get_allowed_colors(self) -> list[str]:
+        return [c for c, v in self._color_vars.items() if v.get()]
+
+    def _curse_filter_list(self, *_):
+        q = self._curse_search_var.get().strip().lower()
+        self._curse_src_lb.delete(0, "end")
+        for p in self._curse_all_passives:
+            if not q or q in p.lower():
+                self._curse_src_lb.insert("end", p)
+
+    def _curse_add(self):
+        sel = self._curse_src_lb.curselection()
+        if sel:
+            item = self._curse_src_lb.get(sel[0])
+            if item not in self._blocked_curses_list:
+                self._blocked_curses_list.append(item)
+                self._blocked_curses_lb.insert("end", item)
+
+    def _curse_remove(self):
+        sel = self._blocked_curses_lb.curselection()
+        if sel:
+            idx = sel[0]
+            self._blocked_curses_list.pop(idx)
+            self._blocked_curses_lb.delete(idx)
+
+    def _curse_clear(self):
+        self._blocked_curses_list.clear()
+        self._blocked_curses_lb.delete(0, "end")
+
+    def _get_blocked_curses(self) -> list:
+        return [c.lower() for c in self._blocked_curses_list]
+
+    def _is_curse_blocked(self, relic_result: dict, blocked: list) -> bool:
+        """Return True if any curse on this relic matches a blocked entry (substring match)."""
+        if not blocked:
+            return False
+        curses = [c.lower() for c in relic_result.get("matched_relic_curses", [])]
+        for curse in curses:
+            for blocked_curse in blocked:
+                if blocked_curse in curse or curse in blocked_curse:
+                    return True
+        return False
+
+    def _reset_controls(self):
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+        self.pause_btn.config(state="disabled", text=f"⏸ PAUSE  [{self._pause_hotkey_display}]")
+        self._pause_event.set()  # ensure not stuck paused
+        self.bot_running = False
+        self._batch_log_path = ""   # stop mirroring to file
+
+    def _set_status(self, text: str, color: str = "gray"):
+        def _apply():
+            self.status_var.set(f"Status: {text}")
+            self.status_label.config(foreground=color)
+        self.after(0, _apply)
+
+    def _log(self, message: str):
+        timestamp = time.strftime("%H:%M:%S")
+        line = f"[{timestamp}] {message}\n"
+        def _write():
+            self.log_box.config(state="normal")
+            self.log_box.insert("end", line)
+            self.log_box.see("end")
+            self.log_box.config(state="disabled")
+        self.after(0, _write)
+        if self._batch_log_path:
+            try:
+                with open(self._batch_log_path, "a", encoding="utf-8") as _f:
+                    _f.write(line)
+            except Exception:
+                pass
+
+    def _log_result(self, result: dict):
+        relics = result.get("relics_found", [])
+        relic = relics[0] if relics else {}
+        name = relic.get("name", "Unknown") if isinstance(relic, dict) else str(relic)
+        passives = relic.get("passives", []) if isinstance(relic, dict) else []
+        curses = relic.get("curses", []) if isinstance(relic, dict) else []
+        match = result.get("match", False)
+        matched_passives = result.get("matched_passives", [])
+
+        status = "MATCH" if match else "No match"
+        passive_str = ", ".join(passives) if passives else "—"
+        self._log(f"  [{status}]  {name}")
+        self._log(f"    Passives: {passive_str}")
+        if curses:
+            self._log(f"    Curses:   {', '.join(curses)}")
+        if match and matched_passives:
+            self._log(f"    Matched:  {', '.join(matched_passives)}")
+        elif not match:
+            nms = result.get("near_misses", [])
+            if nms:
+                nm = max(nms, key=lambda x: x.get("matching_passive_count", 0))
+                nm_p = nm.get("matching_passives", [])
+                if nm_p:
+                    self._log(f"    Near miss: {', '.join(nm_p)}")
