@@ -2213,7 +2213,7 @@ class RelicBotApp(tk.Tk):
     # ------------------------------------------------------------------ #
 
     def _stats_path(self) -> str:
-        output_dir = self.output_dir_var.get().strip() or os.path.join(_REPO_ROOT, "batch_output")
+        output_dir = self.batch_output_var.get().strip() or os.path.join(_REPO_ROOT, "batch_output")
         return os.path.join(output_dir, "overlay_stats.txt")
 
     def _load_all_time_stats(self) -> None:
