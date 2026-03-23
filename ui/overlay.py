@@ -53,23 +53,21 @@ def _apply_capture_exclusion(win: tk.Toplevel) -> None:
 # ── Game window detection ─────────────────────────────────────────── #
 
 def game_running(fragment: str = "nightreign") -> bool:
-    """Return True if any visible window title contains *fragment* (case-insensitive)."""
-    found = [False]
-    frag  = fragment.lower()
+    """Return True if the foreground (focused) window title contains *fragment* (case-insensitive).
 
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
-    def _cb(hwnd, _):
-        if ctypes.windll.user32.IsWindowVisible(hwnd):
-            n = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-            b = ctypes.create_unicode_buffer(n + 1)
-            ctypes.windll.user32.GetWindowTextW(hwnd, b, n + 1)
-            if frag in b.value.lower():
-                found[0] = True
-                return False   # stop enumeration early
-        return True
-
-    ctypes.windll.user32.EnumWindows(_cb, 0)
-    return found[0]
+    The overlay is only shown when the game window is actively focused.
+    Alt-tabbing away hides the overlay immediately.
+    """
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        n = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        b = ctypes.create_unicode_buffer(n + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, b, n + 1)
+        return fragment.lower() in b.value.lower()
+    except Exception:
+        return False
 
 
 # ── Colour palette ────────────────────────────────────────────────── #
@@ -89,10 +87,10 @@ _RESUME_C= "#008833"
 _WARN_C  = "#ff8800"
 _GRIP_C  = "#3a3d5c"   # resize grip colour
 
-_MIN_W = 320
-_MIN_H = 280
-_DEF_W = 430
-_DEF_H = 460
+_MIN_W = 340
+_MIN_H = 380
+_DEF_W = 500
+_DEF_H = 620
 
 
 # ── Main class ────────────────────────────────────────────────────── #
@@ -186,22 +184,53 @@ class BotOverlay:
 
         # ── Hit counters ─────────────────────────────────────────────── #
         hf = tk.Frame(w, bg=_BG)
-        hf.pack(fill="x", padx=10, pady=4)
+        hf.pack(fill="x", padx=10, pady=(4, 6))
         hf.columnconfigure(0, weight=1)
         hf.columnconfigure(1, weight=1)
         hf.columnconfigure(2, weight=1)
 
-        for col, (label, key, color) in enumerate([
-            ("3 / 3",  "hits_33", _GREEN),
-            ("2 / 3",  "hits_23", _BLUE),
-            ("Duds",   "duds",    _GREY),
+        for col, (label, key_run, key_all, color) in enumerate([
+            ("3 / 3",  "hits_33", "at_33",   _GREEN),
+            ("2 / 3",  "hits_23", "at_23",   _BLUE),
+            ("Duds",   "duds",    "at_duds", _GREY),
         ]):
             cell = tk.Frame(hf, bg=_BG)
-            cell.grid(row=0, column=col)
+            cell.grid(row=0, column=col, sticky="n", pady=2)
             tk.Label(cell, text=label, bg=_BG, fg=_DIM,
                      font=("Consolas", 8)).pack()
-            tk.Label(cell, textvariable=sv(key, "0"), bg=_BG, fg=color,
-                     font=("Consolas", 26, "bold")).pack()
+            tk.Label(cell, text="this run", bg=_BG, fg=_DIM,
+                     font=("Consolas", 7)).pack()
+            tk.Label(cell, textvariable=sv(key_run, "0"), bg=_BG, fg=color,
+                     font=("Consolas", 22, "bold")).pack()
+            tk.Label(cell, text="all time", bg=_BG, fg=_DIM,
+                     font=("Consolas", 7)).pack(pady=(4, 0))
+            tk.Label(cell, textvariable=sv(key_all, "0"), bg=_BG, fg=color,
+                     font=("Consolas", 14, "bold")).pack()
+
+        _hline(w)
+
+        # ── Best Batches scoreboard ───────────────────────────────────── #
+        bb_hdr = tk.Frame(w, bg=_BG)
+        bb_hdr.pack(fill="x", padx=10, pady=(4, 2))
+        tk.Label(bb_hdr, text="BEST BATCHES", bg=_BG, fg=_DIM,
+                 font=("Consolas", 8, "bold")).pack(anchor="w")
+
+        bb = tk.Frame(w, bg=_BG)
+        bb.pack(fill="x", padx=14, pady=(0, 4))
+
+        row_33 = tk.Frame(bb, bg=_BG)
+        row_33.pack(fill="x", pady=1)
+        tk.Label(row_33, text="Most 3/3 :", bg=_BG, fg=_GREEN,
+                 font=("Consolas", 8, "bold"), width=11, anchor="w").pack(side="left")
+        tk.Label(row_33, textvariable=sv("best_33", "N/A"), bg=_BG, fg=_FG,
+                 font=("Consolas", 8)).pack(side="left")
+
+        row_top = tk.Frame(bb, bg=_BG)
+        row_top.pack(fill="x", pady=1)
+        tk.Label(row_top, text="Most Hits:", bg=_BG, fg=_CYAN,
+                 font=("Consolas", 8, "bold"), width=11, anchor="w").pack(side="left")
+        tk.Label(row_top, textvariable=sv("best_hits", "N/A"), bg=_BG, fg=_FG,
+                 font=("Consolas", 8)).pack(side="left")
 
         _hline(w)
 

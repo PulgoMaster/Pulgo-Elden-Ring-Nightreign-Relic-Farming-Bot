@@ -372,9 +372,17 @@ class RelicBotApp(tk.Tk):
         # Overlay (Batch Mode only)
         self._overlay = None
         self._overlay_enabled_var = tk.BooleanVar(value=True)
+        # Per-run counters (reset each start)
         self._ov_hits_33 = 0
         self._ov_hits_23 = 0
         self._ov_duds    = 0
+        # All-time counters (persist across runs via stats file)
+        self._ov_at_33   = 0
+        self._ov_at_23   = 0
+        self._ov_at_duds = 0
+        # Best-batch scoreboard (persists)
+        self._best_33_iter   = None  # {"iteration": n, "count": x}
+        self._best_hits_iter = None  # {"iteration": n, "count": x}
 
         theme.apply(self)
         self._build_ui()
@@ -384,6 +392,7 @@ class RelicBotApp(tk.Tk):
         os.makedirs(_PROFILES_DIR, exist_ok=True)
         self._refresh_profile_list()
         self.after(200, self._log_screen_resolution)
+        self._load_all_time_stats()
 
     # ------------------------------------------------------------------ #
     #  UI CONSTRUCTION
@@ -1484,6 +1493,7 @@ class RelicBotApp(tk.Tk):
 
         self.bot_running = True
         self.attempt_count = 0
+        # Reset per-run counters only; all-time counters persist
         self._ov_hits_33 = 0
         self._ov_hits_23 = 0
         self._ov_duds    = 0
@@ -1507,6 +1517,16 @@ class RelicBotApp(tk.Tk):
             exe_frag = os.path.splitext(
                 os.path.basename(self.game_exe_var.get().strip()))[0].lower() or "nightreign"
             self._overlay.start_game_watch(exe_frag)
+            # Seed overlay with loaded all-time stats immediately
+            def _fmt_best(info, suffix):
+                if info is None:
+                    return "N/A"
+                return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
+            self._overlay.update(
+                at_33=self._ov_at_33, at_23=self._ov_at_23, at_duds=self._ov_at_duds,
+                best_33=_fmt_best(self._best_33_iter, "★★★"),
+                best_hits=_fmt_best(self._best_hits_iter, "hits"),
+            )
 
         self._set_status("Running (Batch)…", "green")
         self.bot_thread = threading.Thread(target=self._batch_loop, daemon=True)
@@ -1740,18 +1760,47 @@ class RelicBotApp(tk.Tk):
             screenshots = [rr.get("_screenshot_file", "") for rr in relic_results
                            if rr.get("_screenshot_file")]
 
-            # Update overlay hit counters
+            # Update overlay hit counters (per-run and all-time)
+            if num_matched >= 3:
+                self._ov_hits_33 += 1
+                self._ov_at_33   += 1
+            elif num_matched >= hit_min:
+                self._ov_hits_23 += 1
+                self._ov_at_23   += 1
+            else:
+                self._ov_duds    += 1
+                self._ov_at_duds += 1
+
+            # Update best-batch scoreboard using per-relic tier counts
+            iter_g3, iter_g2 = self._count_relic_tiers(relic_results, hit_min)
+            iter_total = iter_g3 + iter_g2
+            if iter_g3 > 0:
+                if self._best_33_iter is None or iter_g3 > self._best_33_iter["count"]:
+                    self._best_33_iter = {"iteration": iteration, "count": iter_g3}
+            if iter_total > 0:
+                if self._best_hits_iter is None or iter_total > self._best_hits_iter["count"]:
+                    self._best_hits_iter = {"iteration": iteration, "count": iter_total}
+
+            # Push all stats to overlay
             if self._overlay:
-                if num_matched >= 3:
-                    self._ov_hits_33 += 1
-                elif num_matched >= hit_min:
-                    self._ov_hits_23 += 1
-                else:
-                    self._ov_duds += 1
+                def _fmt_best(info, suffix):
+                    if info is None:
+                        return "N/A"
+                    return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
+
                 ov = self._overlay
                 h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
+                at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+                b33  = _fmt_best(self._best_33_iter,   "★★★")
+                bhit = _fmt_best(self._best_hits_iter, "hits")
                 self.after(0, lambda: ov.update(
-                    hits_33=h33, hits_23=h23, duds=dds) if ov._win else None)
+                    hits_33=h33, hits_23=h23, duds=dds,
+                    at_33=at33, at_23=at23, at_duds=atd,
+                    best_33=b33, best_hits=bhit,
+                ) if ov._win else None)
+
+            # Persist stats after every iteration
+            self._save_stats()
 
             if num_matched >= 3:
                 self._log(f"★★★ GOD ROLL — Iteration {iteration}: {matched_relic}")
@@ -2158,6 +2207,99 @@ class RelicBotApp(tk.Tk):
         self._log_result(result)
         relic_results.append(result)
         return relic_results
+
+    # ------------------------------------------------------------------ #
+    #  OVERLAY STATS PERSISTENCE
+    # ------------------------------------------------------------------ #
+
+    def _stats_path(self) -> str:
+        output_dir = self.output_dir_var.get().strip() or os.path.join(_REPO_ROOT, "batch_output")
+        return os.path.join(output_dir, "overlay_stats.txt")
+
+    def _load_all_time_stats(self) -> None:
+        """Load all-time counters and best-batch info from the stats file."""
+        path = self._stats_path()
+        if not os.path.exists(path):
+            return
+        try:
+            section = None
+            best33  = {}
+            besthit = {}
+            with open(path, encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if line.startswith("[") and line.endswith("]"):
+                        section = line[1:-1]
+                        continue
+                    if "=" not in line or line.startswith("#"):
+                        continue
+                    key, _, val = line.partition("=")
+                    key = key.strip(); val = val.strip()
+                    if section == "All Time":
+                        if key == "hits_33":   self._ov_at_33   = int(val)
+                        elif key == "hits_23": self._ov_at_23   = int(val)
+                        elif key == "duds":    self._ov_at_duds = int(val)
+                    elif section == "Best Batches":
+                        if key == "most_33_iteration":    best33["iteration"]  = int(val)
+                        elif key == "most_33_count":      best33["count"]      = int(val)
+                        elif key == "most_hits_iteration": besthit["iteration"] = int(val)
+                        elif key == "most_hits_count":    besthit["count"]     = int(val)
+            if "iteration" in best33 and "count" in best33:
+                self._best_33_iter = best33
+            if "iteration" in besthit and "count" in besthit:
+                self._best_hits_iter = besthit
+        except Exception:
+            pass
+
+    def _save_stats(self) -> None:
+        """Write the stats file with this-run + all-time data + best batches."""
+        import datetime
+        path = self._stats_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"# Relic Bot Overlay Stats — Last Updated: {ts}\n")
+                f.write("# This file carries stats between bot sessions. Safe to read; do not edit manually.\n\n")
+
+                f.write("[This Run]\n")
+                f.write(f"iterations = {self.attempt_count}\n")
+                f.write(f"hits_33 = {self._ov_hits_33}\n")
+                f.write(f"hits_23 = {self._ov_hits_23}\n")
+                f.write(f"duds = {self._ov_duds}\n\n")
+
+                f.write("[All Time]\n")
+                f.write(f"hits_33 = {self._ov_at_33}\n")
+                f.write(f"hits_23 = {self._ov_at_23}\n")
+                f.write(f"duds = {self._ov_at_duds}\n\n")
+
+                f.write("[Best Batches]\n")
+                if self._best_33_iter:
+                    f.write(f"most_33_iteration = {self._best_33_iter['iteration']}\n")
+                    f.write(f"most_33_count = {self._best_33_iter['count']}\n")
+                if self._best_hits_iter:
+                    f.write(f"most_hits_iteration = {self._best_hits_iter['iteration']}\n")
+                    f.write(f"most_hits_count = {self._best_hits_iter['count']}\n")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _count_relic_tiers(relic_results: list, hit_min: int) -> tuple[int, int]:
+        """Return (g3_count, g2_count) for relics in this iteration."""
+        g3 = g2 = 0
+        for r in relic_results:
+            n = len(r.get("matched_passives", []))
+            if n == 0 and r.get("near_misses"):
+                n = max(
+                    nm.get("matching_passive_count",
+                           len(nm.get("matching_passives", [])))
+                    for nm in r["near_misses"]
+                )
+            if n >= 3:
+                g3 += 1
+            elif n >= hit_min:
+                g2 += 1
+        return g3, g2
 
     # ------------------------------------------------------------------ #
     #  SHARED HELPERS
