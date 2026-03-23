@@ -9,11 +9,11 @@ Two modes:
                README.txt summarising matches (with passives + screenshots).
 """
 
-import concurrent.futures
 import ctypes
 import json
 import math
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -682,18 +682,26 @@ class RelicBotApp(tk.Tk):
         _Tooltip(bf_chk,
                  "Runs multiple OCR workers in parallel to speed up relic analysis.\n"
                  "Each extra worker loads an additional ~100 MB of RAM for the OCR model.\n\n"
-                 "Recommended: 2 workers (safe for most PCs, ~2× faster).\n"
-                 "Max: 4 workers (high-end PCs only — very CPU/RAM intensive).\n\n"
+                 "Recommended: 2–4 workers (safe for most PCs).\n"
+                 "6+ workers: use at your own discretion — very high CPU/RAM usage.\n"
+                 "Max: 8 workers.\n\n"
                  "Leave OFF if you notice crashes or system slowdowns.")
         ttk.Label(self.batch_frame, text="Workers:").grid(row=4, column=2, **pad)
         self._parallel_spin = ttk.Spinbox(
-            self.batch_frame, from_=2, to=4, width=4,
+            self.batch_frame, from_=2, to=8, width=4,
             textvariable=self._parallel_workers_var, state="disabled",
         )
         self._parallel_spin.grid(row=4, column=3, sticky="w", **pad)
         _Tooltip(self._parallel_spin,
-                 "Number of parallel OCR workers (2–4).\n"
-                 "Each worker uses ~100 MB extra RAM for its own OCR model.")
+                 "Number of parallel OCR workers (2–8).\n"
+                 "Each worker uses ~100 MB extra RAM for its own OCR model.\n\n"
+                 "⚠ 6+ workers: use at your own discretion.\n"
+                 "Very high CPU and RAM usage — may destabilise the game or OS.")
+        self._ram_label_var = tk.StringVar(value="")
+        self._ram_label = ttk.Label(self.batch_frame, textvariable=self._ram_label_var,
+                                    foreground=theme.TEXT_MUTED)
+        self._ram_label.grid(row=4, column=4, sticky="w", **pad)
+        self._parallel_workers_var.trace_add("write", lambda *_: self._update_ram_label())
 
         # ── Bot Control ─────────────────────────────────────────────── #
         ctrl_frame = ttk.LabelFrame(inner, text="Bot Control")
@@ -966,6 +974,25 @@ class RelicBotApp(tk.Tk):
         """Enable/disable the workers spinbox based on the Brute Force checkbox."""
         state = "normal" if self._parallel_enabled_var.get() else "disabled"
         self._parallel_spin.config(state=state)
+        self._update_ram_label()
+
+    def _update_ram_label(self):
+        """Update the RAM estimate label next to the workers spinbox."""
+        if not self._parallel_enabled_var.get():
+            self._ram_label_var.set("")
+            return
+        try:
+            w = int(self._parallel_workers_var.get())
+        except (ValueError, tk.TclError):
+            self._ram_label_var.set("")
+            return
+        mb = w * 100
+        if w >= 6:
+            self._ram_label_var.set(f"~{mb} MB RAM ⚠")
+            self._ram_label.configure(foreground="#d4a843")
+        else:
+            self._ram_label_var.set(f"~{mb} MB RAM")
+            self._ram_label.configure(foreground=theme.TEXT_MUTED)
 
     def _browse_game_exe(self):
         path = filedialog.askopenfilename(
@@ -2194,126 +2221,182 @@ class RelicBotApp(tk.Tk):
             # while the bot navigates to the next relic.
             # Each worker thread gets its own EasyOCR reader (thread-local) so
             # multiple workers can safely run OCR in parallel.
-            _workers = (max(2, min(4, self._parallel_workers_var.get()))
+            _workers = (max(2, min(8, self._parallel_workers_var.get()))
                         if self._parallel_enabled_var.get() else 1)
             if _workers > 1:
                 self._log(f"  Brute Force Analysis: {_workers} parallel OCR workers.")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=_workers) as executor:
-                future_to_step: dict = {}
 
-                for step_i in range(total):
-                    if not self.bot_running:
-                        return relic_results
+            # Priority queue: workers atomically claim the lowest-numbered
+            # available relic — get() is atomic so only one worker ever owns
+            # each item; workers always pull the smallest relic index first.
+            _task_q       = queue.PriorityQueue()   # (relic_index, img_bytes)
+            _done_q       = queue.Queue()            # (relic_index, img_bytes, result, exc)
+            _capture_done = threading.Event()
 
-                    self._check_pause_point(f"{label}: capturing relic {step_i + 1}/{total}")
-                    if not self.bot_running:
-                        return relic_results
-
-                    if step_i > 0:
-                        self.player.play_fast(self.phase_events[4])
-                        if p4_settle > 0:
-                            time.sleep(p4_settle)
-                        if not self.bot_running:
-                            return relic_results
-
-                    self._set_status(
-                        f"{label}: capturing relic {step_i + 1}/{total}…", "#006600")
-                    if self._overlay:
-                        ov = self._overlay
-                        si, tot = step_i + 1, total
-                        self.after(0, lambda si=si, tot=tot: ov.update(
-                            relic_num=f"{si} / {tot}", analysing=str(si),
-                        ) if ov._win else None)
-                    self.after(0, self._flash_capture)
+            def _ocr_worker():
+                while True:
                     try:
-                        img = screen_capture.capture(region)
-                    except Exception as e:
-                        self._log(f"ERROR capturing relic {step_i + 1}: {e}")
-                        return None
+                        _si, _img = _task_q.get(timeout=0.3)
+                    except queue.Empty:
+                        if _capture_done.is_set() and _task_q.empty():
+                            break
+                        continue
+                    try:
+                        _res = relic_analyzer.analyze(_img, criteria)
+                        _done_q.put((_si, _img, _res, None))
+                    except Exception as _exc:
+                        _done_q.put((_si, _img, None, _exc))
 
-                    # Submit for analysis immediately — runs while we move to next relic
-                    future = executor.submit(relic_analyzer.analyze, img, criteria)
-                    future_to_step[future] = (step_i, img)
+            _worker_threads = [
+                threading.Thread(target=_ocr_worker, daemon=True,
+                                 name=f"ocr-worker-{_n}")
+                for _n in range(_workers)
+            ]
+            for _t in _worker_threads:
+                _t.start()
 
+            def _stop_workers():
+                _capture_done.set()
+                for _t in _worker_threads:
+                    _t.join(timeout=1.0)
+
+            _submitted = 0
+            for step_i in range(total):
                 if not self.bot_running:
+                    _stop_workers()
                     return relic_results
 
-                # Collect results — most will already be done since analysis ran
-                # in parallel with navigation.
-                pending = len(future_to_step)
+                self._check_pause_point(f"{label}: capturing relic {step_i + 1}/{total}")
+                if not self.bot_running:
+                    _stop_workers()
+                    return relic_results
+
+                if step_i > 0:
+                    self.player.play_fast(self.phase_events[4])
+                    if p4_settle > 0:
+                        time.sleep(p4_settle)
+                    if not self.bot_running:
+                        _stop_workers()
+                        return relic_results
+
                 self._set_status(
-                    f"{label}: finishing analysis ({pending} relic(s))…", "#0066cc")
+                    f"{label}: capturing relic {step_i + 1}/{total}…", "#006600")
+                if self._overlay:
+                    ov = self._overlay
+                    si, tot = step_i + 1, total
+                    self.after(0, lambda si=si, tot=tot: ov.update(
+                        relic_num=f"{si} / {tot}", analysing=str(si),
+                    ) if ov._win else None)
+                self.after(0, self._flash_capture)
+                try:
+                    img = screen_capture.capture(region)
+                except Exception as e:
+                    self._log(f"ERROR capturing relic {step_i + 1}: {e}")
+                    _stop_workers()
+                    return None
 
-                for future in concurrent.futures.as_completed(future_to_step):
-                    step_i, img = future_to_step[future]
-                    try:
-                        result = future.result()
-                    except Exception as e:
-                        self._log(f"ERROR analyzing relic {step_i + 1}: {e}")
-                        return None
+                # Atomically enqueue — lowest index always dequeued first;
+                # exactly one worker will claim this item.
+                _task_q.put((step_i, img))
+                _submitted += 1
 
-                    self._log(f"  Relic {step_i + 1}:")
-                    self._log_result(result)
+            _capture_done.set()   # no more tasks coming
 
-                    # Save screenshot if match or near-miss; discard otherwise
-                    saved_fname = ""
-                    if iter_dir and img:
-                        is_match = result.get("match", False)
-                        best_nm = max(
-                            (nm.get("matching_passive_count",
-                                    len(nm.get("matching_passives", [])))
-                             for nm in result.get("near_misses", [])),
-                            default=0,
-                        )
-                        tag = "MATCH" if is_match else ("HIT" if best_nm >= hit_min else "")
-                        if tag:
-                            saved_fname = f"relic_{step_i + 1:02d}_{tag}.jpg"
-                            try:
-                                with open(os.path.join(iter_dir, saved_fname), "wb") as _f:
-                                    _f.write(img)
-                                self._log(f"  Screenshot saved: {saved_fname}")
-                            except Exception as _e:
-                                self._log(f"WARNING: could not save screenshot: {_e}")
-                                saved_fname = ""
+            if not self.bot_running:
+                for _t in _worker_threads:
+                    _t.join(timeout=1.0)
+                return relic_results
 
-                    result["_image_bytes"] = None   # free memory
-                    result["_screenshot_file"] = saved_fname
+            # Collect results as workers complete them
+            _collected = 0
+            while _collected < _submitted:
+                if not self.bot_running:
+                    break
+                try:
+                    step_i, img, result, exc = _done_q.get(timeout=0.5)
+                except queue.Empty:
+                    if all(not _t.is_alive() for _t in _worker_threads):
+                        break
+                    continue
 
-                    if live_log_path:
+                _collected += 1
+                _remaining = _submitted - _collected
+                if _remaining > 0:
+                    self._set_status(
+                        f"{label}: finishing analysis ({_remaining} relic(s))…",
+                        "#0066cc")
+
+                if exc is not None:
+                    self._log(f"ERROR analyzing relic {step_i + 1}: {exc}")
+                    for _t in _worker_threads:
+                        _t.join(timeout=1.0)
+                    return None
+
+                self._log(f"  Relic {step_i + 1}:")
+                self._log_result(result)
+
+                # Save screenshot if match or near-miss; discard otherwise
+                saved_fname = ""
+                if iter_dir and img:
+                    is_match = result.get("match", False)
+                    best_nm = max(
+                        (nm.get("matching_passive_count",
+                                len(nm.get("matching_passives", [])))
+                         for nm in result.get("near_misses", [])),
+                        default=0,
+                    )
+                    tag = "MATCH" if is_match else ("HIT" if best_nm >= hit_min else "")
+                    if tag:
+                        saved_fname = f"relic_{step_i + 1:02d}_{tag}.jpg"
                         try:
-                            relics = result.get("relics_found", [])
-                            r0 = relics[0] if relics else {}
-                            rname = r0.get("name", "Unknown") if isinstance(r0, dict) else str(r0)
-                            passives = r0.get("passives", []) if isinstance(r0, dict) else []
-                            status = "MATCH" if result.get("match") else "no match"
-                            line = (f"  Relic {step_i + 1:02d}: [{status}] {rname}"
-                                    f"  | {', '.join(passives) or '—'}")
-                            if saved_fname:
-                                line += f"  → {saved_fname}"
-                            with open(live_log_path, "a", encoding="utf-8") as _f:
-                                _f.write(line + "\n")
-                        except Exception:
-                            pass
+                            with open(os.path.join(iter_dir, saved_fname), "wb") as _f:
+                                _f.write(img)
+                            self._log(f"  Screenshot saved: {saved_fname}")
+                        except Exception as _e:
+                            self._log(f"WARNING: could not save screenshot: {_e}")
+                            saved_fname = ""
 
-                    ordered[step_i] = result
+                result["_image_bytes"] = None   # free memory
+                result["_screenshot_file"] = saved_fname
 
-                    # Live-update overlay tier counters after each relic
-                    r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
-                    self._ov_hits_33 += r_g3
-                    self._ov_at_33   += r_g3
-                    self._ov_hits_23 += r_g2
-                    self._ov_at_23   += r_g2
-                    self._ov_duds    += r_dud
-                    self._ov_at_duds += r_dud
-                    if self._overlay:
-                        ov = self._overlay
-                        h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
-                        at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
-                        self.after(0, lambda h33=h33, h23=h23, dds=dds,
-                                   at33=at33, at23=at23, atd=atd:
-                                   ov.update(hits_33=h33, hits_23=h23, duds=dds,
-                                             at_33=at33, at_23=at23, at_duds=atd)
-                                   if ov._win else None)
+                if live_log_path:
+                    try:
+                        relics = result.get("relics_found", [])
+                        r0 = relics[0] if relics else {}
+                        rname = r0.get("name", "Unknown") if isinstance(r0, dict) else str(r0)
+                        passives_found = r0.get("passives", []) if isinstance(r0, dict) else []
+                        status = "MATCH" if result.get("match") else "no match"
+                        line = (f"  Relic {step_i + 1:02d}: [{status}] {rname}"
+                                f"  | {', '.join(passives_found) or '—'}")
+                        if saved_fname:
+                            line += f"  → {saved_fname}"
+                        with open(live_log_path, "a", encoding="utf-8") as _f:
+                            _f.write(line + "\n")
+                    except Exception:
+                        pass
+
+                ordered[step_i] = result
+
+                # Live-update overlay tier counters after each relic
+                r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
+                self._ov_hits_33 += r_g3
+                self._ov_at_33   += r_g3
+                self._ov_hits_23 += r_g2
+                self._ov_at_23   += r_g2
+                self._ov_duds    += r_dud
+                self._ov_at_duds += r_dud
+                if self._overlay:
+                    ov = self._overlay
+                    h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
+                    at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+                    self.after(0, lambda h33=h33, h23=h23, dds=dds,
+                               at33=at33, at23=at23, atd=atd:
+                               ov.update(hits_33=h33, hits_23=h23, duds=dds,
+                                         at_33=at33, at_23=at23, at_duds=atd)
+                               if ov._win else None)
+
+            for _t in _worker_threads:
+                _t.join(timeout=2.0)
 
             for result in ordered:
                 if result is not None:
