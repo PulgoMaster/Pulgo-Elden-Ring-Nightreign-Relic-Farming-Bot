@@ -1207,7 +1207,14 @@ class RelicBotApp(tk.Tk):
             "and relaunch it at the start of each iteration.\n\n"
             "Click OK to begin."
         )
-        messagebox.showinfo("Backup Ready", msg)
+        # Hide overlay so it can't block this dialog
+        if self._overlay:
+            self._overlay.hide()
+        self.lift()
+        self.focus_force()
+        messagebox.showinfo("Backup Ready", msg, parent=self)
+        if self._overlay:
+            self._overlay.show()
         self._ready_event.set()
 
     # ------------------------------------------------------------------ #
