@@ -464,82 +464,35 @@ class RelicBotApp(tk.Tk):
         _ck_entry.grid(row=4, column=1, sticky="w", **pad)
         _Tooltip(_ck_entry, "The key used to confirm/interact in-game.\nSpammed automatically during the load wait to skip title screens and navigate menus.")
 
-        # ── Sequence Phases ──────────────────────────────────────────── #
-        seq_frame = ttk.LabelFrame(inner, text="Sequence Phases")
-        seq_frame.grid(row=6, column=0, sticky="ew", **pad)
+        # ── Choose Relic Type + Color Filter ────────────────────────── #
+        type_color_frame = ttk.LabelFrame(inner, text="Choose Relic Type")
+        type_color_frame.grid(row=2, column=0, sticky="ew", **pad)
 
-        # Relic type selector — determines murk cost per relic and auto-loads Phase 0
-        rtype_frame = ttk.Frame(seq_frame)
-        rtype_frame.grid(row=0, column=0, sticky="w", **pad)
-        ttk.Label(rtype_frame, text="Relic type:").pack(side="left", padx=(0, 6))
-        ttk.Radiobutton(rtype_frame, text="Deep of Night  (1800 murk each)",
+        self._gem_mode_var = tk.StringVar(value="don")   # driven by relic_type_var; used by _refresh_gem_images
+
+        rtype_row = ttk.Frame(type_color_frame)
+        rtype_row.pack(anchor="w", padx=6, pady=(6, 4))
+        ttk.Radiobutton(rtype_row, text="Deep of Night  (1800 murk each)",
                         variable=self.relic_type_var, value="night",
-                        command=self._on_relic_type_change).pack(side="left", padx=4)
-        ttk.Radiobutton(rtype_frame, text="Normal  (600 murk each)",
+                        command=self._on_relic_type_change).pack(side="left", padx=(0, 8))
+        ttk.Radiobutton(rtype_row, text="Normal  (600 murk each)",
                         variable=self.relic_type_var, value="normal",
-                        command=self._on_relic_type_change).pack(side="left", padx=4)
-        _Tooltip(rtype_frame, "Deep of Night relics cost 1800 murk each and have stronger passives.\nNormal relics cost 600 murk each. This also auto-loads the correct Setup sequence.")
+                        command=self._on_relic_type_change).pack(side="left")
+        _Tooltip(rtype_row,
+                 "Deep of Night relics cost 1800 murk each and have stronger passives.\n"
+                 "Normal relics cost 600 murk each.\n"
+                 "This also auto-loads the correct Setup sequence and updates the gem images below.")
 
-        # Per-phase status labels (event counts)
-        self.phase_stop_text_vars = [None, tk.StringVar(value="Insufficient murk"),
-                                     None, None, None]
-        self.phase_max_vars   = [None, tk.StringVar(value="50"),
-                                 None, None, tk.StringVar(value="30")]
-        self.phase_settle_vars = [None, tk.StringVar(value="0"),
-                                  None, None, tk.StringVar(value="0.45")]
-        self.phase_count_vars = [tk.StringVar(value="0 events")
-                                 for _ in self._PHASE_NAMES]
-
-        status_row = ttk.Frame(seq_frame)
-        status_row.grid(row=1, column=0, sticky="w", **pad)
-        for i, name in enumerate(self._PHASE_NAMES):
-            ttk.Label(status_row, text=f"{name}:", foreground=theme.TEXT_MUTED).pack(
-                side="left", padx=(12 if i else 0, 2))
-            ttk.Label(status_row, textvariable=self.phase_count_vars[i]).pack(side="left", padx=(0, 8))
-
-        self._manual_setup_expanded = False
-        self._manual_toggle_btn = ttk.Button(
-            seq_frame, text="Manual Key Recording ▼",
-            command=self._toggle_manual_setup)
-        self._manual_toggle_btn.grid(row=2, column=0, sticky="w", **pad)
-
-        # Collapsible recording frame (hidden by default)
-        self._manual_setup_frame = ttk.Frame(seq_frame)
-        self._build_manual_setup_frame()
-
-        # ── Relic Criteria (builder with Free Text / Exact / Pool tabs) ─ #
-        self.relic_builder = RelicBuilderFrame(inner)
-        self.relic_builder.grid(row=2, column=0, sticky="ew", **pad)
-
-        # ── Relic Color Filter ───────────────────────────────────────── #
-        color_frame = ttk.LabelFrame(inner, text="Relic Color Filter  (only relics of selected colors count as matches)")
-        color_frame.grid(row=3, column=0, sticky="ew", **pad)
+        ttk.Separator(type_color_frame, orient="horizontal").pack(fill="x", padx=6, pady=(0, 4))
 
         ttk.Label(
-            color_frame,
+            type_color_frame,
             text="Select which relic colors you are hunting for. At least one color must be enabled.",
             foreground=theme.TEXT_MUTED, wraplength=700,
-        ).pack(anchor="w", padx=6, pady=(4, 2))
-
-        # Game mode toggle — switches gem image variant (Normal vs Deep of Night)
-        mode_row = ttk.Frame(color_frame)
-        mode_row.pack(anchor="w", padx=6, pady=(0, 4))
-        ttk.Label(mode_row, text="Relic Mode:").pack(side="left")
-        self._gem_mode_var = tk.StringVar(value="normal")
-        ttk.Radiobutton(
-            mode_row, text="Normal", variable=self._gem_mode_var, value="normal",
-            command=self._on_gem_mode_change,
-        ).pack(side="left", padx=(6, 2))
-        ttk.Radiobutton(
-            mode_row, text="Deep of Night", variable=self._gem_mode_var, value="don",
-            command=self._on_gem_mode_change,
-        ).pack(side="left", padx=2)
-        _Tooltip(mode_row,
-                 "Deep of Night relics have a darker colour variant.\n"
-                 "Switch here so the images match the mode you're farming.")
+        ).pack(anchor="w", padx=6, pady=(0, 2))
 
         RELIC_COLORS = ["Red", "Blue", "Green", "Yellow"]
-        color_row = ttk.Frame(color_frame)
+        color_row = ttk.Frame(type_color_frame)
         color_row.pack(fill="x", padx=6, pady=(0, 6))
         self._color_vars:     dict[str, tk.BooleanVar] = {}
         self._gem_img_labels: dict[str, tk.Label]      = {}
@@ -561,11 +514,46 @@ class RelicBotApp(tk.Tk):
 
         _Tooltip(color_row, "Relics are identified by a keyword in their name:\nRed = Burning, Blue = Drizzly, Green = Tranquil, Yellow = Luminous.\nDeselect colors you don't want — only matching colors will count as hits.")
 
-        self._color_warn = ttk.Label(color_frame, text="", foreground="#ff6666")
+        self._color_warn = ttk.Label(type_color_frame, text="", foreground="#ff6666")
         self._color_warn.pack(anchor="w", padx=6)
 
         # Populate gem images after widget hierarchy is ready
         self.after(0, self._refresh_gem_images)
+
+        # ── Sequence Phases ──────────────────────────────────────────── #
+        seq_frame = ttk.LabelFrame(inner, text="Sequence Phases")
+        seq_frame.grid(row=6, column=0, sticky="ew", **pad)
+
+        # Per-phase status labels (event counts)
+        self.phase_stop_text_vars = [None, tk.StringVar(value="Insufficient murk"),
+                                     None, None, None]
+        self.phase_max_vars   = [None, tk.StringVar(value="50"),
+                                 None, None, tk.StringVar(value="30")]
+        self.phase_settle_vars = [None, tk.StringVar(value="0"),
+                                  None, None, tk.StringVar(value="0.45")]
+        self.phase_count_vars = [tk.StringVar(value="0 events")
+                                 for _ in self._PHASE_NAMES]
+
+        status_row = ttk.Frame(seq_frame)
+        status_row.grid(row=0, column=0, sticky="w", **pad)
+        for i, name in enumerate(self._PHASE_NAMES):
+            ttk.Label(status_row, text=f"{name}:", foreground=theme.TEXT_MUTED).pack(
+                side="left", padx=(12 if i else 0, 2))
+            ttk.Label(status_row, textvariable=self.phase_count_vars[i]).pack(side="left", padx=(0, 8))
+
+        self._manual_setup_expanded = False
+        self._manual_toggle_btn = ttk.Button(
+            seq_frame, text="Manual Key Recording ▼",
+            command=self._toggle_manual_setup)
+        self._manual_toggle_btn.grid(row=1, column=0, sticky="w", **pad)
+
+        # Collapsible recording frame (hidden by default)
+        self._manual_setup_frame = ttk.Frame(seq_frame)
+        self._build_manual_setup_frame()
+
+        # ── Relic Criteria (builder with Free Text / Exact / Pool tabs) ─ #
+        self.relic_builder = RelicBuilderFrame(inner)
+        self.relic_builder.grid(row=3, column=0, sticky="ew", **pad)
 
         # ── Curse Filter ─────────────────────────────────────────────── #
         curse_frame = ttk.LabelFrame(inner, text="Curse Filter  (relics with these curses are rejected)")
@@ -880,8 +868,10 @@ class RelicBotApp(tk.Tk):
                 self._log(f"WARNING: Sequence file not found for Phase {i}: {path}")
 
     def _on_relic_type_change(self):
-        """Swap Phase 0 sequence when the user switches relic type."""
+        """Swap Phase 0 sequence and sync gem images when the user switches relic type."""
         rtype = self.relic_type_var.get()
+        self._gem_mode_var.set("don" if rtype == "night" else "normal")
+        self._refresh_gem_images()
         fname = ("phase0_setup_don.json" if rtype == "night" else "phase0_setup_normal.json")
         path = os.path.join(self._SEQ_DIR, fname)
         if os.path.exists(path):
@@ -968,7 +958,6 @@ class RelicBotApp(tk.Tk):
             "hotkey_display": self._hotkey_display,
             "blocked_curses": list(self._blocked_curses_list),
             "allowed_colors": self._get_allowed_colors(),
-            "gem_mode": self._gem_mode_var.get(),
             "criteria": self.relic_builder.get_state(),
         }
 
@@ -1019,9 +1008,9 @@ class RelicBotApp(tk.Tk):
             saved = data["allowed_colors"]
             for color, var in self._color_vars.items():
                 var.set(color in saved)
-        if "gem_mode" in data:
-            self._gem_mode_var.set(data["gem_mode"])
-            self._refresh_gem_images()
+        # gem images follow relic_type — sync after relic_type is loaded
+        self._gem_mode_var.set("don" if self.relic_type_var.get() == "night" else "normal")
+        self._refresh_gem_images()
         if "criteria" in data:
             self.relic_builder.set_state(data["criteria"])
 
@@ -2246,10 +2235,6 @@ class RelicBotApp(tk.Tk):
         if var:
             var.set(not var.get())
             self._on_color_change()
-
-    def _on_gem_mode_change(self):
-        """Swap gem images when the Normal / Deep of Night radio changes."""
-        self._refresh_gem_images()
 
     def _refresh_gem_images(self):
         """Update all gem image labels to match the current gem mode."""
