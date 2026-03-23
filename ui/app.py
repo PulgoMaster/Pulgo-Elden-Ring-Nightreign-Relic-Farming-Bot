@@ -794,12 +794,17 @@ class RelicBotApp(tk.Tk):
             ),
             (
                 "Navigate to Sell",
-                "Repeats F2 until OCR confirms the Sell tab is open — universal across setups.",
+                "Automatic — OCR detects which character tab is active, then presses F2 exactly N times.",
                 (
-                    "Phase 3 — Navigate to Sell\n"
-                    "Presses F2 repeatedly until OCR detects that the Sell tab is active.\n"
-                    "Fully OCR-driven — adapts automatically to how long the menu takes to open.\n\n"
-                    "Works for all setups — no re-recording needed."
+                    "Phase 3 — Navigate to Sell  (no recording needed)\n"
+                    "Runs automatically whenever Phase 2 is configured.\n\n"
+                    "How it works:\n"
+                    "  1. Takes a screenshot and identifies the active character tab via OCR.\n"
+                    "  2. Presses F2 the exact number of times needed to reach Sell\n"
+                    "     (Wylder=10, Guardian=9 … Undertaker=1, Sell=0).\n"
+                    "  3. Verifies the Sell page is open.  If not, runs a safety F2 loop\n"
+                    "     (up to 15 extra presses) to recover automatically.\n\n"
+                    "No recording required — this phase adapts to any starting tab."
                 ),
                 False,
             ),
@@ -1923,8 +1928,9 @@ class RelicBotApp(tk.Tk):
         Phases:
           0 – Setup            : plays once
           1 – Buy Loop         : repeats until Phase 1 stop text detected (internal failsafe: 500)
-          2 – Navigate to Sell : loops input until OCR detects sell page (internal failsafe: 30)
-          3 – Review Setup     : plays once
+          2 – Relic Rites Nav  : plays once — opens the Relic Rites sell screen
+          3 – Navigate to Sell : automatic — OCR detects active tab, presses F2 N times;
+                                 falls back to F2 loop if verification fails (failsafe: 15)
           4 – Review Step      : repeats; analyzes each relic (internal failsafe: 200)
 
         Returns a list of result dicts (one per relic analyzed).
@@ -2058,30 +2064,73 @@ class RelicBotApp(tk.Tk):
             if not self.bot_running:
                 return relic_results
 
-        # ── Phase 3: Navigate to Sell (F2 loop until sell page detected) ─ #
-        if self.phase_events[3]:
+        # ── Phase 3: Navigate to Sell (smart tab detection + targeted F2) ─ #
+        # Runs whenever Phase 2 (Relic Rites Nav) is configured.
+        # 1. Take a screenshot and OCR the tab bar to identify the active tab.
+        # 2. Press F2 exactly N times (0.35 s gap) to reach Sell.
+        # 3. Verify we landed on Sell.  If not, run a fallback F2 loop.
+        _P3_FAILSAFE = 15   # max extra F2 presses in the fallback loop
+        if self.phase_events[2]:
+            self._set_status(f"{label}: detecting tab position…", "green")
+
+            # Step 1 — detect current tab
+            self.after(0, self._flash_capture)
+            try:
+                img = screen_capture.capture(region)
+                tab_name, f2_count = relic_analyzer.detect_current_tab(img)
+            except Exception as e:
+                self._log(f"  WARNING: tab detection error: {e}")
+                tab_name, f2_count = None, 10
+
+            if tab_name:
+                self._log(f"  Tab detected: {tab_name} — pressing F2 × {f2_count}.")
+            else:
+                self._log(f"  Tab detection inconclusive — pressing F2 × {f2_count} (worst-case).")
+
+            # Step 2 — press F2 the calculated number of times
             self._set_status(f"{label}: navigating to sell page…", "green")
-            sell_reached = False
-            for nav_i in range(_P2_FAILSAFE):
+            for _ in range(f2_count):
                 if not self.bot_running:
                     return relic_results
-                self.player.play_fast(self.phase_events[3])
-                if not self.bot_running:
-                    return relic_results
-                time.sleep(0.15)
-                self.after(0, self._flash_capture)
-                try:
-                    img = screen_capture.capture(region)
-                    on_sell_page = relic_analyzer.check_condition(img, "sell")
-                except Exception as e:
-                    self._log(f"WARNING: sell page check failed: {e}")
-                    on_sell_page = False
-                if on_sell_page:
-                    self._log(f"  Sell page reached after {nav_i + 1} step(s).")
-                    sell_reached = True
-                    break
-            if not sell_reached:
-                self._log("  WARNING: Sell page not detected after failsafe — continuing anyway.")
+                self.player.tap("Key.f2", hold=0.05)
+                time.sleep(0.35)
+
+            # Step 3 — verify we landed on Sell
+            if not self.bot_running:
+                return relic_results
+            time.sleep(0.20)
+            self.after(0, self._flash_capture)
+            try:
+                img = screen_capture.capture(region)
+                on_sell_page = relic_analyzer.check_condition(img, "sell")
+            except Exception as e:
+                self._log(f"  WARNING: sell verification error: {e}")
+                on_sell_page = False
+
+            if on_sell_page:
+                self._log("  Sell page confirmed.")
+            else:
+                # Fallback — keep pressing F2 and checking until Sell appears
+                self._log("  Sell page not confirmed — running F2 fallback loop…")
+                sell_reached = False
+                for nav_i in range(_P3_FAILSAFE):
+                    if not self.bot_running:
+                        return relic_results
+                    self.player.tap("Key.f2", hold=0.05)
+                    time.sleep(0.35)
+                    self.after(0, self._flash_capture)
+                    try:
+                        img = screen_capture.capture(region)
+                        on_sell_page = relic_analyzer.check_condition(img, "sell")
+                    except Exception:
+                        on_sell_page = False
+                    if on_sell_page:
+                        self._log(f"  Sell page reached after {nav_i + 1} fallback step(s).")
+                        sell_reached = True
+                        break
+                if not sell_reached:
+                    self._log("  WARNING: Sell page not detected after fallback — continuing anyway.")
+
             if not self.bot_running:
                 return relic_results
 

@@ -196,6 +196,79 @@ def _check_criteria(found: list, criteria: dict) -> tuple:
     return False, [], []
 
 
+# ── Tab detection (Phase 3 smart navigation) ─────────────────────────── #
+
+_TAB_HIERARCHY = [
+    "Wylder", "Guardian", "Ironeye", "Duchess", "Raider",
+    "Revenant", "Recluse", "Executor", "Scholar", "Undertaker", "Sell",
+]
+# How many F2 presses are needed from each tab to reach Sell
+_TAB_F2_COUNT = {name: (len(_TAB_HIERARCHY) - 1 - i) for i, name in enumerate(_TAB_HIERARCHY)}
+# Wylder→10, Guardian→9, Ironeye→8, Duchess→7, Raider→6,
+# Revenant→5, Recluse→4, Executor→3, Scholar→2, Undertaker→1, Sell→0
+
+
+def detect_current_tab(image_bytes: bytes) -> tuple:
+    """
+    Detect which Relic Rites tab is currently active by OCR'ing the tab bar.
+
+    Strategy: The selected tab label is rendered with noticeably brighter text
+    than the inactive tabs.  We OCR the top strip of the screen (where the tab
+    bar lives), score each detected tab name by the average brightness of its
+    bounding box, and return the brightest match.
+
+    Sanity check: the winner must be at least 15 brightness units brighter than
+    the runner-up; if the gap is too small the result is treated as unreliable.
+
+    Returns:
+        (tab_name, f2_presses_needed)  e.g. ("Guardian", 9)
+        (None, 10)                     if detection is inconclusive — callers
+                                       should fall back to the OCR-loop failsafe
+                                       (10 = worst-case press count for Wylder)
+    """
+    reader = _get_reader()
+    img = _to_array(image_bytes, max_width=0)
+    h, w = img.shape[:2]
+    # Tab bar lives in approximately the top 14 % of the screen, full width
+    tab_strip = img[: int(h * 0.14), :]
+
+    results = reader.readtext(tab_strip)
+
+    candidates: list = []  # list of (brightness: float, tab_name: str)
+    for bbox, text, conf in results:
+        if conf < 0.25:
+            continue
+        text_clean = text.strip()
+        for tab in _TAB_HIERARCHY:
+            if tab.lower() in text_clean.lower():
+                pts = np.array(bbox, dtype=int)
+                x0, y0 = pts[:, 0].min(), pts[:, 1].min()
+                x1, y1 = pts[:, 0].max(), pts[:, 1].max()
+                hs, ws = tab_strip.shape[:2]
+                x0, y0 = max(0, x0), max(0, y0)
+                x1, y1 = min(ws, x1), min(hs, y1)
+                region = tab_strip[y0:y1, x0:x1]
+                if region.size == 0:
+                    break
+                brightness = float(region.mean())
+                candidates.append((brightness, tab))
+                break  # one match per OCR result
+
+    if not candidates:
+        return None, 10  # nothing detected — caller uses fallback
+
+    # The selected tab has the brightest text
+    candidates.sort(reverse=True)
+    best_brightness, best_tab = candidates[0]
+
+    # Require the winner to be clearly brighter than the runner-up
+    if len(candidates) >= 2:
+        if best_brightness - candidates[1][0] < 15:
+            return None, 10  # too close to call
+
+    return best_tab, _TAB_F2_COUNT[best_tab]
+
+
 # ── Relic color detection ─────────────────────────────────────────────── #
 
 # Keyword → color: every relic name contains exactly one of these words.
