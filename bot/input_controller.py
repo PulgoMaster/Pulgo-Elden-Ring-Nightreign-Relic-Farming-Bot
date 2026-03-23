@@ -210,13 +210,14 @@ class InputPlayer:
                 self._ms.release(btn)
                 time.sleep(hold + gap)
 
-    def play(self, events: list, speed: float = 1.0):
+    def play(self, events: list, speed: float = 1.0, bypass_focus: bool = False):
         """
         Replay events preserving original timing.
         speed > 1 plays faster, speed < 1 plays slower.
-        Skips all inputs silently if the game window is not in the foreground.
+        Skips all inputs silently if the game window is not in the foreground,
+        unless bypass_focus=True (used for Phase 0 which launches the game).
         """
-        if not self._game_focused():
+        if not bypass_focus and not self._game_focused():
             return
         self._stop_flag = False
         if not events:

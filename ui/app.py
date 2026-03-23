@@ -1948,7 +1948,7 @@ class RelicBotApp(tk.Tk):
             self._check_pause_point(f"{label}: setup phase")
             if not self.bot_running:
                 return relic_results
-            self.player.play(self.phase_events[0])
+            self.player.play(self.phase_events[0], bypass_focus=True)
             if not self.bot_running:
                 return relic_results
 
