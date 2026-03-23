@@ -1651,7 +1651,9 @@ class RelicBotApp(tk.Tk):
                     _eh = (time.time() - start_time) / 3600
                     _bs = f"{_eh:.1f}h / {limit_value:.1f}h"
                 ov = self._overlay
-                self.after(0, lambda s=_bs: ov.update(batch=s) if ov._win else None)
+                self.after(0, lambda s=_bs: ov.update(
+                    batch=s, relic_num="—", analysing="—",
+                ) if ov._win else None)
 
             # Pause checkpoint — blocks here if user has paused
             self._check_pause_point(f"start of iteration {iteration}")
@@ -2167,7 +2169,7 @@ class RelicBotApp(tk.Tk):
                     if self._overlay:
                         ov = self._overlay
                         si, tot = step_i + 1, total
-                        self.after(0, lambda: ov.update(
+                        self.after(0, lambda si=si, tot=tot: ov.update(
                             relic_num=f"{si} / {tot}", analysing=str(si),
                         ) if ov._win else None)
                     self.after(0, self._flash_capture)
