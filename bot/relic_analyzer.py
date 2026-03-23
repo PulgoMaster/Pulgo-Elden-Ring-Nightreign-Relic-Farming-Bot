@@ -364,9 +364,15 @@ def check_condition(image_bytes: bytes, condition_text: str) -> bool:
     """
     Check whether the given text is visible anywhere on screen using OCR.
     Returns True if found, False otherwise.
+
+    Uses a downscaled crop of the top half of the screen — UI labels like
+    "Sell" appear there and the smaller image makes each OCR call ~2-3 s
+    faster than scanning the full frame.
     """
     reader = _get_reader()
-    img = _to_array(image_bytes, max_width=0)   # full resolution — called rarely, must be reliable
+    img = _to_array(image_bytes, max_width=1280)   # downscale for speed
+    h = img.shape[0]
+    img = img[: h // 2]                            # top half only — menus live here
     results = reader.readtext(img)
 
     all_text = " ".join(t for _, t, c in results if c > 0.3).lower()
