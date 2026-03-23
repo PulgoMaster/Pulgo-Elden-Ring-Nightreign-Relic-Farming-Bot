@@ -1207,14 +1207,32 @@ class RelicBotApp(tk.Tk):
             "and relaunch it at the start of each iteration.\n\n"
             "Click OK to begin."
         )
-        # Hide overlay so it can't block this dialog
-        if self._overlay:
-            self._overlay.hide()
+        # No overlay exists yet — show dialog cleanly in front of everything
+        self.wm_attributes("-topmost", True)
         self.lift()
         self.focus_force()
         messagebox.showinfo("Backup Ready", msg, parent=self)
-        if self._overlay:
-            self._overlay.show()
+        self.wm_attributes("-topmost", False)
+        # Now create and launch the overlay (only if enabled)
+        if self._overlay_enabled_var.get():
+            from ui.overlay import BotOverlay
+            from bot.screen_capture import get_screen_size
+            sw, sh = get_screen_size()
+            self._overlay = BotOverlay(self)
+            self._overlay.build(sw, sh)
+            self._overlay.set_pause_callback(self._toggle_pause)
+            self._overlay.set_stop_callback(self._stop_bot)
+            def _fmt_best(info, suffix):
+                if info is None:
+                    return "N/A"
+                return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
+            self._overlay.update(
+                at_33=self._ov_at_33, at_23=self._ov_at_23, at_duds=self._ov_at_duds,
+                best_33=_fmt_best(self._best_33_iter, "★★★"),
+                best_hits=_fmt_best(self._best_hits_iter, "hits"),
+            )
+            self._overlay.start_game_watch(
+                getattr(self, "_overlay_exe_frag", "nightreign"))
         self._ready_event.set()
 
     # ------------------------------------------------------------------ #
@@ -1512,28 +1530,9 @@ class RelicBotApp(tk.Tk):
         self.stop_btn.config(state="normal")
         self.pause_btn.config(state="normal", text=f"⏸ PAUSE  [{self._pause_hotkey_display}]")
 
-        # Create overlay if enabled
-        if self._overlay_enabled_var.get():
-            from ui.overlay import BotOverlay
-            from bot.screen_capture import get_screen_size
-            sw, sh = get_screen_size()
-            self._overlay = BotOverlay(self)
-            self._overlay.build(sw, sh)
-            self._overlay.set_pause_callback(self._toggle_pause)
-            self._overlay.set_stop_callback(self._stop_bot)
-            exe_frag = os.path.splitext(
-                os.path.basename(self.game_exe_var.get().strip()))[0].lower() or "nightreign"
-            self._overlay.start_game_watch(exe_frag)
-            # Seed overlay with loaded all-time stats immediately
-            def _fmt_best(info, suffix):
-                if info is None:
-                    return "N/A"
-                return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
-            self._overlay.update(
-                at_33=self._ov_at_33, at_23=self._ov_at_23, at_duds=self._ov_at_duds,
-                best_33=_fmt_best(self._best_33_iter, "★★★"),
-                best_hits=_fmt_best(self._best_hits_iter, "hits"),
-            )
+        # Store overlay settings — actual overlay is created after confirmation dialog
+        self._overlay_exe_frag = os.path.splitext(
+            os.path.basename(self.game_exe_var.get().strip()))[0].lower() or "nightreign"
 
         self._set_status("Running (Batch)…", "green")
         self.bot_thread = threading.Thread(target=self._batch_loop, daemon=True)

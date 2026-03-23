@@ -278,7 +278,7 @@ class BotOverlay:
 
         # ── Resize grip — bottom-right corner ───────────────────────── #
         grip = tk.Label(w, text="⤡", bg=_GRIP_C, fg=_DIM,
-                        font=("Consolas", 10), cursor="se-resize",
+                        font=("Consolas", 10), cursor="size_nw_se",
                         padx=2, pady=1)
         grip.pack(side="right", anchor="se", padx=2, pady=2)
         grip.bind("<ButtonPress-1>",  self._on_resize_start)
@@ -318,8 +318,12 @@ class BotOverlay:
 
     # ── Show / hide / destroy ──────────────────────────────────────── #
 
+    def suppress_show(self, suppressed: bool) -> None:
+        """While suppressed, show() is a no-op (used when a dialog must be on top)."""
+        self._suppressed = suppressed
+
     def show(self) -> None:
-        if self._win:
+        if self._win and not getattr(self, "_suppressed", False):
             self._win.deiconify()
 
     def hide(self) -> None:
