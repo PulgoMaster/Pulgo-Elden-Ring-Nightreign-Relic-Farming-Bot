@@ -1839,11 +1839,21 @@ class RelicBotApp(tk.Tk):
                         _at.start()
                         _at.join(timeout=_ASYNC_TASK_TIMEOUT)
                         if _at.is_alive():
-                            self._log(
-                                f"WARNING: Async analysis for iteration "
-                                f"{_task['iteration']} timed out "
-                                f"({_ASYNC_TASK_TIMEOUT}s) — skipping."
-                            )
+                            _retries = _task.get("_retries", 0)
+                            if _retries < 1:
+                                self._log(
+                                    f"WARNING: Async analysis for iteration "
+                                    f"{_task['iteration']} timed out "
+                                    f"({_ASYNC_TASK_TIMEOUT}s) — requeueing "
+                                    f"(attempt {_retries + 2}/2)."
+                                )
+                                _async_iter_q.put({**_task, "_retries": _retries + 1})
+                            else:
+                                self._log(
+                                    f"WARNING: Async analysis for iteration "
+                                    f"{_task['iteration']} timed out again "
+                                    f"— skipping permanently."
+                                )
                     except Exception as _ae:
                         self._log(f"ERROR in async analysis worker: {_ae}")
                     finally:
