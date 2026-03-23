@@ -376,6 +376,7 @@ class RelicBotApp(tk.Tk):
         self._parallel_workers_var  = tk.IntVar(value=2)
         self._async_enabled_var     = tk.BooleanVar(value=False)
         self._stop_after_batch      = False   # graceful stop flag
+        self._game_hung             = False   # set True by watchdog when game freezes
         # Per-run counters (reset each start)
         self._ov_hits_33 = 0
         self._ov_hits_23 = 0
@@ -1282,6 +1283,70 @@ class RelicBotApp(tk.Tk):
 
         return False
 
+    def _game_watchdog(self):
+        """Background thread: polls for a hung game window every 5 s.
+        Requires two consecutive IsHungAppWindow detections (~10 s) before acting.
+        Force-kills the process and sets self._game_hung = True."""
+        user32   = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        _consecutive = 0
+
+        while self.bot_running:
+            time.sleep(5)
+            if not self.bot_running:
+                break
+
+            exe_name = os.path.basename(self.game_exe_var.get().strip()).lower()
+            if not exe_name:
+                _consecutive = 0
+                continue
+
+            found = []
+
+            def _enum_cb(hwnd, _):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                pid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                h = kernel32.OpenProcess(0x1000, False, pid.value)
+                if h:
+                    buf = ctypes.create_unicode_buffer(260)
+                    sz  = ctypes.c_ulong(260)
+                    if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(sz)):
+                        if os.path.basename(buf.value).lower() == exe_name:
+                            found.append(hwnd)
+                    kernel32.CloseHandle(h)
+                return True
+
+            try:
+                user32.EnumWindows(EnumWindowsProc(_enum_cb), None)
+            except Exception:
+                _consecutive = 0
+                continue
+
+            if not found:
+                _consecutive = 0
+                continue
+
+            try:
+                is_hung = bool(user32.IsHungAppWindow(found[0]))
+            except Exception:
+                _consecutive = 0
+                continue
+
+            if is_hung:
+                _consecutive += 1
+                self._log(f"[Watchdog] Game window not responding ({_consecutive}/2)…")
+                if _consecutive >= 2:
+                    self._log("[Watchdog] Game confirmed hung — force-closing…")
+                    exe_full = os.path.basename(self.game_exe_var.get().strip())
+                    subprocess.run(["taskkill", "/F", "/IM", exe_full], capture_output=True)
+                    self._game_hung = True
+                    _consecutive = 0
+            else:
+                _consecutive = 0
+
     # ------------------------------------------------------------------ #
     #  BACKUP READY CONFIRMATION
     # ------------------------------------------------------------------ #
@@ -1305,7 +1370,7 @@ class RelicBotApp(tk.Tk):
             from bot.screen_capture import get_screen_size
             sw, sh = get_screen_size()
             self._overlay = BotOverlay(self)
-            self._overlay.build(sw, sh)
+            self._overlay.build(sw, sh, async_mode=self._async_enabled_var.get())
             self._overlay.set_pause_callback(self._toggle_pause)
             self._overlay.set_stop_callback(self._request_stop_after_batch)
             self._overlay.set_force_stop_callback(self._stop_bot)
@@ -1606,6 +1671,7 @@ class RelicBotApp(tk.Tk):
         self.bot_running       = True
         self.attempt_count     = 0
         self._stop_after_batch = False
+        self._game_hung        = False
         # Reset all counters — "All Time" tracks the current run only
         self._ov_hits_33     = 0
         self._ov_hits_23     = 0
@@ -1630,6 +1696,8 @@ class RelicBotApp(tk.Tk):
         self._set_status("Running (Batch)…", "green")
         self.bot_thread = threading.Thread(target=self._batch_loop, daemon=True)
         self.bot_thread.start()
+        threading.Thread(target=self._game_watchdog, daemon=True,
+                         name="game-watchdog").start()
 
     def _request_stop_after_batch(self):
         """Graceful stop: let the current batch finish, then exit cleanly."""
@@ -1740,7 +1808,7 @@ class RelicBotApp(tk.Tk):
             _async_iter_q = queue.Queue()
             self._log("Async Analysis enabled — capture and OCR will run in parallel.")
 
-            def _async_worker_loop():
+            def _async_worker_loop():  # noqa: E306
                 while True:
                     _task = _async_iter_q.get()
                     if _task is None:
@@ -1756,6 +1824,10 @@ class RelicBotApp(tk.Tk):
             threading.Thread(target=_async_worker_loop, daemon=True,
                              name="async-iter-worker").start()
 
+        _MAX_RESTARTS       = 3    # abort after this many consecutive hung-game restarts
+        _iter_restart_count = 0    # restarts for the current iteration (reset on new iter)
+        _is_restart         = False  # True when retrying the same iteration after a hang
+
         while self.bot_running:
             # Check stopping condition
             if limit_type == "loops" and iteration >= int(limit_value):
@@ -1763,9 +1835,13 @@ class RelicBotApp(tk.Tk):
             if limit_type == "hours" and (time.time() - start_time) / 3600 >= limit_value:
                 break
 
-            iteration += 1
-            self.attempt_count = iteration
-            self.after(0, lambda n=iteration: self.attempt_var.set(f"Attempts: {n}"))
+            if not _is_restart:
+                iteration += 1
+                _iter_restart_count = 0   # fresh iteration resets the hung counter
+                self.attempt_count = iteration
+                self.after(0, lambda n=iteration: self.attempt_var.set(f"Attempts: {n}"))
+            else:
+                _is_restart = False       # clear flag; counter already incremented
 
             # Overlay: batch progress
             if self._overlay:
@@ -1797,8 +1873,15 @@ class RelicBotApp(tk.Tk):
             iter_dir = os.path.join(run_dir, folder_name)
             os.makedirs(iter_dir, exist_ok=True)
 
-            self._log(f"--- Iteration {iteration} ---")
+            if _iter_restart_count > 0:
+                self._log(
+                    f"--- Iteration {iteration} "
+                    f"(restart {_iter_restart_count}/{_MAX_RESTARTS}) ---"
+                )
+            else:
+                self._log(f"--- Iteration {iteration} ---")
 
+            self._game_hung = False   # clear watchdog flag at the start of each attempt
             self._set_status(f"Iteration {iteration}: closing game…", "orange")
             if not self._close_game():
                 self._log("ERROR: Could not close game.")
@@ -1866,6 +1949,32 @@ class RelicBotApp(tk.Tk):
                         _async_iter_q.put(None)
                     break
 
+                # Watchdog detected a hung game during this iteration
+                if self._game_hung:
+                    _iter_restart_count += 1
+                    self._log(
+                        f"[Watchdog] Game hung during iteration {iteration} — "
+                        f"discarding (restart {_iter_restart_count}/{_MAX_RESTARTS})."
+                    )
+                    if _iter_restart_count >= _MAX_RESTARTS:
+                        self._log(
+                            f"Game hung {_MAX_RESTARTS} times on iteration {iteration} "
+                            "— aborting."
+                        )
+                        if not _async_sentinel_sent[0]:
+                            _async_sentinel_sent[0] = True
+                            _async_iter_q.put(None)
+                        _async_iter_q.join()
+                        self.after(0, self._reset_controls)
+                        return
+                    try:
+                        shutil.rmtree(iter_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                    _prev_save_dir = None
+                    _is_restart = True
+                    continue
+
                 _async_iter_q.put({
                     "iteration": iteration,
                     "iter_dir": iter_dir,
@@ -1899,6 +2008,28 @@ class RelicBotApp(tk.Tk):
                 # Fatal error inside phases — abort
                 self.after(0, self._reset_controls)
                 return
+
+            # Watchdog detected a hung game during this iteration
+            if self._game_hung:
+                _iter_restart_count += 1
+                self._log(
+                    f"[Watchdog] Game hung during iteration {iteration} — "
+                    f"discarding (restart {_iter_restart_count}/{_MAX_RESTARTS})."
+                )
+                if _iter_restart_count >= _MAX_RESTARTS:
+                    self._log(
+                        f"Game hung {_MAX_RESTARTS} times on iteration {iteration} "
+                        "— aborting."
+                    )
+                    self.after(0, self._reset_controls)
+                    return
+                try:
+                    shutil.rmtree(iter_dir, ignore_errors=True)
+                except Exception:
+                    pass
+                _prev_save_dir = None
+                _is_restart = True
+                continue
 
             if not self.bot_running:
                 break

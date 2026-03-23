@@ -125,10 +125,13 @@ class BotOverlay:
 
     # ── Lifecycle ──────────────────────────────────────────────────── #
 
-    def build(self, screen_w: int, screen_h: int) -> None:
+    def build(self, screen_w: int, screen_h: int,
+              async_mode: bool = False) -> None:
         """Create the overlay window, positioned bottom-left of the screen."""
         if self._win:
             return
+
+        self._async_mode = async_mode
 
         win = tk.Toplevel(self._root)
         win.overrideredirect(True)
@@ -202,14 +205,18 @@ class BotOverlay:
             cell.grid(row=0, column=col, sticky="n", pady=2)
             tk.Label(cell, text=label, bg=_BG, fg=_DIM,
                      font=("Consolas", 8)).pack()
-            tk.Label(cell, text="this run", bg=_BG, fg=_DIM,
-                     font=("Consolas", 7)).pack()
-            tk.Label(cell, textvariable=sv(key_run, "0"), bg=_BG, fg=color,
-                     font=("Consolas", 22, "bold")).pack()
-            tk.Label(cell, text="all time", bg=_BG, fg=_DIM,
-                     font=("Consolas", 7)).pack(pady=(4, 0))
-            tk.Label(cell, textvariable=sv(key_all, "0"), bg=_BG, fg=color,
-                     font=("Consolas", 14, "bold")).pack()
+            if not self._async_mode:
+                tk.Label(cell, text="this run", bg=_BG, fg=_DIM,
+                         font=("Consolas", 7)).pack()
+                tk.Label(cell, textvariable=sv(key_run, "0"), bg=_BG, fg=color,
+                         font=("Consolas", 22, "bold")).pack()
+                tk.Label(cell, text="all time", bg=_BG, fg=_DIM,
+                         font=("Consolas", 7)).pack(pady=(4, 0))
+                tk.Label(cell, textvariable=sv(key_all, "0"), bg=_BG, fg=color,
+                         font=("Consolas", 14, "bold")).pack()
+            else:
+                tk.Label(cell, textvariable=sv(key_all, "0"), bg=_BG, fg=color,
+                         font=("Consolas", 22, "bold")).pack()
 
         _hline(w)
 
