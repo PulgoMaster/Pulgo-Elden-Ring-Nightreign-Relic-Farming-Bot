@@ -82,8 +82,7 @@ _CYAN    = "#00e5ff"
 _GREEN   = "#00ff88"
 _BLUE    = "#00aaff"
 _GREY    = "#707080"
-_PAUSE_C = "#cc3300"
-_RESUME_C= "#008833"
+_RESET_C = "#1a3a5c"   # reset iteration button colour
 _WARN_C  = "#ff8800"
 _GRIP_C  = "#3a3d5c"   # resize grip colour
 
@@ -91,6 +90,41 @@ _MIN_W = 340
 _MIN_H = 380
 _DEF_W = 500
 _DEF_H = 620
+
+
+# ── Tooltip helper ────────────────────────────────────────────────── #
+
+class _Tooltip:
+    """Lightweight hover tooltip for overlay widgets."""
+    def __init__(self, widget: tk.Widget, text: str) -> None:
+        self._widget = widget
+        self._text   = text
+        self._tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _event=None) -> None:
+        if self._tip:
+            return
+        x = self._widget.winfo_rootx() + self._widget.winfo_width() + 6
+        y = self._widget.winfo_rooty()
+        tip = tk.Toplevel(self._widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        tip.wm_attributes("-topmost", True)
+        tk.Label(
+            tip, text=self._text, justify="left",
+            bg="#1e2235", fg="#ccddff",
+            font=("Consolas", 8),
+            padx=8, pady=6, relief="flat",
+            wraplength=280,
+        ).pack()
+        self._tip = tip
+
+    def _hide(self, _event=None) -> None:
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
 
 
 # ── Main class ────────────────────────────────────────────────────── #
@@ -103,12 +137,12 @@ class BotOverlay:
     def __init__(self, root: tk.Tk):
         self._root           = root
         self._win: tk.Toplevel | None = None
-        self._pause_cb       = None
+        self._reset_iter_cb  = None
         self._stop_cb        = None        # graceful: stop after current batch
         self._force_stop_cb  = None        # immediate: stop right now
         self._watching       = False
         self._sv: dict[str, tk.StringVar] = {}
-        self._pause_btn: tk.Label | None  = None
+        self._reset_iter_btn: tk.Label | None = None
         self._abort_btn: tk.Label | None  = None
         self._log_box:  tk.Text  | None   = None
         self._stop_pending   = False       # True once graceful stop is requested
@@ -245,21 +279,27 @@ class BotOverlay:
 
         _hline(w)
 
-        # ── Pause / Resume + Abort buttons ──────────────────────────── #
+        # ── Reset Iteration + Stop After Batch buttons ───────────────── #
         bf = tk.Frame(w, bg=_BG)
         bf.pack(pady=(3, 5))
 
-        self._pause_btn = tk.Label(
-            bf, text="⏸  PAUSE",
-            bg=_PAUSE_C, fg="white",
+        self._reset_iter_btn = tk.Label(
+            bf, text="⟳  RESET ITER",
+            bg=_RESET_C, fg="#88bbff",
             font=("Consolas", 10, "bold"),
-            padx=20, pady=5, cursor="hand2", relief="flat",
+            padx=16, pady=5, cursor="hand2", relief="flat",
         )
-        self._pause_btn.pack(side="left", padx=(0, 6))
-        self._pause_btn.bind(
+        self._reset_iter_btn.pack(side="left", padx=(0, 6))
+        self._reset_iter_btn.bind(
             "<Button-1>",
-            lambda _: self._pause_cb() if self._pause_cb else None,
+            lambda _: self._reset_iter_cb() if self._reset_iter_cb else None,
         )
+        _Tooltip(self._reset_iter_btn,
+                 "Reset Iteration\n\n"
+                 "Closes the game, deletes this iteration's output folder,\n"
+                 "restores your save to a clean state, and re-runs the\n"
+                 "current iteration as if it never happened.\n\n"
+                 "Use this if you notice the bot is lost or stuck mid-run.")
 
         self._abort_btn = tk.Label(
             bf, text="⏻  STOP AFTER BATCH",
@@ -385,20 +425,8 @@ class BotOverlay:
         self._log_box.see("end")
         self._log_box.configure(state="disabled")
 
-    def set_paused(self, paused: bool, countdown: int = 0) -> None:
-        if not self._pause_btn:
-            return
-        if paused:
-            if countdown > 0:
-                self._pause_btn.configure(
-                    text=f"▶  RESUMING {countdown}…", bg=_WARN_C)
-            else:
-                self._pause_btn.configure(text="▶  RESUME", bg=_RESUME_C)
-        else:
-            self._pause_btn.configure(text="⏸  PAUSE", bg=_PAUSE_C)
-
-    def set_pause_callback(self, cb) -> None:
-        self._pause_cb = cb
+    def set_reset_iter_callback(self, cb) -> None:
+        self._reset_iter_cb = cb
 
     def set_stop_callback(self, cb) -> None:
         """Graceful stop: bot finishes the current batch then exits."""

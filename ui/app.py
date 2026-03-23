@@ -351,20 +351,14 @@ class RelicBotApp(tk.Tk):
         self._hotkey_display = "F9"        # human-readable label
         self._global_kb_listener = None    # persistent pynput Listener
 
-        # Pause/resume hotkey
-        self._pause_hotkey_str = "Key.f8"
-        self._pause_hotkey_display = "F8"
-        self._current_phase_hint = ""      # what the bot was doing when paused
-
         # Bot state
         self.bot_thread: threading.Thread | None = None
         self.bot_running = False
         self.attempt_count = 0
         self._batch_log_path: str = ""   # set while a batch run is active
 
-        # Pause event: set = running, clear = paused
-        self._pause_event = threading.Event()
-        self._pause_event.set()
+        # Manual iteration reset (user-triggered soft nuke from overlay)
+        self._reset_iter_requested = False
 
         # Backup/startup ready event
         self._ready_event = threading.Event()
@@ -737,10 +731,6 @@ class RelicBotApp(tk.Tk):
                                    state="disabled", style="Stop.TButton")
         self.stop_btn.grid(row=0, column=1, padx=12, pady=6)
 
-        self.pause_btn = ttk.Button(ctrl_frame, text=f"⏸ PAUSE  [{self._pause_hotkey_display}]",
-                                    command=self._toggle_pause, state="disabled")
-        self.pause_btn.grid(row=0, column=2, padx=8, pady=6)
-
         self.status_var = tk.StringVar(value="Status: Idle")
         self.status_label = ttk.Label(ctrl_frame, textvariable=self.status_var,
                                       foreground=theme.TEXT_MUTED)
@@ -802,10 +792,6 @@ class RelicBotApp(tk.Tk):
         self._hotkey_btn = ttk.Button(hdr, text=f"Rec Hotkey: {self._hotkey_display}",
                                       command=self._set_hotkey_dialog, width=18)
         self._hotkey_btn.pack(side="left", padx=(12, 0))
-        self._pause_hotkey_btn = ttk.Button(hdr, text=f"Pause Hotkey: {self._pause_hotkey_display}",
-                                            command=self._set_pause_hotkey_dialog, width=20)
-        self._pause_hotkey_btn.pack(side="left", padx=(8, 0))
-
         # Phase notebook
         nb = ttk.Notebook(frame)
         nb.pack(fill="both", expand=True, **pad)
@@ -1479,7 +1465,7 @@ class RelicBotApp(tk.Tk):
             sw, sh = get_screen_size()
             self._overlay = BotOverlay(self)
             self._overlay.build(sw, sh, async_mode=self._async_enabled_var.get())
-            self._overlay.set_pause_callback(self._toggle_pause)
+            self._overlay.set_reset_iter_callback(self._request_reset_iter)
             self._overlay.set_stop_callback(self._request_stop_after_batch)
             self._overlay.set_force_stop_callback(self._stop_bot)
             def _fmt_best(info, suffix):
@@ -1550,7 +1536,6 @@ class RelicBotApp(tk.Tk):
                 pass
 
         hotkey = self._hotkey_str
-        pause_hotkey = self._pause_hotkey_str
 
         def _on_press(key):
             try:
@@ -1559,8 +1544,6 @@ class RelicBotApp(tk.Tk):
                 k = str(key)
             if k == hotkey:
                 self.after(0, self._hotkey_pressed)
-            elif k == pause_hotkey:
-                self.after(0, self._toggle_pause)
 
         self._global_kb_listener = _kb.Listener(on_press=_on_press, daemon=True)
         self._global_kb_listener.start()
@@ -1622,93 +1605,18 @@ class RelicBotApp(tk.Tk):
         listener.start()
         dlg.protocol("WM_DELETE_WINDOW", lambda: (listener.stop(), dlg.destroy()))
 
-    def _toggle_pause(self):
-        """Pause or resume the bot. Safe to call from any thread via self.after()."""
+    def _request_reset_iter(self):
+        """Overlay Reset Iteration button: confirm then signal the batch loop to soft-nuke this iteration."""
         if not self.bot_running:
             return
-        if self._pause_event.is_set():
-            # Pause
-            self._pause_event.clear()
-            self._log(
-                f"⏸ BOT PAUSED — was in: [{self._current_phase_hint or 'idle'}]. "
-                f"Press {self._pause_hotkey_display} or the PAUSE button again to resume. "
-                f"Make sure the game is back in that state before resuming!"
-            )
-            self.pause_btn.config(text=f"▶ RESUME  [{self._pause_hotkey_display}]")
-            self._set_status("Paused — press PAUSE to resume", "orange")
-            if self._overlay:
-                self._overlay.set_paused(True)
-        else:
-            # Resume with countdown
-            self.pause_btn.config(text=f"⏸ PAUSE  [{self._pause_hotkey_display}]", state="disabled")
-            self._set_status("Resuming in 3…", "orange")
-            if self._overlay:
-                self._overlay.set_paused(True, countdown=3)
-            def _countdown(n):
-                if n > 0:
-                    self._set_status(f"Resuming in {n}…", "orange")
-                    if self._overlay:
-                        self._overlay.set_paused(True, countdown=n)
-                    self.after(1000, _countdown, n - 1)
-                else:
-                    self._pause_event.set()
-                    self.pause_btn.config(state="normal")
-                    hint = self._current_phase_hint or "previous position"
-                    self._log(f"▶ BOT RESUMED — returning to: [{hint}]")
-                    self._set_status("Running…", "green")
-                    if self._overlay:
-                        self._overlay.set_paused(False)
-            _countdown(3)
-
-    def _check_pause_point(self, hint: str = ""):
-        """
-        Call this inside bot threads at safe pause points.
-        Updates the current phase hint and blocks until resumed if paused.
-        """
-        if hint:
-            self._current_phase_hint = hint
-        self._pause_event.wait()
-
-    def _set_pause_hotkey_dialog(self):
-        """Show a small dialog that captures the next keypress as the pause hotkey."""
-        dlg = tk.Toplevel(self)
-        dlg.title("Set Pause Hotkey")
-        dlg.geometry("290x115")
-        dlg.resizable(False, False)
-        dlg.grab_set()
-        dlg.transient(self)
-
-        tk.Label(dlg, text="Press any key to use as the\npause/resume hotkey:").pack(pady=8)
-        lbl = tk.Label(dlg, text="Waiting for key…", font=("", 11, "bold"))
-        lbl.pack()
-
-        done = [False]
-
-        def _capture(key):
-            if done[0]:
-                return False
-            done[0] = True
-            try:
-                k = key.char if (hasattr(key, "char") and key.char) else str(key)
-            except Exception:
-                k = str(key)
-            display = k.replace("Key.", "").upper() if k.startswith("Key.") else k.upper()
-            self._pause_hotkey_str = k
-            self._pause_hotkey_display = display
-
-            def _finish():
-                lbl.config(text=f"Set to: {display}")
-                self._pause_hotkey_btn.config(text=f"Pause Hotkey: {display}")
-                self.pause_btn.config(text=f"⏸ PAUSE  [{display}]")
-                self._start_global_hotkey_listener()
-                dlg.after(700, dlg.destroy)
-
-            self.after(0, _finish)
-            return False
-
-        listener = _kb.Listener(on_press=_capture, daemon=True)
-        listener.start()
-        dlg.protocol("WM_DELETE_WINDOW", lambda: (listener.stop(), dlg.destroy()))
+        if not messagebox.askyesno(
+            "Reset Iteration",
+            "Close the game, delete this iteration's folder, restore the save, and re-run this iteration?",
+            parent=self,
+        ):
+            return
+        self._reset_iter_requested = True
+        self._log("⟳ Reset iteration requested by user.")
 
     def _on_app_close(self):
         """Stop the global hotkey listener then close the window."""
@@ -1789,13 +1697,11 @@ class RelicBotApp(tk.Tk):
         self._ov_at_duds     = 0
         self._best_33_iter   = None
         self._best_hits_iter = None
-        self._pause_event.set()  # ensure not paused on start
-        self._current_phase_hint = ""
+        self._reset_iter_requested = False
         # Tell the player which exe to watch so inputs are blocked if game loses focus
         self.player.game_exe = os.path.basename(self.game_exe_var.get().strip())
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
-        self.pause_btn.config(state="normal", text=f"⏸ PAUSE  [{self._pause_hotkey_display}]")
 
         # Store overlay settings — actual overlay is created after confirmation dialog
         self._overlay_exe_frag = os.path.splitext(
@@ -1821,11 +1727,8 @@ class RelicBotApp(tk.Tk):
         self.player.stop()
         # Unblock backup ready wait if it's stuck
         self._ready_event.set()
-        # Unblock any pause wait so the bot thread can exit
-        self._pause_event.set()
         self.start_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
-        self.pause_btn.config(state="disabled", text=f"⏸ PAUSE  [{self._pause_hotkey_display}]")
         self._set_status("Stopped", "gray")
         self._log("Bot stopped by user.")
         if self._overlay:
@@ -2020,8 +1923,6 @@ class RelicBotApp(tk.Tk):
                     batch=s, relic_num="—", analysing="—",
                 ) if ov._win else None)
 
-            # Pause checkpoint — blocks here if user has paused
-            self._check_pause_point(f"start of iteration {iteration}")
             if not self.bot_running:
                 break
 
@@ -2150,15 +2051,23 @@ class RelicBotApp(tk.Tk):
                 if not self.bot_running:
                     break
 
-                # Phase 1 murk mismatch — restart iteration from clean save
-                if getattr(self, "_p1_murk_mismatch", False):
-                    self._p1_murk_mismatch = False
-                    self._log(f"[Phase 1] Restarting iteration {iteration} from clean save…")
+                # User-requested soft nuke of this iteration
+                if self._reset_iter_requested:
+                    self._reset_iter_requested = False
+                    self._log(f"[Reset] Discarding iteration {iteration} and restarting.")
+                    self._close_game()
+                    _rs = self.save_path_var.get()
+                    _rb = os.path.join(self.backup_path_var.get(), os.path.basename(_rs))
+                    try:
+                        save_manager.restore(_rs, _rb)
+                    except Exception as _rse:
+                        self._log(f"  WARNING: save restore failed: {_rse}")
                     try:
                         shutil.rmtree(iter_dir, ignore_errors=True)
                     except Exception:
                         pass
                     _prev_save_dir = None
+                    _iter_restart_count = 0
                     _is_restart = True
                     continue
 
@@ -2242,15 +2151,23 @@ class RelicBotApp(tk.Tk):
                 self.after(0, self._reset_controls)
                 return
 
-            # Phase 1 murk mismatch — restart iteration from clean save
-            if getattr(self, "_p1_murk_mismatch", False):
-                self._p1_murk_mismatch = False
-                self._log(f"[Phase 1] Restarting iteration {iteration} from clean save…")
+            # User-requested soft nuke of this iteration
+            if self._reset_iter_requested:
+                self._reset_iter_requested = False
+                self._log(f"[Reset] Discarding iteration {iteration} and restarting.")
+                self._close_game()
+                _rs = self.save_path_var.get()
+                _rb = os.path.join(self.backup_path_var.get(), os.path.basename(_rs))
+                try:
+                    save_manager.restore(_rs, _rb)
+                except Exception as _rse:
+                    self._log(f"  WARNING: save restore failed: {_rse}")
                 try:
                     shutil.rmtree(iter_dir, ignore_errors=True)
                 except Exception:
                     pass
                 _prev_save_dir = None
+                _iter_restart_count = 0
                 _is_restart = True
                 continue
 
@@ -2781,7 +2698,6 @@ class RelicBotApp(tk.Tk):
         # ── Phase 0: Setup ────────────────────────────────────────────────── #
         if self.phase_events[0]:
             self._set_status(f"{label}: setup…", "green")
-            self._check_pause_point(f"{label}: setup phase")
             if not self.bot_running:
                 return relic_results
             if _p0_exe:
@@ -2977,7 +2893,6 @@ class RelicBotApp(tk.Tk):
                 for step_i in range(total):
                     if not self.bot_running:
                         return captures
-                    self._check_pause_point(f"{label}: capturing relic {step_i + 1}/{total}")
                     if not self.bot_running:
                         return captures
                     if step_i > 0:
@@ -3065,7 +2980,6 @@ class RelicBotApp(tk.Tk):
                     _stop_workers()
                     return relic_results
 
-                self._check_pause_point(f"{label}: capturing relic {step_i + 1}/{total}")
                 if not self.bot_running:
                     _stop_workers()
                     return relic_results
@@ -3473,8 +3387,6 @@ class RelicBotApp(tk.Tk):
     def _reset_controls(self):
         self.start_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
-        self.pause_btn.config(state="disabled", text=f"⏸ PAUSE  [{self._pause_hotkey_display}]")
-        self._pause_event.set()  # ensure not stuck paused
         self.bot_running = False
         self._batch_log_path = ""   # stop mirroring to file
         if self._overlay:
