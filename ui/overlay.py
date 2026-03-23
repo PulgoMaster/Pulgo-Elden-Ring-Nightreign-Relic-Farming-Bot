@@ -170,12 +170,13 @@ class BotOverlay:
 
         _hline(w)
 
-        # ── Stats row 1: Murk | Relics to buy | Bought ─────────────── #
+        # ── Stats row 1: Murk | Est. After | Relics to buy | Bought ─── #
         r1 = tk.Frame(w, bg=_BG)
         r1.pack(fill="x", padx=10, pady=2)
-        _stat(r1, "Murk",    sv("murk"),   _GOLD)
-        _stat(r1, "Relics",  sv("to_buy"), _CYAN)
-        _stat(r1, "Bought",  sv("bought"), _CYAN)
+        _stat(r1, "Murk",       sv("murk"),                _GOLD)
+        _stat(r1, "Est. After", sv("est_murk_after", "—"), _GOLD)
+        _stat(r1, "Relics",     sv("to_buy"),              _CYAN)
+        _stat(r1, "Bought",     sv("bought"),               _CYAN)
 
         # ── Stats row 2: Current relic # | Analysing ───────────────── #
         r2 = tk.Frame(w, bg=_BG)
@@ -193,9 +194,9 @@ class BotOverlay:
         hf.columnconfigure(2, weight=1)
 
         for col, (label, key_run, key_all, color) in enumerate([
-            ("3 / 3",  "hits_33", "at_33",   _GREEN),
-            ("2 / 3",  "hits_23", "at_23",   _BLUE),
-            ("Duds",   "duds",    "at_duds", _GREY),
+            ("God Roll", "hits_33", "at_33",   _GREEN),
+            ("Good",     "hits_23", "at_23",   _BLUE),
+            ("Duds",     "duds",    "at_duds", _GREY),
         ]):
             cell = tk.Frame(hf, bg=_BG)
             cell.grid(row=0, column=col, sticky="n", pady=2)

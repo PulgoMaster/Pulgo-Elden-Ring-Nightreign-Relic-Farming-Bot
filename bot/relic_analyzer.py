@@ -216,63 +216,92 @@ _TAB_F2_COUNT = {name: (len(_TAB_HIERARCHY) - 1 - i) for i, name in enumerate(_T
 
 def detect_current_tab(image_bytes: bytes) -> tuple:
     """
-    Detect which Relic Rites tab is currently active by OCR'ing the tab bar.
+    Detect which Relic Rites tab is currently active.
 
-    Strategy: The selected tab label is rendered with noticeably brighter text
-    than the inactive tabs.  We OCR the top strip of the screen (where the tab
-    bar lives), score each detected tab name by the average brightness of its
-    bounding box, and return the brightest match.
+    Strategy 1 (primary): OCR the upper 50 % of the screen and look for
+    character name text.  The active tab renders its name prominently in
+    the content area, so a direct text match is more reliable than measuring
+    tab-label brightness.
 
-    Sanity check: the winner must be at least 15 brightness units brighter than
-    the runner-up; if the gap is too small the result is treated as unreliable.
+    Strategy 2 (fallback): Among OCR results that fall inside the tab bar
+    region (top ~14 %), score each detected name by the average brightness of
+    its bounding box.  The selected tab label is noticeably brighter; winner
+    must be ≥ 15 units brighter than the runner-up.
+
+    A single readtext() call covers both strategies — results are filtered
+    by position for strategy 2 rather than re-scanning.
 
     Returns:
         (tab_name, f2_presses_needed)  e.g. ("Guardian", 9)
         (None, 10)                     if detection is inconclusive — callers
-                                       should fall back to the OCR-loop failsafe
+                                       should fall back to the F2 failsafe loop
                                        (10 = worst-case press count for Wylder)
     """
     reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)
     h, w = img.shape[:2]
-    # Tab bar lives in approximately the top 14 % of the screen, full width
-    tab_strip = img[: int(h * 0.14), :]
+    tab_bar_h = int(h * 0.14)
 
-    results = reader.readtext(tab_strip)
+    # OCR the upper 50 % — covers both the tab bar and the main content header
+    scan_h = int(h * 0.50)
+    scan_region = img[:scan_h, :]
+    results = reader.readtext(scan_region)
 
-    candidates: list = []  # list of (brightness: float, tab_name: str)
+    # ── Strategy 1: direct character name text matching ───────────────── #
+    # Collect (confidence, y_center, tab_name) for every OCR hit that
+    # contains a tab name.  Prefer higher confidence; break ties by proximity
+    # to the top of the screen (tab bar area).
+    name_candidates: list = []
     for bbox, text, conf in results:
-        if conf < 0.25:
+        if conf < 0.30:
             continue
         text_clean = text.strip()
         for tab in _TAB_HIERARCHY:
             if tab.lower() in text_clean.lower():
                 pts = np.array(bbox, dtype=int)
-                x0, y0 = pts[:, 0].min(), pts[:, 1].min()
-                x1, y1 = pts[:, 0].max(), pts[:, 1].max()
-                hs, ws = tab_strip.shape[:2]
-                x0, y0 = max(0, x0), max(0, y0)
-                x1, y1 = min(ws, x1), min(hs, y1)
-                region = tab_strip[y0:y1, x0:x1]
+                y_center = (int(pts[:, 1].min()) + int(pts[:, 1].max())) / 2
+                name_candidates.append((conf, y_center, tab))
+                break
+
+    if name_candidates:
+        # Sort: highest confidence first; for equal confidence, closest to top
+        name_candidates.sort(key=lambda x: (-x[0], x[1]))
+        best_conf, _best_y, best_tab = name_candidates[0]
+        if best_conf >= 0.45:
+            return best_tab, _TAB_F2_COUNT[best_tab]
+
+    # ── Strategy 2: tab-bar brightness scoring ────────────────────────── #
+    # Reuse the same readtext() results; only consider bounding boxes that
+    # sit inside the tab bar strip (top 14 % of the original image).
+    brightness_candidates: list = []
+    for bbox, text, conf in results:
+        if conf < 0.25:
+            continue
+        pts = np.array(bbox, dtype=int)
+        y0_bbox = int(pts[:, 1].min())
+        if y0_bbox > tab_bar_h:
+            continue  # outside the tab bar — skip for brightness scoring
+        text_clean = text.strip()
+        for tab in _TAB_HIERARCHY:
+            if tab.lower() in text_clean.lower():
+                x0 = max(0, int(pts[:, 0].min()))
+                y0 = max(0, y0_bbox)
+                x1 = min(w,          int(pts[:, 0].max()))
+                y1 = min(tab_bar_h,  int(pts[:, 1].max()))
+                region = scan_region[y0:y1, x0:x1]
                 if region.size == 0:
                     break
                 brightness = float(region.mean())
-                candidates.append((brightness, tab))
-                break  # one match per OCR result
+                brightness_candidates.append((brightness, tab))
+                break
 
-    if not candidates:
-        return None, 10  # nothing detected — caller uses fallback
+    if brightness_candidates:
+        brightness_candidates.sort(reverse=True)
+        best_brightness, best_tab = brightness_candidates[0]
+        if len(brightness_candidates) < 2 or brightness_candidates[0][0] - brightness_candidates[1][0] >= 15:
+            return best_tab, _TAB_F2_COUNT[best_tab]
 
-    # The selected tab has the brightest text
-    candidates.sort(reverse=True)
-    best_brightness, best_tab = candidates[0]
-
-    # Require the winner to be clearly brighter than the runner-up
-    if len(candidates) >= 2:
-        if best_brightness - candidates[1][0] < 15:
-            return None, 10  # too close to call
-
-    return best_tab, _TAB_F2_COUNT[best_tab]
+    return None, 10  # nothing conclusive — caller uses failsafe
 
 
 # ── Relic color detection ─────────────────────────────────────────────── #

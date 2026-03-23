@@ -374,16 +374,17 @@ class RelicBotApp(tk.Tk):
         self._overlay_enabled_var  = tk.BooleanVar(value=True)
         self._parallel_enabled_var  = tk.BooleanVar(value=False)
         self._parallel_workers_var  = tk.IntVar(value=2)
+        self._async_enabled_var     = tk.BooleanVar(value=False)
         self._stop_after_batch      = False   # graceful stop flag
         # Per-run counters (reset each start)
         self._ov_hits_33 = 0
         self._ov_hits_23 = 0
         self._ov_duds    = 0
-        # All-time counters (persist across runs via stats file)
+        # All-time counters (reset each START — track current run only)
         self._ov_at_33   = 0
         self._ov_at_23   = 0
         self._ov_at_duds = 0
-        # Best-batch scoreboard (persists)
+        # Best-batch scoreboard (reset each START)
         self._best_33_iter   = None  # {"iteration": n, "count": x}
         self._best_hits_iter = None  # {"iteration": n, "count": x}
 
@@ -395,7 +396,6 @@ class RelicBotApp(tk.Tk):
         os.makedirs(_PROFILES_DIR, exist_ok=True)
         self._refresh_profile_list()
         self.after(200, self._log_screen_resolution)
-        self._load_all_time_stats()
 
     # ------------------------------------------------------------------ #
     #  UI CONSTRUCTION
@@ -702,6 +702,22 @@ class RelicBotApp(tk.Tk):
                                     foreground=theme.TEXT_MUTED)
         self._ram_label.grid(row=4, column=4, sticky="w", **pad)
         self._parallel_workers_var.trace_add("write", lambda *_: self._update_ram_label())
+
+        # Async Analysis toggle
+        async_chk = ttk.Checkbutton(
+            self.batch_frame, text="⚑ Async Analysis",
+            variable=self._async_enabled_var,
+        )
+        async_chk.grid(row=5, column=0, columnspan=2, sticky="w", **pad)
+        _Tooltip(async_chk,
+                 "Decouples screenshot capture from OCR analysis.\n"
+                 "The bot captures all relics first, then analyzes them in the\n"
+                 "background while the next iteration is already running.\n\n"
+                 "Screenshots appear live in the output folder as pending files\n"
+                 "and are renamed/removed once analysis completes.\n\n"
+                 "After all iterations are captured, the bot waits for analysis\n"
+                 "to fully finish before stopping (grace period).\n\n"
+                 "Best paired with Brute Force Analysis for maximum throughput.")
 
         # ── Bot Control ─────────────────────────────────────────────── #
         ctrl_frame = ttk.LabelFrame(inner, text="Bot Control")
@@ -1041,6 +1057,7 @@ class RelicBotApp(tk.Tk):
             "criteria": self.relic_builder.get_state(),
             "parallel_enabled": self._parallel_enabled_var.get(),
             "parallel_workers": self._parallel_workers_var.get(),
+            "async_enabled": self._async_enabled_var.get(),
         }
 
     def _dict_to_profile(self, data: dict):
@@ -1072,6 +1089,7 @@ class RelicBotApp(tk.Tk):
         self.relic_type_var.set(data.get("relic_type", "night"))
         self._parallel_enabled_var.set(data.get("parallel_enabled", False))
         self._parallel_workers_var.set(data.get("parallel_workers", 2))
+        self._async_enabled_var.set(data.get("async_enabled", False))
         self._on_parallel_toggle()
         if "hotkey_str" in data:
             self._hotkey_str = data["hotkey_str"]
@@ -1588,10 +1606,15 @@ class RelicBotApp(tk.Tk):
         self.bot_running       = True
         self.attempt_count     = 0
         self._stop_after_batch = False
-        # Reset per-run counters only; all-time counters persist
-        self._ov_hits_33 = 0
-        self._ov_hits_23 = 0
-        self._ov_duds    = 0
+        # Reset all counters — "All Time" tracks the current run only
+        self._ov_hits_33     = 0
+        self._ov_hits_23     = 0
+        self._ov_duds        = 0
+        self._ov_at_33       = 0
+        self._ov_at_23       = 0
+        self._ov_at_duds     = 0
+        self._best_33_iter   = None
+        self._best_hits_iter = None
         self._pause_event.set()  # ensure not paused on start
         self._current_phase_hint = ""
         # Tell the player which exe to watch so inputs are blocked if game loses focus
@@ -1649,6 +1672,7 @@ class RelicBotApp(tk.Tk):
         delay = float(self.batch_delay_var.get())
         limit_type = self.batch_limit_type.get()
         limit_value = float(self.batch_limit_var.get())
+        mode_desc = "loops" if limit_type == "loops" else "hours"
         base_output = self.batch_output_var.get()
         load_wait = float(self.game_load_wait_var.get())
         # Minimum passive count for a result to be labelled a "HIT" tier.
@@ -1706,6 +1730,32 @@ class RelicBotApp(tk.Tk):
         save_filename = os.path.basename(save_path)
         _prev_save_dir = None  # iteration folder waiting for its save copy
 
+        # ── Async mode setup ──────────────────────────────────────────── #
+        _async_mode = self._async_enabled_var.get()
+        _async_iter_q: queue.Queue | None = None
+        _async_dir_map: dict = {}   # iteration → final dir (after any rename)
+        _async_sentinel_sent = [False]   # guard against double-sentinel
+
+        if _async_mode:
+            _async_iter_q = queue.Queue()
+            self._log("Async Analysis enabled — capture and OCR will run in parallel.")
+
+            def _async_worker_loop():
+                while True:
+                    _task = _async_iter_q.get()
+                    if _task is None:
+                        _async_iter_q.task_done()
+                        break
+                    try:
+                        self._analyze_async_iter(_task, results, _async_dir_map)
+                    except Exception as _ae:
+                        self._log(f"ERROR in async analysis worker: {_ae}")
+                    finally:
+                        _async_iter_q.task_done()
+
+            threading.Thread(target=_async_worker_loop, daemon=True,
+                             name="async-iter-worker").start()
+
         while self.bot_running:
             # Check stopping condition
             if limit_type == "loops" and iteration >= int(limit_value):
@@ -1757,10 +1807,13 @@ class RelicBotApp(tk.Tk):
             # Game is now closed — safe to copy the rolled save from the
             # previous iteration (file is no longer locked by the game).
             if _prev_save_dir is not None:
+                # In async mode, the worker may have renamed the dir — use final path.
+                _copy_dir = (_async_dir_map.get(iteration - 1, _prev_save_dir)
+                             if _async_mode else _prev_save_dir)
                 try:
-                    shutil.copy2(save_path, os.path.join(_prev_save_dir, save_filename))
+                    shutil.copy2(save_path, os.path.join(_copy_dir, save_filename))
                 except Exception as e:
-                    self._log(f"WARNING: could not copy save to {_prev_save_dir}: {e}")
+                    self._log(f"WARNING: could not copy save to {_copy_dir}: {e}")
                 _prev_save_dir = None
             try:
                 save_manager.restore(save_path, backup_path)
@@ -1789,6 +1842,54 @@ class RelicBotApp(tk.Tk):
                 time.sleep(0.45)
 
             label = f"Iteration {iteration}"
+
+            # ── Async mode: capture only, then push task to background worker ── #
+            if _async_mode:
+                captures = self._run_iteration_phases(
+                    label, criteria, region, delay,
+                    iter_dir=iter_dir, hit_min=hit_min,
+                    live_log_path=live_log_path,
+                    capture_only=True)
+
+                if captures is None:
+                    # Fatal capture error — shut down worker and abort
+                    if not _async_sentinel_sent[0]:
+                        _async_sentinel_sent[0] = True
+                        _async_iter_q.put(None)
+                    _async_iter_q.join()
+                    self.after(0, self._reset_controls)
+                    return
+
+                if not self.bot_running:
+                    if not _async_sentinel_sent[0]:
+                        _async_sentinel_sent[0] = True
+                        _async_iter_q.put(None)
+                    break
+
+                _async_iter_q.put({
+                    "iteration": iteration,
+                    "iter_dir": iter_dir,
+                    "captures": captures,
+                    "criteria": criteria,
+                    "hit_min": hit_min,
+                    "live_log_path": live_log_path,
+                    "run_dir": run_dir,
+                    "criteria_summary": criteria_summary,
+                    "mode_desc": mode_desc,
+                    "limit_value": limit_value,
+                    "save_filename": save_filename,
+                })
+
+                _prev_save_dir = iter_dir
+
+                if self._stop_after_batch:
+                    self._log("Batch capture done — stopping as requested "
+                              "(analysis continuing in background).")
+                    break
+
+                continue   # skip normal post-processing
+
+            # ── Normal mode: run phases + post-process inline ─────────── #
             relic_results = self._run_iteration_phases(
                 label, criteria, region, delay,
                 iter_dir=iter_dir, hit_min=hit_min,
@@ -1930,7 +2031,6 @@ class RelicBotApp(tk.Tk):
             })
 
             # Write README after every iteration so a cancelled run is never lost
-            mode_desc = "loops" if limit_type == "loops" else "hours"
             try:
                 generate_readme(run_dir, criteria_summary, mode_desc, limit_value, results, hit_min)
             except Exception:
@@ -1949,15 +2049,26 @@ class RelicBotApp(tk.Tk):
         if _prev_save_dir is not None:
             self._set_status("Closing game to save final iteration…", "orange")
             self._close_game()
+            _final_copy_dir = (_async_dir_map.get(iteration, _prev_save_dir)
+                               if _async_mode else _prev_save_dir)
             try:
-                shutil.copy2(save_path, os.path.join(_prev_save_dir, save_filename))
+                shutil.copy2(save_path, os.path.join(_final_copy_dir, save_filename))
             except Exception as e:
                 self._log(f"WARNING: could not copy final save: {e}")
             _prev_save_dir = None
 
+        # ── Grace period: wait for async analysis to finish ───────────── #
+        if _async_mode and _async_iter_q is not None:
+            self._set_status("Waiting for background analysis to finish…", "orange")
+            self._log("Grace period: waiting for async analysis to complete…")
+            if not _async_sentinel_sent[0]:
+                _async_sentinel_sent[0] = True
+                _async_iter_q.put(None)   # sentinel — tells worker to exit
+            _async_iter_q.join()
+            self._log("Async analysis complete.")
+
         # Batch finished – generate README and PRIORITY.txt
         if results and _run_dir_created[0]:
-            mode_desc = "loops" if limit_type == "loops" else "hours"
             try:
                 generate_readme(run_dir, criteria_summary, mode_desc, limit_value, results, hit_min)
                 self._log(f"README.txt written to {run_dir}")
@@ -1992,13 +2103,468 @@ class RelicBotApp(tk.Tk):
         )
 
     # ------------------------------------------------------------------ #
+    #  BUY INPUT DIAGNOSTIC
+    # ------------------------------------------------------------------ #
+
+    def _run_buy_input_test(self) -> bool:
+        """
+        Open a diagnostic popup and replay Phase 1's buy input sequence into
+        it (with the game window unaffected).  Compares the keys received by
+        the popup against the expected key presses from the recording.
+
+        Called when a post-buy murk check detects a mismatch, to confirm
+        whether the input sequence is firing correctly before retrying.
+
+        Returns True  — sequence matched; safe to retry in the game.
+        Returns False — mismatch, or user aborted.
+        """
+        # Extract the ordered list of key-press events from the recording.
+        expected: list[str] = [
+            e["key"] for e in self.phase_events[1]
+            if e.get("type") == "key_press"
+        ]
+        received: list[str] = []
+
+        # pynput key strings (e.g. "Key.down") ↔ tkinter keysyms (e.g. "Down")
+        _KEYSYM_TO_PYNPUT: dict[str, str] = {
+            "Down": "Key.down", "Up": "Key.up",
+            "Left": "Key.left", "Right": "Key.right",
+            "Return": "Key.enter", "Escape": "Key.esc",
+            "space": "Key.space", "BackSpace": "Key.backspace",
+            "Tab": "Key.tab", "Delete": "Key.delete",
+            "Home": "Key.home", "End": "Key.end",
+            "Prior": "Key.page_up", "Next": "Key.page_down",
+            **{f"F{n}": f"Key.f{n}" for n in range(1, 13)},
+        }
+
+        def _norm(sym: str) -> str:
+            """Normalise a tkinter keysym to pynput key-string format."""
+            if sym in _KEYSYM_TO_PYNPUT:
+                return _KEYSYM_TO_PYNPUT[sym]
+            return sym if len(sym) != 1 else sym.lower()
+
+        result_holder: list = [None]   # set by popup before it closes
+        done_event = threading.Event()
+
+        def _build_popup():
+            popup = tk.Toplevel(self)
+            popup.title("Buy Input Test")
+            popup.geometry("540x300")
+            popup.resizable(False, False)
+            popup.grab_set()
+            popup.focus_force()
+
+            _DIM = "#666688"
+            _FG  = "#e8e8f8"
+            _OK  = "#00cc66"
+            _ERR = "#cc3300"
+
+            tk.Label(popup,
+                     text="Murk mismatch detected — testing buy input sequence",
+                     font=("Consolas", 10, "bold")).pack(pady=(12, 6))
+
+            # Expected row
+            exp_frame = tk.Frame(popup)
+            exp_frame.pack(fill="x", padx=16, pady=(0, 2))
+            tk.Label(exp_frame, text="Expected:", font=("Consolas", 8),
+                     fg=_DIM, width=10, anchor="w").pack(side="left")
+            exp_str = "  →  ".join(expected) if expected else "(empty recording)"
+            tk.Label(exp_frame, text=exp_str, font=("Consolas", 9),
+                     fg=_FG, wraplength=400, justify="left").pack(side="left")
+
+            # Received row
+            recv_frame = tk.Frame(popup)
+            recv_frame.pack(fill="x", padx=16, pady=(0, 2))
+            tk.Label(recv_frame, text="Received:", font=("Consolas", 8),
+                     fg=_DIM, width=10, anchor="w").pack(side="left")
+            recv_var = tk.StringVar(value="running test…")
+            tk.Label(recv_frame, textvariable=recv_var, font=("Consolas", 9),
+                     fg=_FG, wraplength=400, justify="left").pack(side="left")
+
+            # Status
+            status_var = tk.StringVar(value="⏳  Testing — do not interact with the screen…")
+            status_lbl = tk.Label(popup, textvariable=status_var,
+                                  font=("Consolas", 9))
+            status_lbl.pack(pady=8)
+
+            # Invisible text sink — receives the replayed key events
+            sink = tk.Text(popup, width=1, height=1,
+                           bg=popup.cget("bg"), relief="flat",
+                           highlightthickness=0, borderwidth=0)
+            sink.pack()
+
+            def _on_key(event):
+                received.append(_norm(event.keysym))
+                return "break"   # prevent default text-widget handling
+
+            sink.bind("<KeyPress>", _on_key)
+            sink.focus_set()
+
+            # Buttons
+            btn_frame = tk.Frame(popup)
+            btn_frame.pack(pady=6)
+
+            def _close(passed: bool):
+                result_holder[0] = passed
+                popup.destroy()
+                done_event.set()
+
+            retry_btn = tk.Button(btn_frame, text="Retry in Game",
+                                  width=18, state="disabled",
+                                  command=lambda: _close(True))
+            abort_btn = tk.Button(btn_frame, text="Abort",
+                                  width=10, command=lambda: _close(False))
+            retry_btn.pack(side="left", padx=6)
+            abort_btn.pack(side="left", padx=6)
+            popup.protocol("WM_DELETE_WINDOW", lambda: _close(False))
+
+            # Auto-close after 2 minutes in case inputs never register
+            popup.after(120_000, lambda: _close(False))
+
+            def _run_test():
+                _MAX_ATTEMPTS = 5
+                for attempt in range(1, _MAX_ATTEMPTS + 1):
+                    received.clear()
+                    self.after(0, lambda a=attempt: status_var.set(
+                        f"⏳  Attempt {a}/{_MAX_ATTEMPTS} — do not interact with the screen…"))
+
+                    time.sleep(0.6)   # let popup hold OS focus
+                    self.player.play_fast(
+                        self.phase_events[1], hold=0.05, gap=0.25,
+                        bypass_focus=True,
+                    )
+                    time.sleep(0.25)  # let tkinter flush pending key events
+
+                    passed = (received == expected)
+
+                    exp_copy = list(expected)
+                    for k in received:
+                        if k in exp_copy:
+                            exp_copy.remove(k)
+                    missing = exp_copy   # keys expected but never arrived
+                    recv_snap = list(received)
+
+                    if passed:
+                        def _show_pass(a=attempt, r=recv_snap):
+                            recv_var.set("  →  ".join(r) if r else "(nothing)")
+                            status_var.set(
+                                f"✓  PASS on attempt {a}/{_MAX_ATTEMPTS} — "
+                                f"all {len(expected)} key(s) received correctly.")
+                            status_lbl.configure(fg=_OK)
+                            retry_btn.configure(state="normal")
+                        self.after(0, _show_pass)
+                        return   # user clicks "Retry in Game" to proceed
+
+                    def _show_fail(a=attempt, r=recv_snap, m=missing):
+                        recv_var.set("  →  ".join(r) if r else "(nothing received)")
+                        tail = "Retrying…" if a < _MAX_ATTEMPTS else "Closing…"
+                        status_var.set(
+                            f"✗  Attempt {a}/{_MAX_ATTEMPTS} failed — "
+                            f"missing: {', '.join(m) if m else 'order mismatch'}. {tail}")
+                        status_lbl.configure(fg=_ERR)
+                    self.after(0, _show_fail)
+
+                    if attempt < _MAX_ATTEMPTS:
+                        time.sleep(1.0)   # brief pause before next attempt
+
+                # All attempts failed — close the popup and cancel
+                time.sleep(2.0)
+                self.after(0, lambda: _close(False))
+
+            threading.Thread(target=_run_test, daemon=True).start()
+
+        self.after(0, _build_popup)
+        done_event.wait(timeout=120)   # block bot thread; main thread runs popup
+        return result_holder[0] is True
+
+    # ------------------------------------------------------------------ #
+    #  ASYNC ITERATION ANALYSIS
+    # ------------------------------------------------------------------ #
+
+    def _analyze_async_iter(self, task: dict, results: list,
+                            async_dir_map: dict) -> None:
+        """
+        Run OCR analysis for one captured iteration (async mode).
+        Called sequentially by the background async-iter-worker thread.
+        Mirrors the Phase-4 OCR pipeline and _batch_loop post-processing.
+        """
+        iteration     = task["iteration"]
+        iter_dir      = task["iter_dir"]
+        captures      = task["captures"]   # list of (step_i, img_bytes, pending_path)
+        criteria      = task["criteria"]
+        hit_min       = task["hit_min"]
+        live_log_path = task["live_log_path"]
+        run_dir       = task["run_dir"]
+        criteria_summary = task["criteria_summary"]
+        mode_desc     = task["mode_desc"]
+        limit_value   = task["limit_value"]
+        save_filename = task["save_filename"]
+
+        total = len(captures)
+        if total == 0:
+            async_dir_map[iteration] = iter_dir
+            return
+
+        self._log(f"  [Async] Analyzing iteration {iteration} ({total} relic(s))…")
+
+        # ── OCR worker setup (same as normal Phase 4) ──────────────── #
+        _workers = (max(2, min(8, self._parallel_workers_var.get()))
+                    if self._parallel_enabled_var.get() else 1)
+
+        _task_q       = queue.PriorityQueue()
+        _done_q       = queue.Queue()
+        _capture_done = threading.Event()
+
+        def _ocr_worker():
+            while True:
+                try:
+                    _si, _img = _task_q.get(timeout=0.3)
+                except queue.Empty:
+                    if _capture_done.is_set() and _task_q.empty():
+                        break
+                    continue
+                try:
+                    _res = relic_analyzer.analyze(_img, criteria)
+                    _done_q.put((_si, _img, _res, None))
+                except Exception as _exc:
+                    _done_q.put((_si, _img, None, _exc))
+
+        _worker_threads = [
+            threading.Thread(target=_ocr_worker, daemon=True,
+                             name=f"async-ocr-{iteration}-{_n}")
+            for _n in range(_workers)
+        ]
+        for _t in _worker_threads:
+            _t.start()
+
+        for step_i, img, _pending in captures:
+            _task_q.put((step_i, img))
+        _capture_done.set()
+
+        # ── Collect results ─────────────────────────────────────────── #
+        ordered = [None] * total
+        relic_results = []
+        _collected = 0
+
+        while _collected < total:
+            if not self.bot_running:
+                break
+            try:
+                step_i, img, result, exc = _done_q.get(timeout=0.5)
+            except queue.Empty:
+                if all(not _t.is_alive() for _t in _worker_threads):
+                    break
+                continue
+
+            _collected += 1
+
+            # Remove pending screenshot for this relic
+            pending_path = captures[step_i][2] if step_i < len(captures) else ""
+            if pending_path and os.path.exists(pending_path):
+                try:
+                    os.remove(pending_path)
+                except Exception:
+                    pass
+
+            if exc is not None:
+                self._log(f"  [Async iter {iteration}] ERROR relic {step_i + 1}: {exc}")
+                for _t in _worker_threads:
+                    _t.join(timeout=1.0)
+                async_dir_map[iteration] = iter_dir
+                return
+
+            self._log(f"  [Async iter {iteration}] Relic {step_i + 1}:")
+            self._log_result(result)
+
+            # Save screenshot if match or near-miss
+            saved_fname = ""
+            if iter_dir and img:
+                is_match = result.get("match", False)
+                best_nm = max(
+                    (nm.get("matching_passive_count",
+                             len(nm.get("matching_passives", [])))
+                     for nm in result.get("near_misses", [])),
+                    default=0,
+                )
+                tag = "MATCH" if is_match else ("HIT" if best_nm >= hit_min else "")
+                if tag:
+                    saved_fname = f"relic_{step_i + 1:02d}_{tag}.jpg"
+                    try:
+                        with open(os.path.join(iter_dir, saved_fname), "wb") as _f:
+                            _f.write(img)
+                        self._log(f"  Screenshot saved: {saved_fname}")
+                    except Exception as _e:
+                        self._log(f"WARNING: could not save screenshot: {_e}")
+                        saved_fname = ""
+
+            result["_image_bytes"] = None
+            result["_screenshot_file"] = saved_fname
+
+            if live_log_path:
+                try:
+                    relics = result.get("relics_found", [])
+                    r0 = relics[0] if relics else {}
+                    rname = r0.get("name", "Unknown") if isinstance(r0, dict) else str(r0)
+                    passives_found = r0.get("passives", []) if isinstance(r0, dict) else []
+                    status = "MATCH" if result.get("match") else "no match"
+                    line = (f"  Relic {step_i + 1:02d}: [{status}] {rname}"
+                            f"  | {', '.join(passives_found) or '—'}")
+                    if saved_fname:
+                        line += f"  → {saved_fname}"
+                    with open(live_log_path, "a", encoding="utf-8") as _f:
+                        _f.write(line + "\n")
+                except Exception:
+                    pass
+
+            ordered[step_i] = result
+
+            # Live-update overlay tier counters
+            r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
+            self._ov_hits_33 += r_g3
+            self._ov_at_33   += r_g3
+            self._ov_hits_23 += r_g2
+            self._ov_at_23   += r_g2
+            self._ov_duds    += r_dud
+            self._ov_at_duds += r_dud
+            if self._overlay:
+                ov = self._overlay
+                h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
+                at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+                self.after(0, lambda h33=h33, h23=h23, dds=dds,
+                           at33=at33, at23=at23, atd=atd:
+                           ov.update(hits_33=h33, hits_23=h23, duds=dds,
+                                     at_33=at33, at_23=at23, at_duds=atd)
+                           if ov._win else None)
+
+        for _t in _worker_threads:
+            _t.join(timeout=2.0)
+
+        for result in ordered:
+            if result is not None:
+                relic_results.append(result)
+
+        # ── Post-analysis: tier + overlay + folder rename ───────────── #
+        blocked_curses = self._get_blocked_curses()
+        any_match = any(
+            r.get("match") and not self._is_curse_blocked(r, blocked_curses)
+            for r in relic_results
+        )
+        all_relics = [rf for r in relic_results for rf in r.get("relics_found", [])]
+        all_near_misses = [nm for r in relic_results for nm in r.get("near_misses", [])]
+        matched_result = next(
+            (r for r in relic_results
+             if r.get("match") and not self._is_curse_blocked(r, blocked_curses)),
+            None
+        )
+        matched_relic = matched_result.get("matched_relic") if matched_result else None
+        matched_passives = matched_result.get("matched_passives", []) if matched_result else []
+        matched_curses = matched_result.get("matched_relic_curses", []) if matched_result else []
+        reason = "; ".join(r.get("reason", "") for r in relic_results if r.get("reason"))
+        screenshots = [rr.get("_screenshot_file", "") for rr in relic_results
+                       if rr.get("_screenshot_file")]
+
+        iter_g3, iter_g2, _ = self._count_relic_tiers(relic_results, hit_min)
+        num_matched = len(matched_passives)
+        if num_matched == 0 and all_near_misses:
+            num_matched = max(
+                nm.get("matching_passive_count", len(nm.get("matching_passives", [])))
+                for nm in all_near_misses
+            )
+
+        iter_total = iter_g3 + iter_g2
+        if iter_g3 > 0:
+            if self._best_33_iter is None or iter_g3 > self._best_33_iter["count"]:
+                self._best_33_iter = {"iteration": iteration, "count": iter_g3}
+        if iter_total > 0:
+            if self._best_hits_iter is None or iter_total > self._best_hits_iter["count"]:
+                self._best_hits_iter = {"iteration": iteration, "count": iter_total}
+
+        if self._overlay:
+            def _fmt_best(info, suffix):
+                if info is None:
+                    return "N/A"
+                return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
+            ov = self._overlay
+            h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
+            at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+            b33  = _fmt_best(self._best_33_iter,   "★★★")
+            bhit = _fmt_best(self._best_hits_iter, "hits")
+            self.after(0, lambda: ov.update(
+                hits_33=h33, hits_23=h23, duds=dds,
+                at_33=at33, at_23=at23, at_duds=atd,
+                best_33=b33, best_hits=bhit,
+            ) if ov._win else None)
+
+        self._save_stats()
+
+        if num_matched >= 3:
+            self._log(f"★★★ GOD ROLL — Iteration {iteration}: {matched_relic}")
+        elif num_matched >= hit_min:
+            hit_name = matched_relic or (
+                max(all_near_misses,
+                    key=lambda nm: nm.get("matching_passive_count", 0),
+                    default={}).get("relic_name", "Unknown")
+            )
+            self._log(f"★★ HIT — Iteration {iteration}: {hit_name}")
+
+        try:
+            write_iter_info(iter_dir, iteration, relic_results, hit_min)
+        except Exception as e:
+            self._log(f"WARNING: could not write info.txt: {e}")
+
+        folder_name = f"{iteration:03d}"
+        if num_matched >= 3:
+            tier_name = f"GOD ROLL {iteration:03d}"
+        elif num_matched >= hit_min:
+            tier_name = f"HIT {iteration:03d}"
+        else:
+            tier_name = None
+
+        final_iter_dir = iter_dir
+        if tier_name:
+            tier_dir = os.path.join(run_dir, tier_name)
+            try:
+                os.rename(iter_dir, tier_dir)
+                final_iter_dir = tier_dir
+                folder_name = tier_name
+                self._log(f"Folder renamed to: {tier_name}")
+            except OSError as e:
+                self._log(f"WARNING: could not rename folder: {e}")
+
+        # Record final dir so _batch_loop can locate it for the save copy
+        async_dir_map[iteration] = final_iter_dir
+
+        results.append({
+            "iteration": iteration,
+            "folder": folder_name,
+            "match": any_match,
+            "matched_relic": matched_relic,
+            "matched_passives": matched_passives,
+            "near_misses": all_near_misses,
+            "reason": reason,
+            "relics_found": all_relics,
+            "screenshots": screenshots,
+            "save_copy": save_filename,
+        })
+
+        try:
+            generate_readme(run_dir, criteria_summary, mode_desc, limit_value, results, hit_min)
+        except Exception:
+            pass
+        try:
+            generate_priority_summary(run_dir, results)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ #
     #  PHASE EXECUTION ENGINE
     # ------------------------------------------------------------------ #
 
     def _run_iteration_phases(self, label: str, criteria: dict,
                               region, delay: float,
                               iter_dir: str = "", hit_min: int = 2,
-                              live_log_path: str = "") -> list | None:
+                              live_log_path: str = "",
+                              capture_only: bool = False) -> list | None:
         """
         Run all configured sequence phases for one bot iteration.
 
@@ -2022,6 +2588,7 @@ class RelicBotApp(tk.Tk):
         p4_settle = float(self.phase_settle_vars[4].get() or "0")
         murk_cost = 1800 if self.relic_type_var.get() == "night" else 600
         _p3_count = None            # set by murk read below; None = use failsafe
+        _estimated_murk_after = None  # expected murk remainder after all purchases
 
         relic_results = []
 
@@ -2060,14 +2627,17 @@ class RelicBotApp(tk.Tk):
                 if murk_val >= murk_cost:
                     # Valid read — value can afford at least one relic
                     _p3_count = murk_val // murk_cost
+                    _estimated_murk_after = murk_val % murk_cost
                     self._log(
                         f"  Murk: {murk_val:,}  →  {_p3_count} relic(s) to review "
-                        f"({murk_cost} murk each).")
+                        f"({murk_cost} murk each). Est. after purchases: {_estimated_murk_after:,}.")
                     if self._overlay:
                         ov = self._overlay
-                        mv, pc = murk_val, _p3_count
+                        mv, pc, ema = murk_val, _p3_count, _estimated_murk_after
                         self.after(0, lambda: ov.update(
-                            murk=f"{mv:,}", to_buy=str(pc),
+                            murk=f"{mv:,}",
+                            est_murk_after=f"~{ema:,}",
+                            to_buy=str(pc),
                             bought="0 / " + str(pc),
                             relic_num="—", analysing="—",
                         ) if ov._win else None)
@@ -2109,6 +2679,63 @@ class RelicBotApp(tk.Tk):
                         self.after(0, lambda b=bought_n, t=tot_n: ov.update(
                             bought=f"{b} / {t}"
                         ) if ov._win else None)
+
+                # ── Post-buy murk verification ───────────────────────────── #
+                # Re-read murk after the buy loop.  If the screen still shows
+                # enough murk to afford more relics the buy inputs didn't all
+                # land — run additional batches until murk drops below cost.
+                # The Murk and Est. After overlay values are NOT updated here;
+                # they reflect the pre-purchase snapshot taken above.
+                self._set_status(f"{label}: verifying purchases…", "green")
+                time.sleep(1.5)
+                for _vfy in range(5):
+                    if not self.bot_running:
+                        return relic_results
+                    self.after(0, self._flash_capture)
+                    try:
+                        vfy_img = screen_capture.capture(region)
+                        actual_murk = relic_analyzer.read_murk(vfy_img)
+                    except Exception as e:
+                        self._log(f"  Post-buy murk check error: {e}")
+                        break
+                    remaining = actual_murk // murk_cost
+                    if actual_murk == 0 or remaining == 0:
+                        self._log(
+                            f"  Post-buy check: {actual_murk:,} murk remaining — "
+                            f"purchases verified (expected ~{_estimated_murk_after:,}).")
+                        break
+                    self._log(
+                        f"  Post-buy check: {actual_murk:,} murk remaining — "
+                        f"{remaining} relic(s) still affordable "
+                        f"(expected <{murk_cost:,}). Running input test…")
+                    test_ok = self._run_buy_input_test()
+                    if not test_ok:
+                        self._log(
+                            "  Input test failed or was aborted — cancelling re-buy.")
+                        break
+                    self._log("  Input test passed — refocusing game and retrying buy…")
+                    exe_name = os.path.basename(self.game_exe_var.get().strip())
+                    if exe_name:
+                        focused = self._focus_game_window(exe_name, timeout=5.0)
+                        if not focused:
+                            self._log(
+                                "  WARNING: Could not refocus game window — "
+                                "inputs may not reach the game.")
+                        else:
+                            self._log("  Game window refocused.")
+                    time.sleep(3.5)   # let the game settle after focus restore
+                    extra_batches = math.ceil(remaining / 10)
+                    for _xb in range(extra_batches):
+                        if not self.bot_running:
+                            return relic_results
+                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.25)
+                        if p1_settle > 0:
+                            time.sleep(p1_settle)
+                    time.sleep(1.5)
+                else:
+                    self._log(
+                        "  WARNING: Post-buy verification could not confirm all "
+                        "purchases after 5 attempts — proceeding anyway.")
             else:
                 # Fallback: no murk data — run until stop condition is detected.
                 self._set_status(f"{label}: buying relics…", "green")
@@ -2143,11 +2770,16 @@ class RelicBotApp(tk.Tk):
 
         # ── Phase 3: Navigate to Sell (smart tab detection + targeted F2) ─ #
         # Runs whenever Phase 2 (Relic Rites Nav) is configured.
-        # 1. Take a screenshot and OCR the tab bar to identify the active tab.
-        # 2. Press F2 exactly N times (0.35 s gap) to reach Sell.
+        # 1. Wait for the menu to finish loading, then screenshot and OCR to
+        #    identify the active character tab.
+        # 2. Press F2 exactly N times (0.20 s gap) to reach Sell.
         # 3. Verify we landed on Sell.  If not, run a fallback F2 loop.
         _P3_FAILSAFE = 15   # max extra F2 presses in the fallback loop
         if self.phase_events[2]:
+            # Settle: let the Relic Rites menu finish animating before we
+            # screenshot — without this the OCR fires before the UI loads and
+            # falls back to the worst-case 10-press guess.
+            time.sleep(0.7)
             self._set_status(f"{label}: detecting tab position…", "green")
 
             # Step 1 — detect current tab
@@ -2170,7 +2802,7 @@ class RelicBotApp(tk.Tk):
                 if not self.bot_running:
                     return relic_results
                 self.player.tap("Key.f2", hold=0.05)
-                time.sleep(0.35)
+                time.sleep(0.20)
 
             # Step 3 — verify we landed on Sell
             if not self.bot_running:
@@ -2194,7 +2826,7 @@ class RelicBotApp(tk.Tk):
                     if not self.bot_running:
                         return relic_results
                     self.player.tap("Key.f2", hold=0.05)
-                    time.sleep(0.35)
+                    time.sleep(0.20)
                     self.after(0, self._flash_capture)
                     try:
                         img = screen_capture.capture(region)
@@ -2214,6 +2846,49 @@ class RelicBotApp(tk.Tk):
         # ── Phase 4: Review Step Loop (analyze each relic) ─────────── #
         if self.phase_events[4]:
             total = _p3_count if _p3_count is not None else _P4_FAILSAFE
+
+            # ── Capture-only mode (async analysis) ──────────────────── #
+            if capture_only:
+                captures = []
+                for step_i in range(total):
+                    if not self.bot_running:
+                        return captures
+                    self._check_pause_point(f"{label}: capturing relic {step_i + 1}/{total}")
+                    if not self.bot_running:
+                        return captures
+                    if step_i > 0:
+                        self.player.play_fast(self.phase_events[4])
+                        if p4_settle > 0:
+                            time.sleep(p4_settle)
+                        if not self.bot_running:
+                            return captures
+                    self._set_status(
+                        f"{label}: capturing relic {step_i + 1}/{total}…", "#006600")
+                    if self._overlay:
+                        ov = self._overlay
+                        si, tot = step_i + 1, total
+                        self.after(0, lambda si=si, tot=tot: ov.update(
+                            relic_num=f"{si} / {tot}", analysing="queued",
+                        ) if ov._win else None)
+                    self.after(0, self._flash_capture)
+                    try:
+                        img = screen_capture.capture(region)
+                    except Exception as e:
+                        self._log(f"ERROR capturing relic {step_i + 1}: {e}")
+                        return None
+                    pending_path = ""
+                    if iter_dir:
+                        pending_fname = f"relic_{step_i + 1:02d}_pending.jpg"
+                        pending_path = os.path.join(iter_dir, pending_fname)
+                        try:
+                            with open(pending_path, "wb") as _f:
+                                _f.write(img)
+                        except Exception as _e:
+                            self._log(f"WARNING: could not save pending screenshot: {_e}")
+                            pending_path = ""
+                    captures.append((step_i, img, pending_path))
+                return captures
+
             ordered = [None] * total
 
             # Pipelined capture + analysis: submit each screenshot for analysis
@@ -2405,6 +3080,9 @@ class RelicBotApp(tk.Tk):
             return relic_results
 
         # ── No Phase 4: fall back to single capture + analyze ────────── #
+        if capture_only:
+            return relic_results   # nothing to capture without Phase 4
+
         self._set_status(f"{label}: waiting for relic screen…", "green")
         time.sleep(delay)
         if not self.bot_running:

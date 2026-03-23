@@ -174,14 +174,16 @@ class InputPlayer:
         except Exception:
             pass
 
-    def play_fast(self, events: list, hold: float = 0.05, gap: float = 0.0):
+    def play_fast(self, events: list, hold: float = 0.05, gap: float = 0.0,
+                  bypass_focus: bool = False):
         """
         Replay events ignoring all original inter-event timing.
         Each key/button is held for `hold` seconds then released.
         `gap` is extra sleep added only after key/mouse release events (between keys).
-        Skips all inputs silently if the game window is not in the foreground.
+        Skips all inputs silently if the game window is not in the foreground,
+        unless bypass_focus=True (used for diagnostic input tests).
         """
-        if not self._game_focused():
+        if not bypass_focus and not self._game_focused():
             return
         self._stop_flag = False
         for event in events:
