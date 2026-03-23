@@ -17,9 +17,10 @@ import threading
 
 # ── Windows API: prevent the overlay from ever stealing focus ─────── #
 
-_GWL_EXSTYLE      = -20
-_WS_EX_NOACTIVATE = 0x08000000   # clicks don't activate (steal focus from) this window
-_WS_EX_TOOLWINDOW = 0x00000080   # hide from taskbar / alt-tab list
+_GWL_EXSTYLE          = -20
+_WS_EX_NOACTIVATE     = 0x08000000   # clicks don't activate (steal focus from) this window
+_WS_EX_TOOLWINDOW     = 0x00000080   # hide from taskbar / alt-tab list
+_WDA_EXCLUDEFROMCAPTURE = 0x00000011  # invisible to screen capture (Win10 2004+)
 
 
 def _apply_noactivate(win: tk.Toplevel) -> None:
@@ -29,6 +30,21 @@ def _apply_noactivate(win: tk.Toplevel) -> None:
         s = ctypes.windll.user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
         ctypes.windll.user32.SetWindowLongW(
             hwnd, _GWL_EXSTYLE, s | _WS_EX_NOACTIVATE | _WS_EX_TOOLWINDOW)
+    except Exception:
+        pass
+
+
+def _apply_capture_exclusion(win: tk.Toplevel) -> None:
+    """Exclude the overlay from screen capture (mss, BitBlt, etc.).
+
+    Uses SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) — available on
+    Windows 10 version 2004 (build 19041) and later.  Silently ignored on
+    older versions so the bot still runs; the overlay just becomes visible
+    in screenshots on those systems.
+    """
+    try:
+        hwnd = int(win.wm_frame(), 16)
+        ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, _WDA_EXCLUDEFROMCAPTURE)
     except Exception:
         pass
 
@@ -127,6 +143,7 @@ class BotOverlay:
         win.withdraw()
         win.update_idletasks()
         _apply_noactivate(win)
+        _apply_capture_exclusion(win)
 
     def _build_ui(self) -> None:
         w = self._win
