@@ -55,6 +55,7 @@ On first launch the bot downloads its OCR model (~100 MB) — one-time only, the
 
 For full setup instructions see **[SETUP.md](SETUP.md)**.
 For first-time installation and file location help see **[INSTALLATION.md](INSTALLATION.md)**.
+To report a bug see **[BUG_REPORT.md](BUG_REPORT.md)**.
 
 ---
 
