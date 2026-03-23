@@ -372,8 +372,9 @@ class RelicBotApp(tk.Tk):
         # Overlay (Batch Mode only)
         self._overlay = None
         self._overlay_enabled_var  = tk.BooleanVar(value=True)
-        self._parallel_enabled_var = tk.BooleanVar(value=False)
-        self._parallel_workers_var = tk.IntVar(value=2)
+        self._parallel_enabled_var  = tk.BooleanVar(value=False)
+        self._parallel_workers_var  = tk.IntVar(value=2)
+        self._stop_after_batch      = False   # graceful stop flag
         # Per-run counters (reset each start)
         self._ov_hits_33 = 0
         self._ov_hits_23 = 0
@@ -1261,7 +1262,8 @@ class RelicBotApp(tk.Tk):
             self._overlay = BotOverlay(self)
             self._overlay.build(sw, sh)
             self._overlay.set_pause_callback(self._toggle_pause)
-            self._overlay.set_stop_callback(self._stop_bot)
+            self._overlay.set_stop_callback(self._request_stop_after_batch)
+            self._overlay.set_force_stop_callback(self._stop_bot)
             def _fmt_best(info, suffix):
                 if info is None:
                     return "N/A"
@@ -1556,8 +1558,9 @@ class RelicBotApp(tk.Tk):
         if not self._validate():
             return
 
-        self.bot_running = True
-        self.attempt_count = 0
+        self.bot_running       = True
+        self.attempt_count     = 0
+        self._stop_after_batch = False
         # Reset per-run counters only; all-time counters persist
         self._ov_hits_33 = 0
         self._ov_hits_23 = 0
@@ -1578,7 +1581,16 @@ class RelicBotApp(tk.Tk):
         self.bot_thread = threading.Thread(target=self._batch_loop, daemon=True)
         self.bot_thread.start()
 
+    def _request_stop_after_batch(self):
+        """Graceful stop: let the current batch finish, then exit cleanly."""
+        self._stop_after_batch = True
+        self._log("Stop requested — will finish current batch then exit.")
+        self._set_status("Stopping after this batch…", "orange")
+        if self._overlay:
+            self._overlay.set_stop_pending(True)
+
     def _stop_bot(self):
+        self._stop_after_batch = False
         self.bot_running = False
         self.player.stop()
         # Unblock backup ready wait if it's stuck
@@ -1900,6 +1912,11 @@ class RelicBotApp(tk.Tk):
                 generate_priority_summary(run_dir, results)
             except Exception:
                 pass
+
+            # Graceful stop — user requested stop after this batch
+            if self._stop_after_batch:
+                self._log("Batch finished — stopping as requested.")
+                break
 
         # Copy the last iteration's save (game is still running after final analysis).
         if _prev_save_dir is not None:

@@ -101,14 +101,17 @@ class BotOverlay:
     """
 
     def __init__(self, root: tk.Tk):
-        self._root      = root
+        self._root           = root
         self._win: tk.Toplevel | None = None
-        self._pause_cb  = None
-        self._stop_cb   = None
-        self._watching  = False
+        self._pause_cb       = None
+        self._stop_cb        = None        # graceful: stop after current batch
+        self._force_stop_cb  = None        # immediate: stop right now
+        self._watching       = False
         self._sv: dict[str, tk.StringVar] = {}
         self._pause_btn: tk.Label | None  = None
+        self._abort_btn: tk.Label | None  = None
         self._log_box:  tk.Text  | None   = None
+        self._stop_pending   = False       # True once graceful stop is requested
 
         # Drag-to-move state
         self._drag_x = 0
@@ -250,14 +253,14 @@ class BotOverlay:
             lambda _: self._pause_cb() if self._pause_cb else None,
         )
 
-        abort_btn = tk.Label(
-            bf, text="⏻  STOP",
+        self._abort_btn = tk.Label(
+            bf, text="⏻  STOP AFTER BATCH",
             bg="#1a1a2e", fg="#cc3300",
             font=("Consolas", 10, "bold"),
             padx=16, pady=5, cursor="hand2", relief="flat",
         )
-        abort_btn.pack(side="left")
-        abort_btn.bind("<Button-1>", self._on_abort_click)
+        self._abort_btn.pack(side="left")
+        self._abort_btn.bind("<Button-1>", self._on_abort_click)
 
         _hline(w)
 
@@ -390,23 +393,46 @@ class BotOverlay:
         self._pause_cb = cb
 
     def set_stop_callback(self, cb) -> None:
+        """Graceful stop: bot finishes the current batch then exits."""
         self._stop_cb = cb
 
-    def _on_abort_click(self, _event=None) -> None:
-        """Show a confirmation dialog before stopping the bot."""
-        if not self._stop_cb:
+    def set_force_stop_callback(self, cb) -> None:
+        """Immediate stop: interrupts the bot right now (second click)."""
+        self._force_stop_cb = cb
+
+    def set_stop_pending(self, pending: bool) -> None:
+        """Sync the abort button state (e.g. when stop was triggered externally)."""
+        self._stop_pending = pending
+        if not self._abort_btn:
             return
-        # Ask on the main thread — messagebox is always thread-safe here
-        # since this is already a tkinter event callback on the main thread.
-        confirmed = tk_messagebox.askyesno(
-            "Stop Bot",
-            "Are you sure you want to stop the bot?\n\n"
-            "The current iteration will be cancelled.",
-            icon="warning",
-            parent=self._win,
-        )
-        if confirmed:
-            self._stop_cb()
+        if pending:
+            self._abort_btn.configure(
+                text="⌛ AFTER BATCH…", bg=_WARN_C, fg="white")
+        else:
+            self._abort_btn.configure(
+                text="⏻  STOP AFTER BATCH", bg="#1a1a2e", fg="#cc3300")
+
+    def _on_abort_click(self, _event=None) -> None:
+        if not self._stop_pending:
+            # First click — request graceful stop after current batch
+            self._stop_pending = True
+            if self._abort_btn:
+                self._abort_btn.configure(
+                    text="⌛ AFTER BATCH…", bg=_WARN_C, fg="white")
+            if self._stop_cb:
+                self._stop_cb()
+        else:
+            # Second click — offer immediate force stop
+            confirmed = tk_messagebox.askyesno(
+                "Force Stop Now?",
+                "The bot is already scheduled to stop after this batch.\n\n"
+                "Force stop RIGHT NOW instead?\n"
+                "The current batch will be incomplete.",
+                icon="warning",
+                parent=self._win,
+            )
+            if confirmed and self._force_stop_cb:
+                self._force_stop_cb()
 
 
 # ── Widget helpers ────────────────────────────────────────────────── #
