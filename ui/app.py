@@ -1220,14 +1220,15 @@ class RelicBotApp(tk.Tk):
             return True
         self._log(f"Closing game ({exe_name})…")
         subprocess.run(["taskkill", "/f", "/im", exe_name], capture_output=True)
-        for _ in range(30):  # wait up to 15s
+        for _ in range(120):  # wait up to 60 s
             time.sleep(0.5)
             if not self.bot_running:
                 return False
             if not self._is_game_running(exe_name):
-                self._log("Game closed.")
+                self._log("Game closed — waiting for cleanup…")
+                time.sleep(4)   # let EAC and any background processes finish
                 return True
-        self._log("WARNING: Game did not close within 15s.")
+        self._log("WARNING: Game did not close within 60s.")
         return False
 
     _STEAM_APP_ID = "2622380"
@@ -2237,177 +2238,6 @@ class RelicBotApp(tk.Tk):
     #  BUY INPUT DIAGNOSTIC
     # ------------------------------------------------------------------ #
 
-    def _run_buy_input_test(self) -> bool:
-        """
-        Open a diagnostic popup and replay Phase 1's buy input sequence into
-        it (with the game window unaffected).  Compares the keys received by
-        the popup against the expected key presses from the recording.
-
-        Called when a post-buy murk check detects a mismatch, to confirm
-        whether the input sequence is firing correctly before retrying.
-
-        Returns True  — sequence matched; safe to retry in the game.
-        Returns False — mismatch, or user aborted.
-        """
-        # Extract the ordered list of key-press events from the recording.
-        expected: list[str] = [
-            e["key"] for e in self.phase_events[1]
-            if e.get("type") == "key_press"
-        ]
-        received: list[str] = []
-
-        # pynput key strings (e.g. "Key.down") ↔ tkinter keysyms (e.g. "Down")
-        _KEYSYM_TO_PYNPUT: dict[str, str] = {
-            "Down": "Key.down", "Up": "Key.up",
-            "Left": "Key.left", "Right": "Key.right",
-            "Return": "Key.enter", "Escape": "Key.esc",
-            "space": "Key.space", "BackSpace": "Key.backspace",
-            "Tab": "Key.tab", "Delete": "Key.delete",
-            "Home": "Key.home", "End": "Key.end",
-            "Prior": "Key.page_up", "Next": "Key.page_down",
-            **{f"F{n}": f"Key.f{n}" for n in range(1, 13)},
-        }
-
-        def _norm(sym: str) -> str:
-            """Normalise a tkinter keysym to pynput key-string format."""
-            if sym in _KEYSYM_TO_PYNPUT:
-                return _KEYSYM_TO_PYNPUT[sym]
-            return sym if len(sym) != 1 else sym.lower()
-
-        result_holder: list = [None]   # set by popup before it closes
-        done_event = threading.Event()
-
-        def _build_popup():
-            popup = tk.Toplevel(self)
-            popup.title("Buy Input Test")
-            popup.geometry("540x300")
-            popup.resizable(False, False)
-            popup.grab_set()
-            popup.focus_force()
-
-            _DIM = "#666688"
-            _FG  = "#e8e8f8"
-            _OK  = "#00cc66"
-            _ERR = "#cc3300"
-
-            tk.Label(popup,
-                     text="Murk mismatch detected — testing buy input sequence",
-                     font=("Consolas", 10, "bold")).pack(pady=(12, 6))
-
-            # Expected row
-            exp_frame = tk.Frame(popup)
-            exp_frame.pack(fill="x", padx=16, pady=(0, 2))
-            tk.Label(exp_frame, text="Expected:", font=("Consolas", 8),
-                     fg=_DIM, width=10, anchor="w").pack(side="left")
-            exp_str = "  →  ".join(expected) if expected else "(empty recording)"
-            tk.Label(exp_frame, text=exp_str, font=("Consolas", 9),
-                     fg=_FG, wraplength=400, justify="left").pack(side="left")
-
-            # Received row
-            recv_frame = tk.Frame(popup)
-            recv_frame.pack(fill="x", padx=16, pady=(0, 2))
-            tk.Label(recv_frame, text="Received:", font=("Consolas", 8),
-                     fg=_DIM, width=10, anchor="w").pack(side="left")
-            recv_var = tk.StringVar(value="running test…")
-            tk.Label(recv_frame, textvariable=recv_var, font=("Consolas", 9),
-                     fg=_FG, wraplength=400, justify="left").pack(side="left")
-
-            # Status
-            status_var = tk.StringVar(value="⏳  Testing — do not interact with the screen…")
-            status_lbl = tk.Label(popup, textvariable=status_var,
-                                  font=("Consolas", 9))
-            status_lbl.pack(pady=8)
-
-            # Invisible text sink — receives the replayed key events
-            sink = tk.Text(popup, width=1, height=1,
-                           bg=popup.cget("bg"), relief="flat",
-                           highlightthickness=0, borderwidth=0)
-            sink.pack()
-
-            def _on_key(event):
-                received.append(_norm(event.keysym))
-                return "break"   # prevent default text-widget handling
-
-            sink.bind("<KeyPress>", _on_key)
-            sink.focus_set()
-
-            # Buttons
-            btn_frame = tk.Frame(popup)
-            btn_frame.pack(pady=6)
-
-            def _close(passed: bool):
-                result_holder[0] = passed
-                popup.destroy()
-                done_event.set()
-
-            retry_btn = tk.Button(btn_frame, text="Retry in Game",
-                                  width=18, state="disabled",
-                                  command=lambda: _close(True))
-            abort_btn = tk.Button(btn_frame, text="Abort",
-                                  width=10, command=lambda: _close(False))
-            retry_btn.pack(side="left", padx=6)
-            abort_btn.pack(side="left", padx=6)
-            popup.protocol("WM_DELETE_WINDOW", lambda: _close(False))
-
-            # Auto-close after 2 minutes in case inputs never register
-            popup.after(120_000, lambda: _close(False))
-
-            def _run_test():
-                _MAX_ATTEMPTS = 5
-                for attempt in range(1, _MAX_ATTEMPTS + 1):
-                    received.clear()
-                    self.after(0, lambda a=attempt: status_var.set(
-                        f"⏳  Attempt {a}/{_MAX_ATTEMPTS} — do not interact with the screen…"))
-
-                    time.sleep(0.6)   # let popup hold OS focus
-                    self.player.play_fast(
-                        self.phase_events[1], hold=0.05, gap=0.25,
-                        bypass_focus=True,
-                    )
-                    time.sleep(0.25)  # let tkinter flush pending key events
-
-                    passed = (received == expected)
-
-                    exp_copy = list(expected)
-                    for k in received:
-                        if k in exp_copy:
-                            exp_copy.remove(k)
-                    missing = exp_copy   # keys expected but never arrived
-                    recv_snap = list(received)
-
-                    if passed:
-                        def _show_pass(a=attempt, r=recv_snap):
-                            recv_var.set("  →  ".join(r) if r else "(nothing)")
-                            status_var.set(
-                                f"✓  PASS on attempt {a}/{_MAX_ATTEMPTS} — "
-                                f"all {len(expected)} key(s) received correctly.")
-                            status_lbl.configure(fg=_OK)
-                            retry_btn.configure(state="normal")
-                        self.after(0, _show_pass)
-                        return   # user clicks "Retry in Game" to proceed
-
-                    def _show_fail(a=attempt, r=recv_snap, m=missing):
-                        recv_var.set("  →  ".join(r) if r else "(nothing received)")
-                        tail = "Retrying…" if a < _MAX_ATTEMPTS else "Closing…"
-                        status_var.set(
-                            f"✗  Attempt {a}/{_MAX_ATTEMPTS} failed — "
-                            f"missing: {', '.join(m) if m else 'order mismatch'}. {tail}")
-                        status_lbl.configure(fg=_ERR)
-                    self.after(0, _show_fail)
-
-                    if attempt < _MAX_ATTEMPTS:
-                        time.sleep(1.0)   # brief pause before next attempt
-
-                # All attempts failed — close the popup and cancel
-                time.sleep(2.0)
-                self.after(0, lambda: _close(False))
-
-            threading.Thread(target=_run_test, daemon=True).start()
-
-        self.after(0, _build_popup)
-        done_event.wait(timeout=120)   # block bot thread; main thread runs popup
-        return result_holder[0] is True
-
     # ------------------------------------------------------------------ #
     #  ASYNC ITERATION ANALYSIS
     # ------------------------------------------------------------------ #
@@ -2812,62 +2642,6 @@ class RelicBotApp(tk.Tk):
                             bought=f"{b} / {t}"
                         ) if ov._win else None)
 
-                # ── Post-buy murk verification ───────────────────────────── #
-                # Re-read murk after the buy loop.  If the screen still shows
-                # enough murk to afford more relics the buy inputs didn't all
-                # land — run additional batches until murk drops below cost.
-                # The Murk and Est. After overlay values are NOT updated here;
-                # they reflect the pre-purchase snapshot taken above.
-                self._set_status(f"{label}: verifying purchases…", "green")
-                time.sleep(1.5)
-                for _vfy in range(5):
-                    if not self.bot_running:
-                        return relic_results
-                    self.after(0, self._flash_capture)
-                    try:
-                        vfy_img = screen_capture.capture(region)
-                        actual_murk = relic_analyzer.read_murk(vfy_img)
-                    except Exception as e:
-                        self._log(f"  Post-buy murk check error: {e}")
-                        break
-                    remaining = actual_murk // murk_cost
-                    if actual_murk == 0 or remaining == 0:
-                        self._log(
-                            f"  Post-buy check: {actual_murk:,} murk remaining — "
-                            f"purchases verified (expected ~{_estimated_murk_after:,}).")
-                        break
-                    self._log(
-                        f"  Post-buy check: {actual_murk:,} murk remaining — "
-                        f"{remaining} relic(s) still affordable "
-                        f"(expected <{murk_cost:,}). Running input test…")
-                    test_ok = self._run_buy_input_test()
-                    if not test_ok:
-                        self._log(
-                            "  Input test failed or was aborted — cancelling re-buy.")
-                        break
-                    self._log("  Input test passed — refocusing game and retrying buy…")
-                    exe_name = os.path.basename(self.game_exe_var.get().strip())
-                    if exe_name:
-                        focused = self._focus_game_window(exe_name, timeout=5.0)
-                        if not focused:
-                            self._log(
-                                "  WARNING: Could not refocus game window — "
-                                "inputs may not reach the game.")
-                        else:
-                            self._log("  Game window refocused.")
-                    time.sleep(3.5)   # let the game settle after focus restore
-                    extra_batches = math.ceil(remaining / 10)
-                    for _xb in range(extra_batches):
-                        if not self.bot_running:
-                            return relic_results
-                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.25)
-                        if p1_settle > 0:
-                            time.sleep(p1_settle)
-                    time.sleep(1.5)
-                else:
-                    self._log(
-                        "  WARNING: Post-buy verification could not confirm all "
-                        "purchases after 5 attempts — proceeding anyway.")
             else:
                 # Fallback: no murk data — run until stop condition is detected.
                 self._set_status(f"{label}: buying relics…", "green")
