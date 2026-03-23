@@ -1814,64 +1814,84 @@ class RelicBotApp(tk.Tk):
 
         # ── Async mode setup ──────────────────────────────────────────── #
         _async_mode = self._async_enabled_var.get()
-        _async_iter_q: queue.Queue | None = None
-        _async_dir_map: dict = {}   # iteration → final dir (after any rename)
-        _async_sentinel_sent = [False]   # guard against double-sentinel
+        _async_relic_q: queue.PriorityQueue | None = None
+        _async_dir_map:    dict = {}   # iteration → final dir (after any rename)
+        _async_iter_state: dict = {}   # iteration → per-iter completion tracking
+        _async_state_lock = threading.Lock()
+        _async_shutdown_done = [False]
+        _ASYNC_TASK_TIMEOUT  = 90      # seconds per relic before requeueing
 
         if _async_mode:
-            _async_iter_q = queue.Queue()
-            self._log("Async Analysis enabled — capture and OCR will run in parallel.")
+            _async_relic_q = queue.PriorityQueue()
+            _async_workers = (max(1, min(8, self._parallel_workers_var.get()))
+                              if self._parallel_enabled_var.get() else 1)
+            self._log(
+                f"Async Analysis enabled — {_async_workers} worker(s); "
+                "relics queued by priority across all iterations."
+            )
 
-            _ASYNC_TASK_TIMEOUT = 90   # seconds per iteration's analysis before skipping
-
-            def _async_worker_loop():  # noqa: E306
+            def _relic_worker():  # noqa: E306
                 while True:
-                    _task = _async_iter_q.get()
-                    if _task is None:
-                        _async_iter_q.task_done()
+                    _prio, _task = _async_relic_q.get()
+                    if _task is None:   # sentinel
+                        _async_relic_q.task_done()
                         break
                     try:
-                        _at = threading.Thread(
-                            target=self._analyze_async_iter,
-                            args=(_task, results, _async_dir_map),
+                        _rt = threading.Thread(
+                            target=self._analyze_relic_task,
+                            args=(_task, _async_iter_state, _async_state_lock,
+                                  _async_dir_map, results),
                             daemon=True,
                         )
-                        _at.start()
-                        _at.join(timeout=_ASYNC_TASK_TIMEOUT)
-                        if _at.is_alive():
+                        _rt.start()
+                        _rt.join(timeout=_ASYNC_TASK_TIMEOUT)
+                        if _rt.is_alive():
                             _retries = _task.get("_retries", 0)
-                            if _retries < 1:
+                            if _retries < 2:
                                 self._log(
-                                    f"WARNING: Async analysis for iteration "
-                                    f"{_task['iteration']} timed out "
-                                    f"({_ASYNC_TASK_TIMEOUT}s) — requeueing "
-                                    f"(attempt {_retries + 2}/2)."
+                                    f"[Async] Iter {_task['iteration']} relic "
+                                    f"{_task['step_i'] + 1} timed out — "
+                                    f"requeueing (attempt {_retries + 2}/3)."
                                 )
-                                _async_iter_q.put({**_task, "_retries": _retries + 1})
+                                _async_relic_q.put(
+                                    (_prio, {**_task, "_retries": _retries + 1}))
                             else:
                                 self._log(
-                                    f"WARNING: Async analysis for iteration "
-                                    f"{_task['iteration']} timed out again "
-                                    f"— skipping permanently."
+                                    f"[Async] Iter {_task['iteration']} relic "
+                                    f"{_task['step_i'] + 1} timed out permanently."
                                 )
-                    except Exception as _ae:
-                        self._log(f"ERROR in async analysis worker: {_ae}")
+                                self._mark_relic_failed(
+                                    _task, _async_iter_state, _async_state_lock,
+                                    _async_dir_map, results)
+                    except Exception as _re:
+                        self._log(f"ERROR in async relic worker: {_re}")
+                        self._mark_relic_failed(
+                            _task, _async_iter_state, _async_state_lock,
+                            _async_dir_map, results)
                     finally:
-                        _async_iter_q.task_done()
+                        _async_relic_q.task_done()
 
-            threading.Thread(target=_async_worker_loop, daemon=True,
-                             name="async-iter-worker").start()
+            for _wn in range(_async_workers):
+                threading.Thread(target=_relic_worker, daemon=True,
+                                 name=f"async-relic-worker-{_wn}").start()
+
+            def _shutdown_async_workers():
+                if not _async_shutdown_done[0]:
+                    _async_shutdown_done[0] = True
+                    for _ in range(_async_workers):
+                        _async_relic_q.put(
+                            ((float("inf"), float("inf")), None))
 
             def _async_join_timed():
-                """Wait for the async queue to drain, with a 1.5-min timeout."""
+                """Wait for the async relic queue to drain (1.5-min timeout)."""
                 _done = threading.Event()
                 def _waiter():
-                    _async_iter_q.join()
+                    _async_relic_q.join()
                     _done.set()
                 threading.Thread(target=_waiter, daemon=True).start()
                 if not _done.wait(timeout=_ASYNC_TASK_TIMEOUT):
                     self._log(
-                        f"WARNING: Async worker did not finish within "
+                        f"WARNING: Async workers did not finish within "
                         f"{_ASYNC_TASK_TIMEOUT}s — proceeding anyway."
                     )
 
@@ -1986,18 +2006,13 @@ class RelicBotApp(tk.Tk):
                     capture_only=True)
 
                 if captures is None:
-                    # Fatal capture error — shut down worker and abort
-                    if not _async_sentinel_sent[0]:
-                        _async_sentinel_sent[0] = True
-                        _async_iter_q.put(None)
+                    # Fatal capture error — shut down workers and abort
+                    _shutdown_async_workers()
                     _async_join_timed()
                     self.after(0, self._reset_controls)
                     return
 
                 if not self.bot_running:
-                    if not _async_sentinel_sent[0]:
-                        _async_sentinel_sent[0] = True
-                        _async_iter_q.put(None)
                     break
 
                 # Watchdog detected a hung game during this iteration
@@ -2012,9 +2027,7 @@ class RelicBotApp(tk.Tk):
                             f"Game hung {_MAX_RESTARTS} times on iteration {iteration} "
                             "— aborting."
                         )
-                        if not _async_sentinel_sent[0]:
-                            _async_sentinel_sent[0] = True
-                            _async_iter_q.put(None)
+                        _shutdown_async_workers()
                         _async_join_timed()
                         self.after(0, self._reset_controls)
                         return
@@ -2026,19 +2039,41 @@ class RelicBotApp(tk.Tk):
                     _is_restart = True
                     continue
 
-                _async_iter_q.put({
-                    "iteration": iteration,
-                    "iter_dir": iter_dir,
-                    "captures": captures,
-                    "criteria": criteria,
-                    "hit_min": hit_min,
-                    "live_log_path": live_log_path,
-                    "run_dir": run_dir,
-                    "criteria_summary": criteria_summary,
-                    "mode_desc": mode_desc,
-                    "limit_value": limit_value,
-                    "save_filename": save_filename,
-                })
+                # Register iteration completion state, then push individual relic tasks
+                with _async_state_lock:
+                    if len(captures) == 0:
+                        _async_dir_map[iteration] = iter_dir
+                    else:
+                        _async_iter_state[iteration] = {
+                            "total":          len(captures),
+                            "done":           0,
+                            "results":        [],
+                            "iter_dir":       iter_dir,
+                            "hit_min":        hit_min,
+                            "live_log_path":  live_log_path,
+                            "run_dir":        run_dir,
+                            "criteria_summary": criteria_summary,
+                            "mode_desc":      mode_desc,
+                            "limit_value":    limit_value,
+                            "save_filename":  save_filename,
+                        }
+                for _si, _img, _pp in captures:
+                    _async_relic_q.put(((iteration, _si), {
+                        "iteration":      iteration,
+                        "step_i":         _si,
+                        "img_bytes":      _img,
+                        "pending_path":   _pp,
+                        "iter_dir":       iter_dir,
+                        "criteria":       criteria,
+                        "hit_min":        hit_min,
+                        "live_log_path":  live_log_path,
+                        "run_dir":        run_dir,
+                        "criteria_summary": criteria_summary,
+                        "mode_desc":      mode_desc,
+                        "limit_value":    limit_value,
+                        "save_filename":  save_filename,
+                        "_retries":       0,
+                    }))
 
                 _prev_save_dir = iter_dir
 
@@ -2240,12 +2275,10 @@ class RelicBotApp(tk.Tk):
             _prev_save_dir = None
 
         # ── Grace period: wait for async analysis to finish ───────────── #
-        if _async_mode and _async_iter_q is not None:
+        if _async_mode and _async_relic_q is not None:
             self._set_status("Waiting for background analysis to finish…", "orange")
             self._log("Grace period: waiting for async analysis to complete…")
-            if not _async_sentinel_sent[0]:
-                _async_sentinel_sent[0] = True
-                _async_iter_q.put(None)   # sentinel — tells worker to exit
+            _shutdown_async_workers()
             _async_join_timed()
             self._log("Async analysis complete.")
 
@@ -2289,189 +2322,173 @@ class RelicBotApp(tk.Tk):
     # ------------------------------------------------------------------ #
 
     # ------------------------------------------------------------------ #
-    #  ASYNC ITERATION ANALYSIS
+    #  ASYNC PER-RELIC ANALYSIS
     # ------------------------------------------------------------------ #
 
-    def _analyze_async_iter(self, task: dict, results: list,
-                            async_dir_map: dict) -> None:
-        """
-        Run OCR analysis for one captured iteration (async mode).
-        Called sequentially by the background async-iter-worker thread.
-        Mirrors the Phase-4 OCR pipeline and _batch_loop post-processing.
-        """
+    def _analyze_relic_task(self, task: dict, iter_state: dict,
+                            lock: threading.Lock, dir_map: dict,
+                            results: list) -> None:
+        """OCR-analyze one captured relic (called from async relic worker thread)."""
         iteration     = task["iteration"]
+        step_i        = task["step_i"]
+        img_bytes     = task["img_bytes"]
+        pending_path  = task["pending_path"]
         iter_dir      = task["iter_dir"]
-        captures      = task["captures"]   # list of (step_i, img_bytes, pending_path)
         criteria      = task["criteria"]
         hit_min       = task["hit_min"]
         live_log_path = task["live_log_path"]
-        run_dir       = task["run_dir"]
-        criteria_summary = task["criteria_summary"]
-        mode_desc     = task["mode_desc"]
-        limit_value   = task["limit_value"]
-        save_filename = task["save_filename"]
 
-        total = len(captures)
-        if total == 0:
-            async_dir_map[iteration] = iter_dir
+        try:
+            result = relic_analyzer.analyze(img_bytes, criteria)
+        except Exception as exc:
+            self._log(f"  [Async iter {iteration}] ERROR relic {step_i + 1}: {exc}")
+            self._mark_relic_failed(task, iter_state, lock, dir_map, results)
             return
 
-        self._log(f"  [Async] Analyzing iteration {iteration} ({total} relic(s))…")
-
-        # ── OCR worker setup (same as normal Phase 4) ──────────────── #
-        _workers = (max(2, min(8, self._parallel_workers_var.get()))
-                    if self._parallel_enabled_var.get() else 1)
-
-        _task_q       = queue.PriorityQueue()
-        _done_q       = queue.Queue()
-        _capture_done = threading.Event()
-
-        def _ocr_worker():
-            while True:
-                try:
-                    _si, _img = _task_q.get(timeout=0.3)
-                except queue.Empty:
-                    if _capture_done.is_set() and _task_q.empty():
-                        break
-                    continue
-                try:
-                    _res = relic_analyzer.analyze(_img, criteria)
-                    _done_q.put((_si, _img, _res, None))
-                except Exception as _exc:
-                    _done_q.put((_si, _img, None, _exc))
-
-        _worker_threads = [
-            threading.Thread(target=_ocr_worker, daemon=True,
-                             name=f"async-ocr-{iteration}-{_n}")
-            for _n in range(_workers)
-        ]
-        for _t in _worker_threads:
-            _t.start()
-
-        for step_i, img, _pending in captures:
-            _task_q.put((step_i, img))
-        _capture_done.set()
-
-        # ── Collect results ─────────────────────────────────────────── #
-        ordered = [None] * total
-        relic_results = []
-        _collected = 0
-
-        while _collected < total:
-            if not self.bot_running:
-                break
+        if pending_path and os.path.exists(pending_path):
             try:
-                step_i, img, result, exc = _done_q.get(timeout=0.5)
-            except queue.Empty:
-                if all(not _t.is_alive() for _t in _worker_threads):
-                    break
-                continue
+                os.remove(pending_path)
+            except Exception:
+                pass
 
-            _collected += 1
+        self._log(f"  [Async iter {iteration}] Relic {step_i + 1}:")
+        self._log_result(result)
+        time.sleep(0.05)
 
-            # Remove pending screenshot for this relic
-            pending_path = captures[step_i][2] if step_i < len(captures) else ""
-            if pending_path and os.path.exists(pending_path):
+        saved_fname = ""
+        if iter_dir and img_bytes:
+            is_match = result.get("match", False)
+            best_nm = max(
+                (nm.get("matching_passive_count",
+                         len(nm.get("matching_passives", [])))
+                 for nm in result.get("near_misses", [])),
+                default=0,
+            )
+            tag = "MATCH" if is_match else ("HIT" if best_nm >= hit_min else "")
+            if tag:
+                saved_fname = f"relic_{step_i + 1:02d}_{tag}.jpg"
                 try:
-                    os.remove(pending_path)
-                except Exception:
-                    pass
+                    with open(os.path.join(iter_dir, saved_fname), "wb") as _f:
+                        _f.write(img_bytes)
+                    self._log(f"  Screenshot saved: {saved_fname}")
+                except Exception as _e:
+                    self._log(f"WARNING: could not save screenshot: {_e}")
+                    saved_fname = ""
 
-            if exc is not None:
-                self._log(f"  [Async iter {iteration}] ERROR relic {step_i + 1}: {exc}")
-                for _t in _worker_threads:
-                    _t.join(timeout=1.0)
-                async_dir_map[iteration] = iter_dir
+        result["_image_bytes"]    = None
+        result["_screenshot_file"] = saved_fname
+
+        if live_log_path:
+            try:
+                relics = result.get("relics_found", [])
+                r0 = relics[0] if relics else {}
+                rname = r0.get("name", "Unknown") if isinstance(r0, dict) else str(r0)
+                passives_found = r0.get("passives", []) if isinstance(r0, dict) else []
+                status = "MATCH" if result.get("match") else "no match"
+                line = (f"  Relic {step_i + 1:02d}: [{status}] {rname}"
+                        f"  | {', '.join(passives_found) or '—'}")
+                if saved_fname:
+                    line += f"  → {saved_fname}"
+                with open(live_log_path, "a", encoding="utf-8") as _f:
+                    _f.write(line + "\n")
+            except Exception:
+                pass
+
+        r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
+        self._ov_at_33   += r_g3
+        self._ov_at_23   += r_g2
+        self._ov_at_duds += r_dud
+        if self._overlay:
+            ov = self._overlay
+            at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+            self.after(0, lambda at33=at33, at23=at23, atd=atd:
+                       ov.update(at_33=at33, at_23=at23, at_duds=atd)
+                       if ov._win else None)
+
+        with lock:
+            istate = iter_state.get(iteration)
+            if istate is None:
                 return
+            istate["results"].append((step_i, result))
+            istate["done"] += 1
+            is_complete = istate["done"] >= istate["total"]
 
-            self._log(f"  [Async iter {iteration}] Relic {step_i + 1}:")
-            self._log_result(result)
-            time.sleep(0.05)   # let the main thread render the log line
+        if is_complete:
+            self._finalize_async_iter_state(
+                iteration, iter_state, lock, dir_map, results)
 
-            # Save screenshot if match or near-miss
-            saved_fname = ""
-            if iter_dir and img:
-                is_match = result.get("match", False)
-                best_nm = max(
-                    (nm.get("matching_passive_count",
-                             len(nm.get("matching_passives", [])))
-                     for nm in result.get("near_misses", [])),
-                    default=0,
+    def _mark_relic_failed(self, task: dict, iter_state: dict,
+                           lock: threading.Lock, dir_map: dict,
+                           results: list) -> None:
+        """Count a permanently failed/timed-out relic as done; keep its screenshot."""
+        iteration    = task["iteration"]
+        step_i       = task["step_i"]
+        pending_path = task["pending_path"]
+        iter_dir     = task["iter_dir"]
+
+        if pending_path and os.path.exists(pending_path):
+            try:
+                dest = os.path.join(
+                    iter_dir,
+                    f"relic_{step_i + 1:02d}_could_not_analyze.jpg")
+                os.rename(pending_path, dest)
+                self._log(
+                    f"  [Async iter {iteration}] Relic {step_i + 1} kept as "
+                    f"relic_{step_i + 1:02d}_could_not_analyze.jpg"
                 )
-                tag = "MATCH" if is_match else ("HIT" if best_nm >= hit_min else "")
-                if tag:
-                    saved_fname = f"relic_{step_i + 1:02d}_{tag}.jpg"
-                    try:
-                        with open(os.path.join(iter_dir, saved_fname), "wb") as _f:
-                            _f.write(img)
-                        self._log(f"  Screenshot saved: {saved_fname}")
-                    except Exception as _e:
-                        self._log(f"WARNING: could not save screenshot: {_e}")
-                        saved_fname = ""
+            except Exception:
+                pass
 
-            result["_image_bytes"] = None
-            result["_screenshot_file"] = saved_fname
+        with lock:
+            istate = iter_state.get(iteration)
+            if istate is None:
+                return
+            istate["done"] += 1
+            is_complete = istate["done"] >= istate["total"]
 
-            if live_log_path:
-                try:
-                    relics = result.get("relics_found", [])
-                    r0 = relics[0] if relics else {}
-                    rname = r0.get("name", "Unknown") if isinstance(r0, dict) else str(r0)
-                    passives_found = r0.get("passives", []) if isinstance(r0, dict) else []
-                    status = "MATCH" if result.get("match") else "no match"
-                    line = (f"  Relic {step_i + 1:02d}: [{status}] {rname}"
-                            f"  | {', '.join(passives_found) or '—'}")
-                    if saved_fname:
-                        line += f"  → {saved_fname}"
-                    with open(live_log_path, "a", encoding="utf-8") as _f:
-                        _f.write(line + "\n")
-                except Exception:
-                    pass
+        if is_complete:
+            self._finalize_async_iter_state(
+                iteration, iter_state, lock, dir_map, results)
 
-            ordered[step_i] = result
+    def _finalize_async_iter_state(self, iteration: int, iter_state: dict,
+                                   lock: threading.Lock, dir_map: dict,
+                                   results: list) -> None:
+        """Post-process a completed async iteration (all relics analyzed/failed)."""
+        with lock:
+            istate = iter_state.get(iteration)
+            if istate is None:
+                return
+            relic_results    = [r for _, r in sorted(istate["results"],
+                                                     key=lambda x: x[0])]
+            iter_dir         = istate["iter_dir"]
+            hit_min          = istate["hit_min"]
+            run_dir          = istate["run_dir"]
+            criteria_summary = istate["criteria_summary"]
+            mode_desc        = istate["mode_desc"]
+            limit_value      = istate["limit_value"]
+            save_filename    = istate["save_filename"]
 
-            # Live-update overlay tier counters
-            r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
-            self._ov_hits_33 += r_g3
-            self._ov_at_33   += r_g3
-            self._ov_hits_23 += r_g2
-            self._ov_at_23   += r_g2
-            self._ov_duds    += r_dud
-            self._ov_at_duds += r_dud
-            if self._overlay:
-                ov = self._overlay
-                h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
-                at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
-                self.after(0, lambda h33=h33, h23=h23, dds=dds,
-                           at33=at33, at23=at23, atd=atd:
-                           ov.update(hits_33=h33, hits_23=h23, duds=dds,
-                                     at_33=at33, at_23=at23, at_duds=atd)
-                           if ov._win else None)
-
-        for _t in _worker_threads:
-            _t.join(timeout=2.0)
-
-        for result in ordered:
-            if result is not None:
-                relic_results.append(result)
-
-        # ── Post-analysis: tier + overlay + folder rename ───────────── #
         blocked_curses = self._get_blocked_curses()
         any_match = any(
             r.get("match") and not self._is_curse_blocked(r, blocked_curses)
             for r in relic_results
         )
-        all_relics = [rf for r in relic_results for rf in r.get("relics_found", [])]
-        all_near_misses = [nm for r in relic_results for nm in r.get("near_misses", [])]
+        all_relics = [rf for r in relic_results
+                      for rf in r.get("relics_found", [])]
+        all_near_misses = [nm for r in relic_results
+                           for nm in r.get("near_misses", [])]
         matched_result = next(
             (r for r in relic_results
              if r.get("match") and not self._is_curse_blocked(r, blocked_curses)),
             None
         )
-        matched_relic = matched_result.get("matched_relic") if matched_result else None
-        matched_passives = matched_result.get("matched_passives", []) if matched_result else []
-        matched_curses = matched_result.get("matched_relic_curses", []) if matched_result else []
-        reason = "; ".join(r.get("reason", "") for r in relic_results if r.get("reason"))
+        matched_relic    = matched_result.get("matched_relic") if matched_result else None
+        matched_passives = (matched_result.get("matched_passives", [])
+                            if matched_result else [])
+        matched_curses   = (matched_result.get("matched_relic_curses", [])
+                            if matched_result else [])
+        reason      = "; ".join(r.get("reason", "") for r in relic_results
+                                if r.get("reason"))
         screenshots = [rr.get("_screenshot_file", "") for rr in relic_results
                        if rr.get("_screenshot_file")]
 
@@ -2479,7 +2496,8 @@ class RelicBotApp(tk.Tk):
         num_matched = len(matched_passives)
         if num_matched == 0 and all_near_misses:
             num_matched = max(
-                nm.get("matching_passive_count", len(nm.get("matching_passives", [])))
+                nm.get("matching_passive_count",
+                        len(nm.get("matching_passives", [])))
                 for nm in all_near_misses
             )
 
@@ -2488,7 +2506,8 @@ class RelicBotApp(tk.Tk):
             if self._best_33_iter is None or iter_g3 > self._best_33_iter["count"]:
                 self._best_33_iter = {"iteration": iteration, "count": iter_g3}
         if iter_total > 0:
-            if self._best_hits_iter is None or iter_total > self._best_hits_iter["count"]:
+            if (self._best_hits_iter is None
+                    or iter_total > self._best_hits_iter["count"]):
                 self._best_hits_iter = {"iteration": iteration, "count": iter_total}
 
         if self._overlay:
@@ -2496,13 +2515,11 @@ class RelicBotApp(tk.Tk):
                 if info is None:
                     return "N/A"
                 return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
-            ov = self._overlay
-            h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
+            ov   = self._overlay
             at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
             b33  = _fmt_best(self._best_33_iter,   "★★★")
             bhit = _fmt_best(self._best_hits_iter, "hits")
             self.after(0, lambda: ov.update(
-                hits_33=h33, hits_23=h23, duds=dds,
                 at_33=at33, at_23=at23, at_duds=atd,
                 best_33=b33, best_hits=bhit,
             ) if ov._win else None)
@@ -2525,42 +2542,39 @@ class RelicBotApp(tk.Tk):
             self._log(f"WARNING: could not write info.txt: {e}")
 
         folder_name = f"{iteration:03d}"
-        if num_matched >= 3:
-            tier_name = f"GOD ROLL {iteration:03d}"
-        elif num_matched >= hit_min:
-            tier_name = f"HIT {iteration:03d}"
-        else:
-            tier_name = None
-
+        tier_name   = (f"GOD ROLL {iteration:03d}" if num_matched >= 3
+                       else f"HIT {iteration:03d}" if num_matched >= hit_min
+                       else None)
         final_iter_dir = iter_dir
         if tier_name:
             tier_dir = os.path.join(run_dir, tier_name)
             try:
                 os.rename(iter_dir, tier_dir)
                 final_iter_dir = tier_dir
-                folder_name = tier_name
+                folder_name    = tier_name
                 self._log(f"Folder renamed to: {tier_name}")
             except OSError as e:
                 self._log(f"WARNING: could not rename folder: {e}")
 
-        # Record final dir so _batch_loop can locate it for the save copy
-        async_dir_map[iteration] = final_iter_dir
+        with lock:
+            dir_map[iteration] = final_iter_dir
 
         results.append({
-            "iteration": iteration,
-            "folder": folder_name,
-            "match": any_match,
-            "matched_relic": matched_relic,
+            "iteration":       iteration,
+            "folder":          folder_name,
+            "match":           any_match,
+            "matched_relic":   matched_relic,
             "matched_passives": matched_passives,
-            "near_misses": all_near_misses,
-            "reason": reason,
-            "relics_found": all_relics,
-            "screenshots": screenshots,
-            "save_copy": save_filename,
+            "near_misses":     all_near_misses,
+            "reason":          reason,
+            "relics_found":    all_relics,
+            "screenshots":     screenshots,
+            "save_copy":       save_filename,
         })
 
         try:
-            generate_readme(run_dir, criteria_summary, mode_desc, limit_value, results, hit_min)
+            generate_readme(run_dir, criteria_summary, mode_desc,
+                            limit_value, results, hit_min)
         except Exception:
             pass
         try:
