@@ -11,6 +11,7 @@ Drag the ⤡ grip in the bottom-right corner to resize it.
 """
 
 import tkinter as tk
+from tkinter import messagebox as tk_messagebox
 import ctypes
 import ctypes.wintypes
 import threading
@@ -105,6 +106,7 @@ class BotOverlay:
         self._root      = root
         self._win: tk.Toplevel | None = None
         self._pause_cb  = None
+        self._stop_cb   = None
         self._watching  = False
         self._sv: dict[str, tk.StringVar] = {}
         self._pause_btn: tk.Label | None  = None
@@ -203,20 +205,30 @@ class BotOverlay:
 
         _hline(w)
 
-        # ── Pause / Resume button ────────────────────────────────────── #
+        # ── Pause / Resume + Abort buttons ──────────────────────────── #
         bf = tk.Frame(w, bg=_BG)
         bf.pack(pady=(3, 5))
+
         self._pause_btn = tk.Label(
             bf, text="⏸  PAUSE",
             bg=_PAUSE_C, fg="white",
             font=("Consolas", 10, "bold"),
-            padx=24, pady=5, cursor="hand2", relief="flat",
+            padx=20, pady=5, cursor="hand2", relief="flat",
         )
-        self._pause_btn.pack()
+        self._pause_btn.pack(side="left", padx=(0, 6))
         self._pause_btn.bind(
             "<Button-1>",
             lambda _: self._pause_cb() if self._pause_cb else None,
         )
+
+        abort_btn = tk.Label(
+            bf, text="⏻  STOP",
+            bg="#1a1a2e", fg="#cc3300",
+            font=("Consolas", 10, "bold"),
+            padx=16, pady=5, cursor="hand2", relief="flat",
+        )
+        abort_btn.pack(side="left")
+        abort_btn.bind("<Button-1>", self._on_abort_click)
 
         _hline(w)
 
@@ -343,6 +355,25 @@ class BotOverlay:
 
     def set_pause_callback(self, cb) -> None:
         self._pause_cb = cb
+
+    def set_stop_callback(self, cb) -> None:
+        self._stop_cb = cb
+
+    def _on_abort_click(self, _event=None) -> None:
+        """Show a confirmation dialog before stopping the bot."""
+        if not self._stop_cb:
+            return
+        # Ask on the main thread — messagebox is always thread-safe here
+        # since this is already a tkinter event callback on the main thread.
+        confirmed = tk_messagebox.askyesno(
+            "Stop Bot",
+            "Are you sure you want to stop the bot?\n\n"
+            "The current iteration will be cancelled.",
+            icon="warning",
+            parent=self._win,
+        )
+        if confirmed:
+            self._stop_cb()
 
 
 # ── Widget helpers ────────────────────────────────────────────────── #

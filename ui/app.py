@@ -1503,6 +1503,7 @@ class RelicBotApp(tk.Tk):
             self._overlay = BotOverlay(self)
             self._overlay.build(sw, sh)
             self._overlay.set_pause_callback(self._toggle_pause)
+            self._overlay.set_stop_callback(self._stop_bot)
             exe_frag = os.path.splitext(
                 os.path.basename(self.game_exe_var.get().strip()))[0].lower() or "nightreign"
             self._overlay.start_game_watch(exe_frag)
