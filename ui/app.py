@@ -371,7 +371,9 @@ class RelicBotApp(tk.Tk):
 
         # Overlay (Batch Mode only)
         self._overlay = None
-        self._overlay_enabled_var = tk.BooleanVar(value=True)
+        self._overlay_enabled_var  = tk.BooleanVar(value=True)
+        self._parallel_enabled_var = tk.BooleanVar(value=False)
+        self._parallel_workers_var = tk.IntVar(value=2)
         # Per-run counters (reset each start)
         self._ov_hits_33 = 0
         self._ov_hits_23 = 0
@@ -669,6 +671,29 @@ class RelicBotApp(tk.Tk):
                  "Requires the game to run in Borderless or Fullscreen.\n"
                  "Clicking the HUD does NOT steal focus from the game window.")
 
+        # Brute Force Analysis toggle
+        bf_chk = ttk.Checkbutton(
+            self.batch_frame, text="⚡ Brute Force Analysis",
+            variable=self._parallel_enabled_var,
+            command=self._on_parallel_toggle,
+        )
+        bf_chk.grid(row=4, column=0, columnspan=2, sticky="w", **pad)
+        _Tooltip(bf_chk,
+                 "Runs multiple OCR workers in parallel to speed up relic analysis.\n"
+                 "Each extra worker loads an additional ~100 MB of RAM for the OCR model.\n\n"
+                 "Recommended: 2 workers (safe for most PCs, ~2× faster).\n"
+                 "Max: 4 workers (high-end PCs only — very CPU/RAM intensive).\n\n"
+                 "Leave OFF if you notice crashes or system slowdowns.")
+        ttk.Label(self.batch_frame, text="Workers:").grid(row=4, column=2, **pad)
+        self._parallel_spin = ttk.Spinbox(
+            self.batch_frame, from_=2, to=4, width=4,
+            textvariable=self._parallel_workers_var, state="disabled",
+        )
+        self._parallel_spin.grid(row=4, column=3, sticky="w", **pad)
+        _Tooltip(self._parallel_spin,
+                 "Number of parallel OCR workers (2–4).\n"
+                 "Each worker uses ~100 MB extra RAM for its own OCR model.")
+
         # ── Bot Control ─────────────────────────────────────────────── #
         ctrl_frame = ttk.LabelFrame(inner, text="Bot Control")
         ctrl_frame.grid(row=7, column=0, sticky="ew", **pad)
@@ -936,6 +961,11 @@ class RelicBotApp(tk.Tk):
         if path:
             self.batch_output_var.set(path)
 
+    def _on_parallel_toggle(self):
+        """Enable/disable the workers spinbox based on the Brute Force checkbox."""
+        state = "normal" if self._parallel_enabled_var.get() else "disabled"
+        self._parallel_spin.config(state=state)
+
     def _browse_game_exe(self):
         path = filedialog.askopenfilename(
             title="Select game executable",
@@ -981,6 +1011,8 @@ class RelicBotApp(tk.Tk):
             "blocked_curses": list(self._blocked_curses_list),
             "allowed_colors": self._get_allowed_colors(),
             "criteria": self.relic_builder.get_state(),
+            "parallel_enabled": self._parallel_enabled_var.get(),
+            "parallel_workers": self._parallel_workers_var.get(),
         }
 
     def _dict_to_profile(self, data: dict):
@@ -1010,6 +1042,9 @@ class RelicBotApp(tk.Tk):
         self.phase_settle_vars[1].set(str(data.get("phase1_settle", "0.5")))
         self.phase_settle_vars[4].set(str(data.get("phase4_settle", data.get("phase3_settle", "0.5"))))
         self.relic_type_var.set(data.get("relic_type", "night"))
+        self._parallel_enabled_var.set(data.get("parallel_enabled", False))
+        self._parallel_workers_var.set(data.get("parallel_workers", 2))
+        self._on_parallel_toggle()
         if "hotkey_str" in data:
             self._hotkey_str = data["hotkey_str"]
             self._hotkey_display = data.get("hotkey_display", self._hotkey_str.replace("Key.", "").upper())
@@ -1770,14 +1805,10 @@ class RelicBotApp(tk.Tk):
             screenshots = [rr.get("_screenshot_file", "") for rr in relic_results
                            if rr.get("_screenshot_file")]
 
-            # Update overlay hit counters per-relic (not per-iteration)
+            # Counters (hits_33 etc.) were already incremented per-relic
+            # inside _run_iteration_phases as each analysis completed.
+            # Recompute iteration totals here only for the best-batch scoreboard.
             iter_g3, iter_g2, iter_dud = self._count_relic_tiers(relic_results, hit_min)
-            self._ov_hits_33 += iter_g3
-            self._ov_at_33   += iter_g3
-            self._ov_hits_23 += iter_g2
-            self._ov_at_23   += iter_g2
-            self._ov_duds    += iter_dud
-            self._ov_at_duds += iter_dud
 
             # Update best-batch scoreboard
             iter_total = iter_g3 + iter_g2
@@ -2143,10 +2174,14 @@ class RelicBotApp(tk.Tk):
 
             # Pipelined capture + analysis: submit each screenshot for analysis
             # immediately after capturing it, so analysis runs in the background
-            # while the bot navigates to the next relic.  max_workers=1 keeps
-            # EasyOCR calls sequential (thread-safe) while still overlapping
-            # navigation time with analysis time.
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            # while the bot navigates to the next relic.
+            # Each worker thread gets its own EasyOCR reader (thread-local) so
+            # multiple workers can safely run OCR in parallel.
+            _workers = (max(2, min(4, self._parallel_workers_var.get()))
+                        if self._parallel_enabled_var.get() else 1)
+            if _workers > 1:
+                self._log(f"  Brute Force Analysis: {_workers} parallel OCR workers.")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=_workers) as executor:
                 future_to_step: dict = {}
 
                 for step_i in range(total):
@@ -2244,6 +2279,24 @@ class RelicBotApp(tk.Tk):
                             pass
 
                     ordered[step_i] = result
+
+                    # Live-update overlay tier counters after each relic
+                    r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
+                    self._ov_hits_33 += r_g3
+                    self._ov_at_33   += r_g3
+                    self._ov_hits_23 += r_g2
+                    self._ov_at_23   += r_g2
+                    self._ov_duds    += r_dud
+                    self._ov_at_duds += r_dud
+                    if self._overlay:
+                        ov = self._overlay
+                        h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
+                        at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+                        self.after(0, lambda h33=h33, h23=h23, dds=dds,
+                                   at33=at33, at23=at23, atd=atd:
+                                   ov.update(hits_33=h33, hits_23=h23, duds=dds,
+                                             at_33=at33, at_23=at23, at_duds=atd)
+                                   if ov._win else None)
 
             for result in ordered:
                 if result is not None:

@@ -9,23 +9,29 @@ After that the bot works fully offline with no ongoing costs.
 import io
 import re
 import difflib
+import threading
 
 import numpy as np
 from PIL import Image
 
 
-# ── EasyOCR reader singleton ──────────────────────────────────────────── #
+# ── EasyOCR reader — one instance per thread ─────────────────────────── #
+#
+# EasyOCR is not thread-safe when sharing a single Reader instance.
+# Using threading.local() gives each thread its own Reader so that
+# multiple worker threads can run OCR in parallel without interfering.
+# The model is loaded lazily on the first call from each thread (~2-3 s
+# one-time cost; subsequent calls on the same thread are instant).
 
-_reader = None
+_thread_local = threading.local()
 
 
 def _get_reader():
-    """Lazy-load the EasyOCR reader (downloads model on first call)."""
-    global _reader
-    if _reader is None:
+    """Return the EasyOCR reader for the calling thread, loading it if needed."""
+    if not hasattr(_thread_local, "reader"):
         import easyocr
-        _reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-    return _reader
+        _thread_local.reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    return _thread_local.reader
 
 
 # ── Relic panel crop ─────────────────────────────────────────────────── #
