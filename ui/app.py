@@ -16,6 +16,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -28,7 +29,14 @@ from ui import theme, relic_images
 from ui.relic_builder import RelicBuilderFrame
 
 
-_REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def _app_root() -> str:
+    """Working root: folder containing the EXE when frozen, repo root in dev."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+_REPO_ROOT    = _app_root()
 _PROFILES_DIR = os.path.join(_REPO_ROOT, "profiles")
 
 
@@ -840,7 +848,7 @@ class RelicBotApp(tk.Tk):
     #  SEQUENCE AUTO-LOAD
     # ------------------------------------------------------------------ #
 
-    _SEQ_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sequences")
+    _SEQ_DIR = os.path.join(_REPO_ROOT, "sequences")
 
     def _auto_load_sequences(self):
         """Load all standard sequence files on startup."""

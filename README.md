@@ -70,6 +70,13 @@ See [SETUP.md](SETUP.md) for step-by-step recording instructions.
 
 ---
 
+## Tips for Best Results
+
+- **Start with as much Murk as possible.** The bot calculates how many relics it can afford each iteration based on your current Murk balance. More Murk = more relics reviewed per run = fewer total iterations needed to find a match. Farming a large Murk stockpile before starting the bot will significantly speed up your search.
+- Run the game in **Borderless or Fullscreen** for reliable OCR — windowed mode changes the capture area.
+
+---
+
 ## Relic Criteria
 
 | Tab | Description |
