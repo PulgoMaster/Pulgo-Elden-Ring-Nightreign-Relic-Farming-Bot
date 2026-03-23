@@ -54,6 +54,7 @@ python main.py
 On first launch the bot downloads its OCR model (~100 MB) — one-time only, then works fully offline.
 
 For full setup instructions see **[SETUP.md](SETUP.md)**.
+For first-time installation and file location help see **[INSTALLATION.md](INSTALLATION.md)**.
 
 ---
 
