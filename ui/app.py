@@ -1763,19 +1763,16 @@ class RelicBotApp(tk.Tk):
             screenshots = [rr.get("_screenshot_file", "") for rr in relic_results
                            if rr.get("_screenshot_file")]
 
-            # Update overlay hit counters (per-run and all-time)
-            if num_matched >= 3:
-                self._ov_hits_33 += 1
-                self._ov_at_33   += 1
-            elif num_matched >= hit_min:
-                self._ov_hits_23 += 1
-                self._ov_at_23   += 1
-            else:
-                self._ov_duds    += 1
-                self._ov_at_duds += 1
+            # Update overlay hit counters per-relic (not per-iteration)
+            iter_g3, iter_g2, iter_dud = self._count_relic_tiers(relic_results, hit_min)
+            self._ov_hits_33 += iter_g3
+            self._ov_at_33   += iter_g3
+            self._ov_hits_23 += iter_g2
+            self._ov_at_23   += iter_g2
+            self._ov_duds    += iter_dud
+            self._ov_at_duds += iter_dud
 
-            # Update best-batch scoreboard using per-relic tier counts
-            iter_g3, iter_g2 = self._count_relic_tiers(relic_results, hit_min)
+            # Update best-batch scoreboard
             iter_total = iter_g3 + iter_g2
             if iter_g3 > 0:
                 if self._best_33_iter is None or iter_g3 > self._best_33_iter["count"]:
@@ -2022,6 +2019,13 @@ class RelicBotApp(tk.Tk):
                     self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.25)
                     if p1_settle > 0:
                         time.sleep(p1_settle)
+                    if self._overlay:
+                        ov = self._overlay
+                        bought_n = min((buy_i + 1) * 10, _p3_count)
+                        tot_n = _p3_count
+                        self.after(0, lambda b=bought_n, t=tot_n: ov.update(
+                            bought=f"{b} / {t}"
+                        ) if ov._win else None)
             else:
                 # Fallback: no murk data — run until stop condition is detected.
                 self._set_status(f"{label}: buying relics…", "green")
@@ -2298,9 +2302,9 @@ class RelicBotApp(tk.Tk):
             pass
 
     @staticmethod
-    def _count_relic_tiers(relic_results: list, hit_min: int) -> tuple[int, int]:
-        """Return (g3_count, g2_count) for relics in this iteration."""
-        g3 = g2 = 0
+    def _count_relic_tiers(relic_results: list, hit_min: int) -> tuple[int, int, int]:
+        """Return (g3_count, g2_count, dud_count) for individual relics in this iteration."""
+        g3 = g2 = dud = 0
         for r in relic_results:
             n = len(r.get("matched_passives", []))
             if n == 0 and r.get("near_misses"):
@@ -2313,7 +2317,9 @@ class RelicBotApp(tk.Tk):
                 g3 += 1
             elif n >= hit_min:
                 g2 += 1
-        return g3, g2
+            else:
+                dud += 1
+        return g3, g2, dud
 
     # ------------------------------------------------------------------ #
     #  SHARED HELPERS
