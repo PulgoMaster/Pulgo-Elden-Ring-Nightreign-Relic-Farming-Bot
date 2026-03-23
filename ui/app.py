@@ -485,6 +485,12 @@ class RelicBotApp(tk.Tk):
         _ck_entry.grid(row=4, column=1, sticky="w", **pad)
         _Tooltip(_ck_entry, "The key used to confirm/interact in-game.\nSpammed automatically during the load wait to skip title screens and navigate menus.")
 
+        ttk.Label(save_frame, text="Close buffer (s):").grid(row=5, column=0, sticky="w", **pad)
+        self.game_close_buffer_var = tk.StringVar(value="4")
+        _gcb_entry = ttk.Entry(save_frame, textvariable=self.game_close_buffer_var, width=7)
+        _gcb_entry.grid(row=5, column=1, sticky="w", **pad)
+        _Tooltip(_gcb_entry, "Extra seconds to wait after the game process fully closes before\nrestoring the save or relaunching. Increase on slow machines or if\nEasyAntiCheat causes issues on restart.")
+
         # ── Choose Relic Type + Color Filter ────────────────────────── #
         type_color_frame = ttk.LabelFrame(inner, text="Choose Relic Type")
         type_color_frame.grid(row=2, column=0, sticky="ew", **pad)
@@ -1040,6 +1046,7 @@ class RelicBotApp(tk.Tk):
             "backup_folder": self.backup_path_var.get(),
             "game_executable": self.game_exe_var.get(),
             "game_load_wait": self.game_load_wait_var.get(),
+            "game_close_buffer": self.game_close_buffer_var.get(),
             "confirm_key": self.confirm_key_var.get(),
             "batch_limit_type": self.batch_limit_type.get(),
             "batch_limit": self.batch_limit_var.get(),
@@ -1068,6 +1075,7 @@ class RelicBotApp(tk.Tk):
         self.backup_path_var.set(data.get("backup_folder", _default_backup))
         self.game_exe_var.set(data.get("game_executable", ""))
         self.game_load_wait_var.set(str(data.get("game_load_wait", "30")))
+        self.game_close_buffer_var.set(str(data.get("game_close_buffer", "4")))
         self.confirm_key_var.set(data.get("confirm_key", "e"))
         self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
         self.batch_limit_var.set(str(data.get("batch_limit", "20")))
@@ -1226,7 +1234,12 @@ class RelicBotApp(tk.Tk):
                 return False
             if not self._is_game_running(exe_name):
                 self._log("Game closed — waiting for cleanup…")
-                time.sleep(4)   # let EAC and any background processes finish
+                try:
+                    _buf = float(self.game_close_buffer_var.get())
+                except Exception:
+                    _buf = 4.0
+                if _buf > 0:
+                    time.sleep(_buf)
                 return True
         self._log("WARNING: Game did not close within 60s.")
         return False
@@ -3145,6 +3158,11 @@ class RelicBotApp(tk.Tk):
             float(self.game_load_wait_var.get())
         except ValueError:
             messagebox.showwarning("Invalid Load Wait", "Game load wait must be a number.")
+            return False
+        try:
+            float(self.game_close_buffer_var.get())
+        except ValueError:
+            messagebox.showwarning("Invalid Close Buffer", "Close buffer must be a number.")
             return False
 
         if not self.batch_output_var.get():
