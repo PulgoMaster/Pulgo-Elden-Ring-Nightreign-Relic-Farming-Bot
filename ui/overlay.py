@@ -5,6 +5,9 @@ Displays live stats and a log feed without stealing focus from the game.
 Only visible while the Nightreign game window is detected on screen.
 Clicking the overlay (e.g. the Pause button) does NOT focus it, so
 the game window keeps keyboard focus throughout.
+
+Drag the header bar to move the overlay.
+Drag the ⤡ grip in the bottom-right corner to resize it.
 """
 
 import tkinter as tk
@@ -53,45 +56,33 @@ def game_running(fragment: str = "nightreign") -> bool:
 
 
 # ── Colour palette ────────────────────────────────────────────────── #
-# Chosen to stand out against Nightreign's dark, desaturated backgrounds.
 
-_BG      = "#0d0f1e"   # very dark blue — distinct from the game's near-blacks
-_SURFACE = "#14172a"   # slightly lighter panel background
-_SEP     = "#252840"   # separator line
-_FG      = "#e8e8f8"   # primary text (slightly blue-tinted white)
-_DIM     = "#6870a0"   # labels / secondary text
-_GOLD    = "#ffd700"   # murk / key values — warm yellow pops on dark BG
-_CYAN    = "#00e5ff"   # progress numbers — bright cyan
-_GREEN   = "#00ff88"   # 3/3 god-roll counter
-_BLUE    = "#00aaff"   # 2/3 hit counter
-_GREY    = "#707080"   # dud counter (de-emphasised)
-_PAUSE_C = "#cc3300"   # pause button — orange-red
-_RESUME_C= "#008833"   # resume button — green
-_WARN_C  = "#ff8800"   # countdown warning — amber
+_BG      = "#0d0f1e"
+_SURFACE = "#14172a"
+_SEP     = "#252840"
+_FG      = "#e8e8f8"
+_DIM     = "#6870a0"
+_GOLD    = "#ffd700"
+_CYAN    = "#00e5ff"
+_GREEN   = "#00ff88"
+_BLUE    = "#00aaff"
+_GREY    = "#707080"
+_PAUSE_C = "#cc3300"
+_RESUME_C= "#008833"
+_WARN_C  = "#ff8800"
+_GRIP_C  = "#3a3d5c"   # resize grip colour
 
-_WIDTH  = 430
-_HEIGHT = 420
+_MIN_W = 320
+_MIN_H = 280
+_DEF_W = 430
+_DEF_H = 460
 
 
 # ── Main class ────────────────────────────────────────────────────── #
 
 class BotOverlay:
     """
-    Translucent batch-mode HUD.
-
-    Usage (from the main app)::
-
-        overlay = BotOverlay(root)
-        overlay.build(screen_w, screen_h)
-        overlay.set_pause_callback(app._toggle_pause)
-        overlay.start_game_watch()          # auto-show when game launches
-
-        # Inside the bot loop (call via root.after(0, ...)):
-        overlay.update(murk=18000, to_buy=10, bought="7/10", ...)
-        overlay.append_log("[12:34:56] Analysing relic 3…")
-
-        # When bot stops:
-        overlay.destroy()
+    Translucent batch-mode HUD.  Drag the header to move; drag ⤡ to resize.
     """
 
     def __init__(self, root: tk.Tk):
@@ -103,6 +94,16 @@ class BotOverlay:
         self._pause_btn: tk.Label | None  = None
         self._log_box:  tk.Text  | None   = None
 
+        # Drag-to-move state
+        self._drag_x = 0
+        self._drag_y = 0
+
+        # Drag-to-resize state
+        self._resize_start_x = 0
+        self._resize_start_y = 0
+        self._resize_start_w = _DEF_W
+        self._resize_start_h = _DEF_H
+
     # ── Lifecycle ──────────────────────────────────────────────────── #
 
     def build(self, screen_w: int, screen_h: int) -> None:
@@ -111,20 +112,21 @@ class BotOverlay:
             return
 
         win = tk.Toplevel(self._root)
-        win.overrideredirect(True)           # no title bar / frame
-        win.wm_attributes("-topmost", True)  # always above game window
-        win.wm_attributes("-alpha", 0.88)    # slight transparency
+        win.overrideredirect(True)
+        win.wm_attributes("-topmost", True)
+        win.wm_attributes("-alpha", 0.88)
         win.configure(bg=_BG)
 
         x = 16
-        y = screen_h - _HEIGHT - 48
-        win.geometry(f"{_WIDTH}x{_HEIGHT}+{x}+{y}")
+        y = screen_h - _DEF_H - 48
+        win.geometry(f"{_DEF_W}x{_DEF_H}+{x}+{y}")
+        win.minsize(_MIN_W, _MIN_H)
 
         self._win = win
         self._build_ui()
-        win.withdraw()          # hidden until game is detected
+        win.withdraw()
         win.update_idletasks()
-        _apply_noactivate(win)  # must happen after window is realised
+        _apply_noactivate(win)
 
     def _build_ui(self) -> None:
         w = self._win
@@ -134,13 +136,17 @@ class BotOverlay:
             self._sv[key] = v
             return v
 
-        # ── Header row: title + batch progress ─────────────────────── #
-        hdr = tk.Frame(w, bg=_BG)
+        # ── Header — drag to move ───────────────────────────────────── #
+        hdr = tk.Frame(w, bg=_BG, cursor="fleur")
         hdr.pack(fill="x", padx=10, pady=(8, 2))
         tk.Label(hdr, text="⚙ RELIC BOT", bg=_BG, fg=_GOLD,
-                 font=("Consolas", 10, "bold")).pack(side="left")
+                 font=("Consolas", 10, "bold"), cursor="fleur").pack(side="left")
         tk.Label(hdr, textvariable=sv("batch", "—"),
-                 bg=_BG, fg=_DIM, font=("Consolas", 9)).pack(side="right")
+                 bg=_BG, fg=_DIM, font=("Consolas", 9), cursor="fleur").pack(side="right")
+
+        for widget in (hdr,) + tuple(hdr.winfo_children()):
+            widget.bind("<ButtonPress-1>",   self._on_drag_start)
+            widget.bind("<B1-Motion>",       self._on_drag_move)
 
         _hline(w)
 
@@ -159,7 +165,7 @@ class BotOverlay:
 
         _hline(w)
 
-        # ── Hit counters — three large numbers ─────────────────────── #
+        # ── Hit counters ─────────────────────────────────────────────── #
         hf = tk.Frame(w, bg=_BG)
         hf.pack(fill="x", padx=10, pady=4)
         hf.columnconfigure(0, weight=1)
@@ -180,7 +186,7 @@ class BotOverlay:
 
         _hline(w)
 
-        # ── Pause / Resume button ───────────────────────────────────── #
+        # ── Pause / Resume button ────────────────────────────────────── #
         bf = tk.Frame(w, bg=_BG)
         bf.pack(pady=(3, 5))
         self._pause_btn = tk.Label(
@@ -197,9 +203,9 @@ class BotOverlay:
 
         _hline(w)
 
-        # ── Log box ─────────────────────────────────────────────────── #
+        # ── Log box ──────────────────────────────────────────────────── #
         lf = tk.Frame(w, bg=_BG)
-        lf.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        lf.pack(fill="both", expand=True, padx=6, pady=(2, 0))
         self._log_box = tk.Text(
             lf, bg="#080b18", fg=_FG,
             font=("Consolas", 7), wrap="word",
@@ -212,6 +218,48 @@ class BotOverlay:
         self._log_box.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
 
+        # ── Resize grip — bottom-right corner ───────────────────────── #
+        grip = tk.Label(w, text="⤡", bg=_GRIP_C, fg=_DIM,
+                        font=("Consolas", 10), cursor="se-resize",
+                        padx=2, pady=1)
+        grip.pack(side="right", anchor="se", padx=2, pady=2)
+        grip.bind("<ButtonPress-1>",  self._on_resize_start)
+        grip.bind("<B1-Motion>",      self._on_resize_move)
+
+    # ── Drag-to-move ───────────────────────────────────────────────── #
+
+    def _on_drag_start(self, event) -> None:
+        self._drag_x = event.x_root - self._win.winfo_x()
+        self._drag_y = event.y_root - self._win.winfo_y()
+
+    def _on_drag_move(self, event) -> None:
+        if not self._win:
+            return
+        x = event.x_root - self._drag_x
+        y = event.y_root - self._drag_y
+        self._win.geometry(f"+{x}+{y}")
+
+    # ── Drag-to-resize ─────────────────────────────────────────────── #
+
+    def _on_resize_start(self, event) -> None:
+        self._resize_start_x = event.x_root
+        self._resize_start_y = event.y_root
+        self._resize_start_w = self._win.winfo_width()
+        self._resize_start_h = self._win.winfo_height()
+
+    def _on_resize_move(self, event) -> None:
+        if not self._win:
+            return
+        dx = event.x_root - self._resize_start_x
+        dy = event.y_root - self._resize_start_y
+        new_w = max(_MIN_W, self._resize_start_w + dx)
+        new_h = max(_MIN_H, self._resize_start_h + dy)
+        x = self._win.winfo_x()
+        y = self._win.winfo_y()
+        self._win.geometry(f"{new_w}x{new_h}+{x}+{y}")
+
+    # ── Show / hide / destroy ──────────────────────────────────────── #
+
     def show(self) -> None:
         if self._win:
             self._win.deiconify()
@@ -221,7 +269,6 @@ class BotOverlay:
             self._win.withdraw()
 
     def destroy(self) -> None:
-        """Tear down the overlay and stop the game-watch thread."""
         self._watching = False
         if self._win:
             self._win.destroy()
@@ -230,10 +277,6 @@ class BotOverlay:
     # ── Game window watching ───────────────────────────────────────── #
 
     def start_game_watch(self, fragment: str = "nightreign") -> None:
-        """
-        Poll every 2 s for the game window.
-        Shows the overlay when the game is running; hides it otherwise.
-        """
         if self._watching:
             return
         self._watching = True
@@ -251,21 +294,6 @@ class BotOverlay:
     # ── Data updates ───────────────────────────────────────────────── #
 
     def update(self, **kwargs) -> None:
-        """
-        Update any stat display.  Call from the bot thread via ``root.after(0, ...)``.
-
-        Accepted keys
-        -------------
-        murk        int/str   Starting murk amount
-        to_buy      str       Relics available  (e.g. "10")
-        bought      str       Buy progress      (e.g. "7 / 10")
-        relic_num   str       Current relic #   (e.g. "3 / 10")
-        analysing   str       Relic being OCR'd (e.g. "3")
-        hits_33     int/str   God-roll count
-        hits_23     int/str   2/3-hit count
-        duds        int/str   Dud count
-        batch       str       Batch progress    (e.g. "3 / 20" or "1.5h / 4h")
-        """
         if not self._win:
             return
         for key, val in kwargs.items():
@@ -276,7 +304,7 @@ class BotOverlay:
                     pass
 
     def append_log(self, line: str) -> None:
-        """Append one log line.  Must be called from the **main** thread."""
+        """Append one log line. Must be called from the main thread."""
         if not self._win or not self._log_box:
             return
         self._log_box.configure(state="normal")
@@ -285,7 +313,6 @@ class BotOverlay:
         self._log_box.configure(state="disabled")
 
     def set_paused(self, paused: bool, countdown: int = 0) -> None:
-        """Update the pause/resume button label and colour."""
         if not self._pause_btn:
             return
         if paused:
@@ -309,7 +336,6 @@ def _hline(parent: tk.Widget) -> None:
 
 def _stat(parent: tk.Frame, label: str,
           var: tk.StringVar, color: str) -> None:
-    """Compact label + value cell, packed left-to-right."""
     cell = tk.Frame(parent, bg=_BG)
     cell.pack(side="left", padx=6)
     tk.Label(cell, text=label, bg=_BG, fg=_DIM,
