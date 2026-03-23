@@ -1224,7 +1224,13 @@ class RelicBotApp(tk.Tk):
             return True
         exe_name = os.path.basename(exe_path)
         if not self._is_game_running(exe_name):
-            self._log("Game is not running.")
+            self._log("Game already not running — applying close buffer before relaunch…")
+            try:
+                _buf = float(self.game_close_buffer_var.get())
+            except Exception:
+                _buf = 4.0
+            if _buf > 0:
+                time.sleep(_buf)
             return True
         self._log(f"Closing game ({exe_name})…")
         subprocess.run(["taskkill", "/f", "/im", exe_name], capture_output=True)
@@ -1992,6 +1998,7 @@ class RelicBotApp(tk.Tk):
                     return
                 if i % 10 == 0 and exe_name:
                     self._focus_game_window(exe_name, timeout=1.0)
+                    self.player.tap("f")
                 self.player.tap(confirm_key)
                 time.sleep(0.45)
 
@@ -2624,6 +2631,9 @@ class RelicBotApp(tk.Tk):
             self._check_pause_point(f"{label}: setup phase")
             if not self.bot_running:
                 return relic_results
+            _p0_exe = os.path.basename(self.game_exe_var.get().strip())
+            if _p0_exe:
+                self._focus_game_window(_p0_exe, timeout=3.0)
             self.player.play(self.phase_events[0], bypass_focus=True)
             if not self.bot_running:
                 return relic_results
