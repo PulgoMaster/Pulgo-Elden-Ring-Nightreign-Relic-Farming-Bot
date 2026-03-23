@@ -370,9 +370,9 @@ def check_condition(image_bytes: bytes, condition_text: str) -> bool:
     faster than scanning the full frame.
     """
     reader = _get_reader()
-    img = _to_array(image_bytes, max_width=1280)   # downscale for speed
-    h = img.shape[0]
-    img = img[: h // 2]                            # top half only — menus live here
+    img = _to_array(image_bytes, max_width=0)       # full resolution — keep OCR reliable
+    h, w = img.shape[:2]
+    img = img[: int(h * 0.30), : int(w * 0.65)]   # top-left corner — "Sell" label lives here
     results = reader.readtext(img)
 
     all_text = " ".join(t for _, t, c in results if c > 0.3).lower()
