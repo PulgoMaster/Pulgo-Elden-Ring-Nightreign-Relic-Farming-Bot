@@ -1360,7 +1360,7 @@ class RelicBotApp(tk.Tk):
                     self._log("[Recovery] Equipment menu detected — pressing ESC to return to game.")
                     time.sleep(0.3)
                     self.player.tap("Key.esc")
-                    time.sleep(0.7)
+                    time.sleep(3.5)   # extended settle: ensure menu fully closes before next phase
                     return True
             except Exception as _re:
                 self._log(f"[Recovery] OCR error: {_re}")
@@ -1395,9 +1395,9 @@ class RelicBotApp(tk.Tk):
                     _img = screen_capture.capture(region)
                     if relic_analyzer.check_text_visible(_img, "equipment"):
                         self._log("[Phase -0.5] Equipment menu detected — in-game confirmed.")
-                        time.sleep(0.3)
+                        time.sleep(0.5)
                         self.player.tap("Key.esc")
-                        time.sleep(0.7)
+                        time.sleep(1.5)   # wait for menu to fully close before Phase 0
                         return True
                 except Exception as _ce:
                     self._log(f"[Phase -0.5] OCR error: {_ce}")
@@ -1660,7 +1660,8 @@ class RelicBotApp(tk.Tk):
         ):
             return
         self._reset_iter_requested = True
-        self._log("⟳ Reset iteration requested by user.")
+        self.player.stop()   # interrupt any ongoing play() so the phase exits quickly
+        self._log("⟳ Reset iteration requested — interrupting current phase.")
 
     def _on_app_close(self):
         """Stop the global hotkey listener then close the window."""
@@ -2896,118 +2897,185 @@ class RelicBotApp(tk.Tk):
 
         relic_results = []
 
-        # ── Phase 0: Setup ────────────────────────────────────────────────── #
-        if self.phase_events[0]:
-            self._set_status(f"{label}: setup…", "green")
-            if not self.bot_running:
-                return relic_results
-            if _p0_exe:
-                self._focus_game_window(_p0_exe, timeout=3.0)
-            self.player.play(self.phase_events[0], bypass_focus=True)
-            if not self.bot_running:
+        # Expected Phase 0 input count and exact key sequence (for validation)
+        _p0_expected      = sum(1 for e in self.phase_events[0] if e["type"] == "key_press")
+        _p0_expected_keys = [e["key"] for e in self.phase_events[0] if e["type"] == "key_press"]
+        _P01_MAX_ATTEMPTS = 3   # max Phase 0+1 retries before aborting iteration
+
+        # ── Phase 0 + Murk read + Phase 1 — with retry loop ────────────── #
+        # Wrapped in a retry loop: if Phase 0 input count is short (play was
+        # interrupted) or a reset is requested, ESC-recover and retry up to
+        # _P01_MAX_ATTEMPTS times. Inputs use extra_delay=0.25 s per key to
+        # prevent inputs being eaten during game-UI transition animations.
+        _p01_success = False
+        for _p01_att in range(_P01_MAX_ATTEMPTS):
+            if not self.bot_running or self._reset_iter_requested:
                 return relic_results
 
-        # ── Murk read — calculates buy count ──────────────────────────────── #
-        if self.phase_events[1] and self.phase_events[4]:
-            self._set_status(f"{label}: waiting for shop screen…", "green")
-            time.sleep(1.5)   # inter-phase buffer
-
-            for attempt in range(1, 4):
-                if not self.bot_running:
+            # ── Phase 0: Setup ─────────────────────────────────────────── #
+            if self.phase_events[0]:
+                attempt_label = (f" (attempt {_p01_att + 1}/{_P01_MAX_ATTEMPTS})"
+                                 if _p01_att > 0 else "")
+                self._set_status(f"{label}: setup{attempt_label}…", "green")
+                if _p0_exe:
+                    self._focus_game_window(_p0_exe, timeout=3.0)
+                if not self.bot_running or self._reset_iter_requested:
                     return relic_results
-                self._set_status(
-                    f"{label}: reading murk (attempt {attempt}/3)…", "green")
-                self.after(0, self._flash_capture)
-                try:
-                    murk_img = screen_capture.capture(region)
-                    murk_val = relic_analyzer.read_murk(murk_img)
-                except Exception as e:
-                    self._log(f"  Murk read attempt {attempt}/3 error: {e}")
-                    murk_val = 0
+                _p0_sent, _p0_sent_keys = self.player.play(
+                    self.phase_events[0], bypass_focus=True, extra_delay=0.25)
+                if not self.bot_running or self._reset_iter_requested:
+                    return relic_results
 
-                if murk_val >= murk_cost:
-                    _p3_count = murk_val // murk_cost
+                # Validate input count AND exact key sequence.
+                _p0_count_ok = (_p0_sent == _p0_expected)
+                _p0_seq_ok   = (_p0_sent_keys == _p0_expected_keys)
+                if not _p0_count_ok or not _p0_seq_ok:
+                    if not _p0_count_ok:
+                        _mismatch_desc = f"count {_p0_sent}/{_p0_expected}"
+                    else:
+                        _mismatch_desc = "sequence mismatch"
                     self._log(
-                        f"  Murk: {murk_val:,}  →  {_p3_count} relic(s) to review "
-                        f"({murk_cost} murk each).")
-                    if self._overlay:
-                        ov = self._overlay
-                        mv, pc = murk_val, _p3_count
-                        self.after(0, lambda: ov.update(
-                            murk=f"{mv:,}",
-                            est_murk_after=f"~{mv % murk_cost:,}",
-                            to_buy=str(pc),
-                            bought="0 / " + str(pc),
-                            relic_num="—", analysing="—",
-                        ) if ov._win else None)
-                    break
-                elif murk_val > 0:
-                    self._log(
-                        f"  Murk read attempt {attempt}/3: {murk_val:,} — below relic cost "
-                        f"({murk_cost}), retrying.")
-                    murk_val = 0
-                else:
-                    self._log(f"  Murk read attempt {attempt}/3 returned 0.")
-
-            if _p3_count is None:
-                self._log(
-                    "  WARNING: Murk could not be read — "
-                    "falling back to failsafe buy mode (runs until stop condition).")
-        else:
-            time.sleep(1.5)   # inter-phase buffer even without murk read
-
-        # ── Phase 1: Buy Loop ──────────────────────────────────────────────── #
-        if self.phase_events[1]:
-            if _p3_count is not None:
-                buy_count = math.ceil(_p3_count / 10)
-                self._set_status(
-                    f"{label}: buying relics ({buy_count} batch(es) of 10)…", "green")
-                self._log(
-                    f"  {_p3_count} relic(s) available → {buy_count} buy batch(es).")
-                for buy_i in range(buy_count):
-                    if not self.bot_running:
-                        return relic_results
-                    self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.25)
-                    if p1_settle > 0:
-                        time.sleep(p1_settle)
-                    if self._overlay:
-                        ov = self._overlay
-                        bought_n = min((buy_i + 1) * 10, _p3_count)
-                        tot_n = _p3_count
-                        self.after(0, lambda b=bought_n, t=tot_n: ov.update(
-                            bought=f"{b} / {t}"
-                        ) if ov._win else None)
-            else:
-                self._set_status(f"{label}: buying relics…", "green")
-                for buy_i in range(_P1_FAILSAFE):
-                    if not self.bot_running:
-                        return relic_results
-                    self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.25)
-                    if p1_settle > 0:
-                        time.sleep(p1_settle)
-                    if not self.bot_running:
-                        return relic_results
-                    if p1_stop:
-                        self.after(0, self._flash_capture)
+                        f"  Phase 0: input validation failed ({_mismatch_desc}) "
+                        f"— ESC recovery and retry.")
+                    # Reset tracking vars so stale values can't cause a false positive
+                    _p0_sent = 0
+                    _p0_sent_keys = []
+                    if _p01_att < _P01_MAX_ATTEMPTS - 1:
+                        self._esc_to_game_screen(region)
+                        continue
+                    else:
+                        self._log("  Phase 0 failed 3 times — aborting iteration.")
+                        self._close_game()
                         try:
-                            img = screen_capture.capture(region)
-                            stopped = relic_analyzer.check_condition(img, p1_stop)
-                        except Exception as e:
-                            self._log(f"WARNING: buy condition check failed: {e}")
-                            stopped = False
-                        if stopped:
-                            self._log(f"  Buy stop condition met after {buy_i + 1} purchase(s).")
-                            break
-            if not self.bot_running:
-                return relic_results
+                            save_manager.restore(
+                                self.save_path_var.get(),
+                                os.path.join(self.backup_path_var.get(),
+                                             os.path.basename(self.save_path_var.get())))
+                        except Exception:
+                            pass
+                        return None
+
+            # ── Murk read — calculates buy count ───────────────────────── #
+            if self.phase_events[1] and self.phase_events[4]:
+                self._set_status(f"{label}: waiting for shop screen…", "green")
+                time.sleep(1.5)   # inter-phase buffer
+                if not self.bot_running or self._reset_iter_requested:
+                    return relic_results
+
+                for attempt in range(1, 4):
+                    if not self.bot_running or self._reset_iter_requested:
+                        return relic_results
+                    self._set_status(
+                        f"{label}: reading murk (attempt {attempt}/3)…", "green")
+                    self.after(0, self._flash_capture)
+                    try:
+                        murk_img = screen_capture.capture(region)
+                        murk_val = relic_analyzer.read_murk(murk_img)
+                    except Exception as e:
+                        self._log(f"  Murk read attempt {attempt}/3 error: {e}")
+                        murk_val = 0
+
+                    if murk_val >= murk_cost:
+                        _p3_count = murk_val // murk_cost
+                        self._log(
+                            f"  Murk: {murk_val:,}  →  {_p3_count} relic(s) to review "
+                            f"({murk_cost} murk each).")
+                        if self._overlay:
+                            ov = self._overlay
+                            mv, pc = murk_val, _p3_count
+                            self.after(0, lambda: ov.update(
+                                murk=f"{mv:,}",
+                                est_murk_after=f"~{mv % murk_cost:,}",
+                                to_buy=str(pc),
+                                bought="0 / " + str(pc),
+                                relic_num="—", analysing="—",
+                            ) if ov._win else None)
+                        break
+                    elif murk_val > 0:
+                        self._log(
+                            f"  Murk read attempt {attempt}/3: {murk_val:,} — below relic cost "
+                            f"({murk_cost}), retrying.")
+                        murk_val = 0
+                    else:
+                        self._log(f"  Murk read attempt {attempt}/3 returned 0.")
+
+                if _p3_count is None:
+                    self._log(
+                        "  WARNING: Murk could not be read — "
+                        "falling back to failsafe buy mode (runs until stop condition).")
+            else:
+                time.sleep(1.5)   # inter-phase buffer even without murk read
+
+            # ── Phase 1: Buy Loop ───────────────────────────────────────── #
+            if self.phase_events[1]:
+                if _p3_count is not None:
+                    buy_count = math.ceil(_p3_count / 10)
+                    self._set_status(
+                        f"{label}: buying relics ({buy_count} batch(es) of 10)…", "green")
+                    self._log(
+                        f"  {_p3_count} relic(s) available → {buy_count} buy batch(es).")
+                    for buy_i in range(buy_count):
+                        if not self.bot_running or self._reset_iter_requested:
+                            return relic_results
+                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.35)
+                        if p1_settle > 0:
+                            time.sleep(p1_settle)
+                        if self._overlay:
+                            ov = self._overlay
+                            bought_n = min((buy_i + 1) * 10, _p3_count)
+                            tot_n = _p3_count
+                            self.after(0, lambda b=bought_n, t=tot_n: ov.update(
+                                bought=f"{b} / {t}"
+                            ) if ov._win else None)
+                else:
+                    self._set_status(f"{label}: buying relics…", "green")
+                    for buy_i in range(_P1_FAILSAFE):
+                        if not self.bot_running or self._reset_iter_requested:
+                            return relic_results
+                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.35)
+                        if p1_settle > 0:
+                            time.sleep(p1_settle)
+                        if not self.bot_running or self._reset_iter_requested:
+                            return relic_results
+                        if p1_stop:
+                            self.after(0, self._flash_capture)
+                            try:
+                                img = screen_capture.capture(region)
+                                stopped = relic_analyzer.check_condition(img, p1_stop)
+                            except Exception as e:
+                                self._log(f"WARNING: buy condition check failed: {e}")
+                                stopped = False
+                            if stopped:
+                                self._log(
+                                    f"  Buy stop condition met after {buy_i + 1} purchase(s).")
+                                break
+                if not self.bot_running or self._reset_iter_requested:
+                    return relic_results
+
+            _p01_success = True
+            break   # Phase 0+1 completed — proceed to Phase 2
+
+        if not _p01_success and self.bot_running and not self._reset_iter_requested:
+            return relic_results   # all retry attempts exhausted without completion
 
         # ── Phase 2: Relic Rites Nav (Esc → M → down arrows → F) ───────── #
+        _p2_expected      = sum(1 for e in self.phase_events[2] if e["type"] == "key_press")
+        _p2_expected_keys = [e["key"] for e in self.phase_events[2] if e["type"] == "key_press"]
         time.sleep(1.5)   # inter-phase buffer
         if self.phase_events[2]:
             self._set_status(f"{label}: navigating to Relic Rites menu…", "green")
-            self.player.play(self.phase_events[2])
-            if not self.bot_running:
+            _p2_sent, _p2_sent_keys = self.player.play(self.phase_events[2], extra_delay=0.25)
+            if not self.bot_running or self._reset_iter_requested:
                 return relic_results
+            # Log any input mismatch so it's visible in the run log
+            _p2_count_ok = (_p2_sent == _p2_expected)
+            _p2_seq_ok   = (_p2_sent_keys == _p2_expected_keys)
+            if not _p2_count_ok or not _p2_seq_ok:
+                if not _p2_count_ok:
+                    _p2_desc = f"count {_p2_sent}/{_p2_expected}"
+                else:
+                    _p2_desc = "sequence mismatch"
+                self._log(f"  WARNING: Phase 2 input validation failed ({_p2_desc}) — Phase 3 fallback will attempt recovery.")
 
         # ── Phase 3: Navigate to Sell (smart tab detection + targeted F2) ─ #
         # Runs whenever Phase 2 (Relic Rites Nav) is configured.

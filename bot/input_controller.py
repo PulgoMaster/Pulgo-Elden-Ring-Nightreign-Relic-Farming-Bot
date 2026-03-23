@@ -212,20 +212,28 @@ class InputPlayer:
                 self._ms.release(btn)
                 time.sleep(hold + gap)
 
-    def play(self, events: list, speed: float = 1.0, bypass_focus: bool = False):
+    def play(self, events: list, speed: float = 1.0, bypass_focus: bool = False,
+             extra_delay: float = 0.0) -> tuple:
         """
         Replay events preserving original timing.
         speed > 1 plays faster, speed < 1 plays slower.
+        extra_delay adds that many seconds after every key/mouse release on top of
+        the original timing — use this to prevent inputs being eaten during
+        game-UI transitions.
         Skips all inputs silently if the game window is not in the foreground,
         unless bypass_focus=True (used for Phase 0 which launches the game).
+        Returns (fired_count, fired_keys) where fired_keys is the ordered list of
+        key strings from key_press events that were actually sent.
         """
         if not bypass_focus and not self._game_focused():
-            return
+            return 0, []
         self._stop_flag = False
         if not events:
-            return
+            return 0, []
 
         prev_time = 0.0
+        fired = 0
+        fired_keys = []
         for event in events:
             if self._stop_flag:
                 break
@@ -240,12 +248,16 @@ class InputPlayer:
             if etype == "key_press":
                 try:
                     self._kb.press(self._parse_key(event["key"]))
+                    fired += 1
+                    fired_keys.append(event["key"])
                 except Exception:
                     pass
 
             elif etype == "key_release":
                 try:
                     self._kb.release(self._parse_key(event["key"]))
+                    if extra_delay > 0:
+                        time.sleep(extra_delay)
                 except Exception:
                     pass
 
@@ -259,6 +271,10 @@ class InputPlayer:
             elif etype == "mouse_release":
                 btn = Button.left if event["button"] == "left" else Button.right
                 self._ms.release(btn)
+                if extra_delay > 0:
+                    time.sleep(extra_delay)
+
+        return fired, fired_keys
 
     def _parse_key(self, key_str: str):
         """Convert stored key string back to a pynput Key or character."""
