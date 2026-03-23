@@ -470,6 +470,21 @@ def read_murk(image_bytes: bytes) -> int:
     return candidates[0][1]
 
 
+def check_text_visible(image_bytes: bytes, text: str, top_fraction: float = 0.50) -> bool:
+    """
+    Check if text appears anywhere in the top portion of the screen.
+    Scans the full width so tab-bar labels at any horizontal position are found.
+    Used for Equipment menu detection during ESC recovery.
+    """
+    reader = _get_reader()
+    img = _to_array(image_bytes, max_width=0)
+    h = img.shape[0]
+    scan_region = img[:int(h * top_fraction), :]
+    results = reader.readtext(scan_region)
+    all_text = " ".join(t for _, t, c in results if c > 0.3).lower()
+    return text.lower() in all_text
+
+
 def check_condition(image_bytes: bytes, condition_text: str) -> bool:
     """
     Check whether the given text is visible anywhere on screen using OCR.
