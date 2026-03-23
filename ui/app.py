@@ -1822,6 +1822,8 @@ class RelicBotApp(tk.Tk):
             _async_iter_q = queue.Queue()
             self._log("Async Analysis enabled — capture and OCR will run in parallel.")
 
+            _ASYNC_TASK_TIMEOUT = 90   # seconds per iteration's analysis before skipping
+
             def _async_worker_loop():  # noqa: E306
                 while True:
                     _task = _async_iter_q.get()
@@ -1829,7 +1831,19 @@ class RelicBotApp(tk.Tk):
                         _async_iter_q.task_done()
                         break
                     try:
-                        self._analyze_async_iter(_task, results, _async_dir_map)
+                        _at = threading.Thread(
+                            target=self._analyze_async_iter,
+                            args=(_task, results, _async_dir_map),
+                            daemon=True,
+                        )
+                        _at.start()
+                        _at.join(timeout=_ASYNC_TASK_TIMEOUT)
+                        if _at.is_alive():
+                            self._log(
+                                f"WARNING: Async analysis for iteration "
+                                f"{_task['iteration']} timed out "
+                                f"({_ASYNC_TASK_TIMEOUT}s) — skipping."
+                            )
                     except Exception as _ae:
                         self._log(f"ERROR in async analysis worker: {_ae}")
                     finally:
@@ -1837,6 +1851,19 @@ class RelicBotApp(tk.Tk):
 
             threading.Thread(target=_async_worker_loop, daemon=True,
                              name="async-iter-worker").start()
+
+            def _async_join_timed():
+                """Wait for the async queue to drain, with a 1.5-min timeout."""
+                _done = threading.Event()
+                def _waiter():
+                    _async_iter_q.join()
+                    _done.set()
+                threading.Thread(target=_waiter, daemon=True).start()
+                if not _done.wait(timeout=_ASYNC_TASK_TIMEOUT):
+                    self._log(
+                        f"WARNING: Async worker did not finish within "
+                        f"{_ASYNC_TASK_TIMEOUT}s — proceeding anyway."
+                    )
 
         _MAX_RESTARTS       = 3    # abort after this many consecutive hung-game restarts
         _iter_restart_count = 0    # restarts for the current iteration (reset on new iter)
@@ -1953,7 +1980,7 @@ class RelicBotApp(tk.Tk):
                     if not _async_sentinel_sent[0]:
                         _async_sentinel_sent[0] = True
                         _async_iter_q.put(None)
-                    _async_iter_q.join()
+                    _async_join_timed()
                     self.after(0, self._reset_controls)
                     return
 
@@ -1978,7 +2005,7 @@ class RelicBotApp(tk.Tk):
                         if not _async_sentinel_sent[0]:
                             _async_sentinel_sent[0] = True
                             _async_iter_q.put(None)
-                        _async_iter_q.join()
+                        _async_join_timed()
                         self.after(0, self._reset_controls)
                         return
                     try:
@@ -2209,7 +2236,7 @@ class RelicBotApp(tk.Tk):
             if not _async_sentinel_sent[0]:
                 _async_sentinel_sent[0] = True
                 _async_iter_q.put(None)   # sentinel — tells worker to exit
-            _async_iter_q.join()
+            _async_join_timed()
             self._log("Async analysis complete.")
 
         # Batch finished – generate README and PRIORITY.txt
