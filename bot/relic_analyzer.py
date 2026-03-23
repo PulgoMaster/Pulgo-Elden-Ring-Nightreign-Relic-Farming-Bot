@@ -303,40 +303,60 @@ def analyze(image_bytes: bytes, criteria: dict) -> dict:
     }
 
 
+def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
+    """Boost contrast and convert to grayscale to help OCR read HUD numbers."""
+    from PIL import Image as _Image, ImageEnhance as _Enhance, ImageFilter as _Filter
+    pil = _Image.fromarray(img)
+    pil = pil.convert("L")                         # grayscale
+    pil = _Enhance.Contrast(pil).enhance(2.5)      # punch contrast
+    pil = pil.filter(_Filter.SHARPEN)              # sharpen edges
+    return np.array(pil.convert("RGB"))
+
+
 def read_murk(image_bytes: bytes) -> int:
     """
     Read the murk (currency) amount from the screen using OCR.
     Returns 0 if the amount cannot be reliably determined.
+
+    Strategy:
+      1. Top-right third of the screen (HUD area) — raw then preprocessed.
+      2. Full image fallback — restricts candidates to plausible murk range.
     """
     reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)   # full resolution — murk digits are small
 
-    # Try top-right quarter first — that's where the HUD currency typically sits.
     h, w = img.shape[:2]
-    roi = img[0: h // 3, w // 2:]
-    results = reader.readtext(roi)
+    # Slightly wider ROI: top 40 % of the screen, right 55 %
+    roi_raw  = img[0: int(h * 0.40), int(w * 0.45):]
+    roi_proc = _preprocess_for_ocr(roi_raw)
 
     candidates = []
-    for _, text, conf in results:
-        for n in re.findall(r"\d+", text.replace(",", "").replace(".", "")):
-            val = int(n)
-            if val > 0:
-                candidates.append((conf, val))
 
-    if not candidates:
-        # Fall back to the full image and require a plausible murk range.
-        results = reader.readtext(img)
+    def _extract(results, min_val=1, max_val=9_999_999):
         for _, text, conf in results:
-            for n in re.findall(r"\d+", text.replace(",", "").replace(".", "")):
+            clean = text.replace(",", "").replace(".", "").replace(" ", "")
+            for n in re.findall(r"\d+", clean):
                 val = int(n)
-                if 100 <= val <= 999_999:
+                if min_val <= val <= max_val:
                     candidates.append((conf, val))
+
+    # Pass 1: raw ROI
+    _extract(reader.readtext(roi_raw))
+    # Pass 2: preprocessed ROI (catches low-contrast gold text)
+    if not candidates:
+        _extract(reader.readtext(roi_proc))
+    # Pass 3: full image with plausible murk range
+    if not candidates:
+        _extract(reader.readtext(img), min_val=100, max_val=9_999_999)
 
     if not candidates:
         return 0
 
-    # Return the value associated with the highest OCR confidence.
-    candidates.sort(reverse=True)
+    # The real murk total is always the largest number visible in the HUD area.
+    # Sorting by value (descending) avoids picking up small fragments or price labels
+    # (e.g. 1800 per relic) when the actual balance is e.g. 170,032.
+    # Among candidates within the same order of magnitude, prefer higher confidence.
+    candidates.sort(key=lambda x: (x[1], x[0]), reverse=True)
     return candidates[0][1]
 
 

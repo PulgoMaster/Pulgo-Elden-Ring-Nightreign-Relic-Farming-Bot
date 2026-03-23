@@ -1749,9 +1749,6 @@ class RelicBotApp(tk.Tk):
                 "reason": reason,
             }
 
-            # Copy save file (deferred until next iteration when game closes and releases file lock)
-            _prev_save_dir = iter_dir
-
             # Effective tier: consider full matches AND near-misses with hit_min+ passives.
             # hit_min is 2 normally, but 3 when the user requires ALL passives to match —
             # in that case a 2/3 near-miss is not a HIT and won't get a folder rename.
@@ -1841,6 +1838,9 @@ class RelicBotApp(tk.Tk):
                     self._log(f"Folder renamed to: {tier_name}")
                 except Exception as e:
                     self._log(f"WARNING: could not rename folder: {e}")
+
+            # Deferred save copy — set AFTER any rename so the path is always valid
+            _prev_save_dir = iter_dir
 
             results.append({
                 "iteration": iteration,
@@ -1977,10 +1977,11 @@ class RelicBotApp(tk.Tk):
                     self._log(f"  Murk read attempt {attempt}/3 error: {e}")
                     murk_val = 0
 
-                if murk_val > 0:
+                if murk_val >= murk_cost:
+                    # Valid read — value can afford at least one relic
                     _p3_count = murk_val // murk_cost
                     self._log(
-                        f"  Murk: {murk_val}  →  {_p3_count} relic(s) to review "
+                        f"  Murk: {murk_val:,}  →  {_p3_count} relic(s) to review "
                         f"({murk_cost} murk each).")
                     if self._overlay:
                         ov = self._overlay
@@ -1991,12 +1992,19 @@ class RelicBotApp(tk.Tk):
                             relic_num="—", analysing="—",
                         ) if ov._win else None)
                     break
+                elif murk_val > 0:
+                    self._log(
+                        f"  Murk read attempt {attempt}/3: {murk_val:,} is below relic cost "
+                        f"({murk_cost}) — likely a misread, retrying.")
+                    murk_val = 0
                 else:
                     self._log(f"  Murk read attempt {attempt}/3 returned 0.")
 
             if murk_val == 0:
-                self._log("  ERROR: Murk could not be read after 3 attempts — aborting.")
-                return None
+                self._log(
+                    "  WARNING: Murk could not be read after 3 attempts — "
+                    "falling back to failsafe buy mode (runs until stop condition).")
+                # _p3_count stays None → Phase 1 and Phase 3 use their failsafes
 
         # ── Phase 1: Buy Loop ────────────────────────────────────────── #
         if self.phase_events[1]:
