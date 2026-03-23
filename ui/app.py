@@ -200,6 +200,45 @@ def write_iter_info(iter_dir: str, iteration: int, relic_results: list, hit_min:
     Uses per-relic results directly so the MATCH/NEAR MISS labels are always
     accurate regardless of whether multiple relics share the same OCR name."""
     lines = [f"Iteration #{iteration:03d}", "=" * 40, ""]
+
+    # ── HITS FOUND section (relics with 2/3 or 3/3 match, always at top) ─ #
+    hit_entries = []
+    for relic_num, rr in enumerate(relic_results, 1):
+        relic = (rr.get("relics_found") or [{}])[0]
+        if not isinstance(relic, dict):
+            continue
+        passives   = relic.get("passives", [])
+        is_match   = rr.get("match", False)
+        matched_ps = set(rr.get("matched_passives", []))
+        nms        = rr.get("near_misses", [])
+        best_nm    = max(nms, key=lambda n: n.get("matching_passive_count", 0), default={})
+        best_nm_count = best_nm.get("matching_passive_count", 0)
+        best_nm_ps    = set(best_nm.get("matching_passives", []))
+
+        n_matched = len(matched_ps) if is_match else best_nm_count
+        mark_ps   = matched_ps if is_match and matched_ps else best_nm_ps
+
+        if n_matched >= 3:
+            hit_entries.append((relic_num, "3/3", relic.get("name", "Unknown"),
+                                passives, mark_ps))
+        elif n_matched >= hit_min:
+            hit_entries.append((relic_num, "2/3", relic.get("name", "Unknown"),
+                                passives, mark_ps))
+
+    if hit_entries:
+        lines.append("=" * 40)
+        lines.append("  HITS FOUND")
+        lines.append("=" * 40)
+        for rn, tier, rname, passives, mark_ps in hit_entries:
+            lines.append(f"  ★ Relic #{rn} [{tier}]  {rname}")
+            for p in passives:
+                marker = "    * " if p in mark_ps else "      "
+                lines.append(f"{marker}{p}")
+            lines.append("")
+        lines.append("-" * 40)
+        lines.append("")
+
+    # ── All relics in order ──────────────────────────────────────────────── #
     for relic_num, rr in enumerate(relic_results, 1):
         relic = (rr.get("relics_found") or [{}])[0]
         if not isinstance(relic, dict):
@@ -382,6 +421,11 @@ class RelicBotApp(tk.Tk):
         # Best-batch scoreboard (reset each START)
         self._best_33_iter   = None  # {"iteration": n, "count": x}
         self._best_hits_iter = None  # {"iteration": n, "count": x}
+
+        # Batch identity and overflow state
+        self._current_batch_id: str = ""
+        self._overflow_handoff: dict | None = None
+        self._ov_overflow_hits: int = 0   # hits found in previous batch overflow
 
         theme.apply(self)
         self._build_ui()
@@ -1762,6 +1806,9 @@ class RelicBotApp(tk.Tk):
         # The run folder is created lazily — only when the first iteration actually runs.
         # This prevents empty batch_run_* folders when the bot is stopped before any iteration.
         run_stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        batch_id  = time.strftime("%Y%m%d_%H%M%S")
+        self._current_batch_id = batch_id
+        self._ov_overflow_hits = 0
         run_dir = os.path.join(base_output, f"batch_run_{run_stamp}")
         live_log_path = os.path.join(run_dir, "live_log.txt")
         batch_log_path = os.path.join(run_dir, "run_log.txt")
@@ -1891,6 +1938,57 @@ class RelicBotApp(tk.Tk):
                         f"WARNING: Async workers did not finish within "
                         f"{_ASYNC_TASK_TIMEOUT}s — proceeding anyway."
                     )
+
+            # ── Overflow workers for previous batch tasks ──────────────── #
+            # If the previous batch had leftover tasks when it was stopped, spawn
+            # 2 independent workers to finish them without consuming new-batch slots.
+            _ovf = self._overflow_handoff
+            if _ovf is not None:
+                self._overflow_handoff = None
+                _ovf_q = queue.PriorityQueue()
+                for _oi in _ovf["tasks"]:
+                    _ovf_q.put(_oi)
+                for _ in range(2):
+                    _ovf_q.put(((float("inf"), float("inf")), None))
+
+                def _overflow_worker(
+                    _oq=_ovf_q,
+                    _ois=_ovf["iter_state"],
+                    _ol=_ovf["lock"],
+                    _odm=_ovf["dir_map"],
+                    _or=_ovf["results"],
+                ):
+                    while True:
+                        _prio, _task = _oq.get()
+                        if _task is None:
+                            _oq.task_done()
+                            break
+                        try:
+                            _rt = threading.Thread(
+                                target=self._analyze_relic_task,
+                                args=(_task, _ois, _ol, _odm, _or),
+                                daemon=True,
+                            )
+                            _rt.start()
+                            _rt.join(timeout=_ASYNC_TASK_TIMEOUT)
+                            if _rt.is_alive():
+                                _retries = _task.get("_retries", 0)
+                                if _retries < 2:
+                                    _oq.put((_prio, {**_task, "_retries": _retries + 1}))
+                                else:
+                                    self._mark_relic_failed(
+                                        _task, _ois, _ol, _odm, _or)
+                        except Exception:
+                            self._mark_relic_failed(_task, _ois, _ol, _odm, _or)
+                        finally:
+                            _oq.task_done()
+
+                for _wn in range(2):
+                    threading.Thread(
+                        target=_overflow_worker, daemon=True,
+                        name=f"overflow-worker-{_wn}",
+                    ).start()
+                self._log("Overflow: 2 workers started for previous batch leftovers.")
 
         _MAX_RESTARTS       = 3    # abort after this many consecutive hung-game restarts
         _iter_restart_count = 0    # restarts for the current iteration (reset on new iter)
@@ -2112,6 +2210,7 @@ class RelicBotApp(tk.Tk):
                             "mode_desc":      mode_desc,
                             "limit_value":    limit_value,
                             "save_filename":  save_filename,
+                            "batch_id":       batch_id,
                         }
                 for _si, _img, _pp in captures:
                     _async_relic_q.put(((iteration, _si), {
@@ -2128,6 +2227,8 @@ class RelicBotApp(tk.Tk):
                         "mode_desc":      mode_desc,
                         "limit_value":    limit_value,
                         "save_filename":  save_filename,
+                        "batch_id":       batch_id,
+                        "_run_log_path":  batch_log_path,
                         "_retries":       0,
                     }))
 
@@ -2283,6 +2384,13 @@ class RelicBotApp(tk.Tk):
                 )
                 self._log(f"★★ HIT — Iteration {iteration}: {hit_name}")
 
+            _iter_total_hits = iter_g3 + iter_g2
+            if _iter_total_hits > 0:
+                self._log(
+                    f"  Hits this iteration: {_iter_total_hits} "
+                    f"({iter_g3}×3/3, {iter_g2}×2/3)"
+                )
+
             # Write per-iteration info.txt (use combined summary)
             try:
                 write_iter_info(iter_dir, iteration, relic_results, hit_min)
@@ -2321,6 +2429,8 @@ class RelicBotApp(tk.Tk):
                 "relics_found": all_relics,
                 "screenshots": screenshots,
                 "save_copy": save_filename,
+                "hits_33": iter_g3,
+                "hits_23": iter_g2,
             })
 
             # Write README after every iteration so a cancelled run is never lost
@@ -2357,6 +2467,28 @@ class RelicBotApp(tk.Tk):
             _shutdown_async_workers()
             _async_join_timed()
             self._log("Async analysis complete.")
+            # Drain any tasks still in the queue (e.g. if grace period timed out)
+            # and store them for overflow workers in the next batch.
+            _remaining_overflow = []
+            while True:
+                try:
+                    _oprio, _otask = _async_relic_q.get_nowait()
+                    _async_relic_q.task_done()
+                    if _otask is not None:
+                        _remaining_overflow.append((_oprio, _otask))
+                except queue.Empty:
+                    break
+            if _remaining_overflow:
+                self._overflow_handoff = {
+                    "tasks":      _remaining_overflow,
+                    "iter_state": _async_iter_state,
+                    "lock":       _async_state_lock,
+                    "dir_map":    _async_dir_map,
+                    "results":    results,
+                }
+                self._log(
+                    f"  {len(_remaining_overflow)} task(s) handed off to next batch overflow workers."
+                )
 
         # Batch finished – generate README and PRIORITY.txt
         if results and _run_dir_created[0]:
@@ -2371,10 +2503,18 @@ class RelicBotApp(tk.Tk):
             except Exception as e:
                 self._log(f"WARNING: could not write PRIORITY.txt: {e}")
 
-        match_count = sum(1 for r in results if r["match"])
+        match_count  = sum(1 for r in results if r["match"])
+        total_hits33 = sum(r.get("hits_33", 0) for r in results)
+        total_hits23 = sum(r.get("hits_23", 0) for r in results)
+        total_hits   = total_hits33 + total_hits23
         self._log(
             f"Batch complete. {len(results)} iterations run, {match_count} match(es) found."
         )
+        if total_hits > 0:
+            self._log(
+                f"Total hits across all iterations: {total_hits} "
+                f"({total_hits33}×3/3, {total_hits23}×2/3)"
+            )
         self._set_status("Batch complete.", "gray")
 
         if results and _run_dir_created[0]:
@@ -2413,11 +2553,13 @@ class RelicBotApp(tk.Tk):
         criteria      = task["criteria"]
         hit_min       = task["hit_min"]
         live_log_path = task["live_log_path"]
+        is_current_batch = task.get("batch_id") == self._current_batch_id
 
         try:
             result = relic_analyzer.analyze(img_bytes, criteria)
         except Exception as exc:
-            self._log(f"  [Async iter {iteration}] ERROR relic {step_i + 1}: {exc}")
+            if is_current_batch:
+                self._log(f"  [Async iter {iteration}] ERROR relic {step_i + 1}: {exc}")
             self._mark_relic_failed(task, iter_state, lock, dir_map, results)
             return
 
@@ -2427,9 +2569,28 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
 
-        self._log(f"  [Async iter {iteration}] Relic {step_i + 1}:")
-        self._log_result(result)
-        time.sleep(0.05)
+        # Route per-relic log output: current batch → UI panel; old batch → its own run_log
+        if is_current_batch:
+            self._log(f"  [Async iter {iteration}] Relic {step_i + 1}:")
+            self._log_result(result)
+            time.sleep(0.05)
+        else:
+            _old_run_log = task.get("_run_log_path", "")
+            if _old_run_log:
+                try:
+                    relics = result.get("relics_found", [])
+                    r0 = relics[0] if relics else {}
+                    rname = r0.get("name", "Unknown") if isinstance(r0, dict) else str(r0)
+                    passives_found = r0.get("passives", []) if isinstance(r0, dict) else []
+                    status = "MATCH" if result.get("match") else "no match"
+                    ts = time.strftime("%H:%M:%S")
+                    with open(_old_run_log, "a", encoding="utf-8") as _f:
+                        _f.write(
+                            f"[{ts}]   [Overflow iter {iteration}] Relic {step_i + 1}: "
+                            f"[{status}] {rname}  | {', '.join(passives_found) or '—'}\n"
+                        )
+                except Exception:
+                    pass
 
         saved_fname = ""
         if iter_dir and img_bytes:
@@ -2446,14 +2607,17 @@ class RelicBotApp(tk.Tk):
                 try:
                     with open(os.path.join(iter_dir, saved_fname), "wb") as _f:
                         _f.write(img_bytes)
-                    self._log(f"  Screenshot saved: {saved_fname}")
+                    if is_current_batch:
+                        self._log(f"  Screenshot saved: {saved_fname}")
                 except Exception as _e:
-                    self._log(f"WARNING: could not save screenshot: {_e}")
+                    if is_current_batch:
+                        self._log(f"WARNING: could not save screenshot: {_e}")
                     saved_fname = ""
 
         result["_image_bytes"]    = None
         result["_screenshot_file"] = saved_fname
 
+        # Always write per-relic result to the live_log (scoped to the task's own batch)
         if live_log_path:
             try:
                 relics = result.get("relics_found", [])
@@ -2470,16 +2634,18 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
 
-        r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
-        self._ov_at_33   += r_g3
-        self._ov_at_23   += r_g2
-        self._ov_at_duds += r_dud
-        if self._overlay:
-            ov = self._overlay
-            at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
-            self.after(0, lambda at33=at33, at23=at23, atd=atd:
-                       ov.update(at_33=at33, at_23=at23, at_duds=atd)
-                       if ov._win else None)
+        # Only update current-batch overlay counters
+        if is_current_batch:
+            r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
+            self._ov_at_33   += r_g3
+            self._ov_at_23   += r_g2
+            self._ov_at_duds += r_dud
+            if self._overlay:
+                ov = self._overlay
+                at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+                self.after(0, lambda at33=at33, at23=at23, atd=atd:
+                           ov.update(at_33=at33, at_23=at23, at_duds=atd)
+                           if ov._win else None)
 
         with lock:
             istate = iter_state.get(iteration)
@@ -2543,6 +2709,7 @@ class RelicBotApp(tk.Tk):
             mode_desc        = istate["mode_desc"]
             limit_value      = istate["limit_value"]
             save_filename    = istate["save_filename"]
+            is_current_batch = istate.get("batch_id") == self._current_batch_id
 
         blocked_curses = self._get_blocked_curses()
         any_match = any(
@@ -2577,45 +2744,75 @@ class RelicBotApp(tk.Tk):
                 for nm in all_near_misses
             )
 
-        iter_total = iter_g3 + iter_g2
-        if iter_g3 > 0:
-            if self._best_33_iter is None or iter_g3 > self._best_33_iter["count"]:
-                self._best_33_iter = {"iteration": iteration, "count": iter_g3}
-        if iter_total > 0:
-            if (self._best_hits_iter is None
-                    or iter_total > self._best_hits_iter["count"]):
-                self._best_hits_iter = {"iteration": iteration, "count": iter_total}
+        # Best-batch scoreboard and overlay — only update for current batch
+        if is_current_batch:
+            iter_total = iter_g3 + iter_g2
+            if iter_g3 > 0:
+                if self._best_33_iter is None or iter_g3 > self._best_33_iter["count"]:
+                    self._best_33_iter = {"iteration": iteration, "count": iter_g3}
+            if iter_total > 0:
+                if (self._best_hits_iter is None
+                        or iter_total > self._best_hits_iter["count"]):
+                    self._best_hits_iter = {"iteration": iteration, "count": iter_total}
 
-        if self._overlay:
-            def _fmt_best(info, suffix):
-                if info is None:
-                    return "N/A"
-                return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
-            ov   = self._overlay
-            at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
-            b33  = _fmt_best(self._best_33_iter,   "★★★")
-            bhit = _fmt_best(self._best_hits_iter, "hits")
-            self.after(0, lambda: ov.update(
-                at_33=at33, at_23=at23, at_duds=atd,
-                best_33=b33, best_hits=bhit,
-            ) if ov._win else None)
+            if self._overlay:
+                def _fmt_best(info, suffix):
+                    if info is None:
+                        return "N/A"
+                    return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
+                ov   = self._overlay
+                at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+                b33  = _fmt_best(self._best_33_iter,   "★★★")
+                bhit = _fmt_best(self._best_hits_iter, "hits")
+                self.after(0, lambda: ov.update(
+                    at_33=at33, at_23=at23, at_duds=atd,
+                    best_33=b33, best_hits=bhit,
+                ) if ov._win else None)
 
-        self._save_stats()
+            self._save_stats()
 
+        # Hit / GOD ROLL log — always shown for current batch; shown for overflow
+        # only if a hit was found (exception rule so user never misses a result).
         if num_matched >= 3:
-            self._log(f"★★★ GOD ROLL — Iteration {iteration}: {matched_relic}")
+            if is_current_batch:
+                self._log(f"★★★ GOD ROLL — Iteration {iteration}: {matched_relic}")
+            else:
+                self._log(
+                    f"[Overflow] ★★★ GOD ROLL — Prev batch Iter {iteration}: {matched_relic}"
+                )
+                self._ov_overflow_hits += 1
+                if self._overlay:
+                    _n = self._ov_overflow_hits
+                    ov = self._overlay
+                    self.after(0, lambda _n=_n: ov.set_overflow_hits(_n) if ov._win else None)
         elif num_matched >= hit_min:
             hit_name = matched_relic or (
                 max(all_near_misses,
                     key=lambda nm: nm.get("matching_passive_count", 0),
                     default={}).get("relic_name", "Unknown")
             )
-            self._log(f"★★ HIT — Iteration {iteration}: {hit_name}")
+            if is_current_batch:
+                self._log(f"★★ HIT — Iteration {iteration}: {hit_name}")
+            else:
+                self._log(
+                    f"[Overflow] ★★ HIT — Prev batch Iter {iteration}: {hit_name}"
+                )
+                self._ov_overflow_hits += 1
+                if self._overlay:
+                    _n = self._ov_overflow_hits
+                    ov = self._overlay
+                    self.after(0, lambda _n=_n: ov.set_overflow_hits(_n) if ov._win else None)
+        if is_current_batch and (iter_g3 + iter_g2) > 0:
+            self._log(
+                f"  Hits this iteration: {iter_g3 + iter_g2} "
+                f"({iter_g3}×3/3, {iter_g2}×2/3)"
+            )
 
         try:
             write_iter_info(iter_dir, iteration, relic_results, hit_min)
         except Exception as e:
-            self._log(f"WARNING: could not write info.txt: {e}")
+            if is_current_batch:
+                self._log(f"WARNING: could not write info.txt: {e}")
 
         folder_name = f"{iteration:03d}"
         tier_name   = (f"GOD ROLL {iteration:03d}" if num_matched >= 3
@@ -2628,9 +2825,11 @@ class RelicBotApp(tk.Tk):
                 os.rename(iter_dir, tier_dir)
                 final_iter_dir = tier_dir
                 folder_name    = tier_name
-                self._log(f"Folder renamed to: {tier_name}")
+                if is_current_batch:
+                    self._log(f"Folder renamed to: {tier_name}")
             except OSError as e:
-                self._log(f"WARNING: could not rename folder: {e}")
+                if is_current_batch:
+                    self._log(f"WARNING: could not rename folder: {e}")
 
         with lock:
             dir_map[iteration] = final_iter_dir
@@ -2646,6 +2845,8 @@ class RelicBotApp(tk.Tk):
             "relics_found":    all_relics,
             "screenshots":     screenshots,
             "save_copy":       save_filename,
+            "hits_33":         iter_g3,
+            "hits_23":         iter_g2,
         })
 
         try:

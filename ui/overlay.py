@@ -142,9 +142,10 @@ class BotOverlay:
         self._force_stop_cb  = None        # immediate: stop right now
         self._watching       = False
         self._sv: dict[str, tk.StringVar] = {}
-        self._reset_iter_btn: tk.Label | None = None
-        self._abort_btn: tk.Label | None  = None
-        self._log_box:  tk.Text  | None   = None
+        self._reset_iter_btn: tk.Label | None   = None
+        self._abort_btn: tk.Label | None        = None
+        self._log_box:  tk.Text  | None         = None
+        self._overflow_hits_frame: tk.Frame | None = None
         self._stop_pending   = False       # True once graceful stop is requested
 
         # Drag-to-move state
@@ -276,6 +277,30 @@ class BotOverlay:
                  font=("Consolas", 8, "bold"), width=11, anchor="w").pack(side="left")
         tk.Label(row_top, textvariable=sv("best_hits", "N/A"), bg=_BG, fg=_FG,
                  font=("Consolas", 8)).pack(side="left")
+
+        _hline(w)
+
+        # ── Previous Batch Overflow Hits ─────────────────────────────────── #
+        # Invisible when count = 0; lights up when old-batch overflow workers
+        # find a 2/3 or 3/3.  Always packed so layout never shifts.
+        self._overflow_hits_frame = tk.Frame(w, bg=_BG)
+        self._overflow_hits_frame.pack(fill="x", padx=10, pady=0)
+        self._sv["overflow_hits_label"] = tk.StringVar(value="")
+        self._sv["overflow_hits"]       = tk.StringVar(value="")
+        _ovf_lbl = tk.Label(
+            self._overflow_hits_frame,
+            textvariable=self._sv["overflow_hits_label"],
+            bg=_BG, fg="#ff8800",
+            font=("Consolas", 8, "bold"),
+        )
+        _ovf_lbl.pack(side="left")
+        _ovf_num = tk.Label(
+            self._overflow_hits_frame,
+            textvariable=self._sv["overflow_hits"],
+            bg=_BG, fg="#ffcc66",
+            font=("Consolas", 14, "bold"),
+        )
+        _ovf_num.pack(side="right", padx=(8, 0))
 
         _hline(w)
 
@@ -424,6 +449,25 @@ class BotOverlay:
         self._log_box.insert("end", line.rstrip() + "\n")
         self._log_box.see("end")
         self._log_box.configure(state="disabled")
+
+    def set_overflow_hits(self, count: int) -> None:
+        """Show/update the previous-batch overflow hit counter.  Must be called from main thread."""
+        if not self._win:
+            return
+        if count > 0:
+            self._sv["overflow_hits_label"].set("⚠ PREV BATCH OVERFLOW HITS")
+            self._sv["overflow_hits"].set(str(count))
+            if self._overflow_hits_frame:
+                self._overflow_hits_frame.configure(bg="#1a0d00")
+                for child in self._overflow_hits_frame.winfo_children():
+                    child.configure(bg="#1a0d00")
+        else:
+            self._sv["overflow_hits_label"].set("")
+            self._sv["overflow_hits"].set("")
+            if self._overflow_hits_frame:
+                self._overflow_hits_frame.configure(bg=_BG)
+                for child in self._overflow_hits_frame.winfo_children():
+                    child.configure(bg=_BG)
 
     def set_reset_iter_callback(self, cb) -> None:
         self._reset_iter_cb = cb
