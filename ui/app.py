@@ -2375,6 +2375,7 @@ class RelicBotApp(tk.Tk):
 
             self._log(f"  [Async iter {iteration}] Relic {step_i + 1}:")
             self._log_result(result)
+            time.sleep(0.05)   # let the main thread render the log line
 
             # Save screenshot if match or near-miss
             saved_fname = ""
@@ -2779,7 +2780,7 @@ class RelicBotApp(tk.Tk):
             # Settle: let the Relic Rites menu finish animating before we
             # screenshot — without this the OCR fires before the UI loads and
             # falls back to the worst-case 10-press guess.
-            time.sleep(0.7)
+            time.sleep(1.5)
             self._set_status(f"{label}: detecting tab position…", "green")
 
             # Step 1 — detect current tab
@@ -3007,8 +3008,9 @@ class RelicBotApp(tk.Tk):
                         _t.join(timeout=1.0)
                     return None
 
-                self._log(f"  Relic {step_i + 1}:")
+                self._log(f"  [{label}] Relic {step_i + 1}:")
                 self._log_result(result)
+                time.sleep(0.05)   # let the main thread render the log line
 
                 # Save screenshot if match or near-miss; discard otherwise
                 saved_fname = ""

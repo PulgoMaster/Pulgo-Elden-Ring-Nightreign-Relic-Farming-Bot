@@ -442,6 +442,8 @@ def read_murk(image_bytes: bytes) -> int:
 
     def _extract(results, min_val=1, max_val=9_999_999):
         for _, text, conf in results:
+            if conf < 0.45:   # reject low-confidence hits (price labels, misreads)
+                continue
             clean = text.replace(",", "").replace(".", "").replace(" ", "")
             for n in re.findall(r"\d+", clean):
                 val = int(n)
