@@ -276,6 +276,79 @@ class InputPlayer:
 
         return fired, fired_keys
 
+    def play_split(self, events: list, split_after_n_keys: int, mid_pause: float,
+                   bypass_focus: bool = False, extra_delay: float = 0.0) -> tuple:
+        """
+        Replay events with a mid-sequence pause after the first split_after_n_keys
+        key_release events have been processed, then continue with the remainder.
+
+        Use this for sequences that cross a UI transition — the pause lets the game
+        finish loading before the second section of inputs fires.
+
+        Returns (fired_count, fired_keys) across both sections combined.
+        """
+        if not bypass_focus and not self._game_focused():
+            return 0, []
+        self._stop_flag = False
+        if not events:
+            return 0, []
+
+        # Find the index at which to inject the pause (after Nth key_release)
+        _kr_seen = 0
+        _split_idx = len(events)   # default: no split (play all normally)
+        for _i, _e in enumerate(events):
+            if _e["type"] == "key_release":
+                _kr_seen += 1
+                if _kr_seen == split_after_n_keys:
+                    _split_idx = _i + 1
+                    break
+
+        fired = 0
+        fired_keys = []
+        prev_time = 0.0
+
+        for idx, event in enumerate(events):
+            if self._stop_flag:
+                break
+
+            # Inject the mid-pause between sections
+            if idx == _split_idx:
+                time.sleep(mid_pause)
+                prev_time = event["time"]   # reset so section-2 timing is relative
+
+            delay = event["time"] - prev_time
+            if delay > 0:
+                time.sleep(delay)
+            prev_time = event["time"]
+
+            etype = event["type"]
+            if etype == "key_press":
+                try:
+                    self._kb.press(self._parse_key(event["key"]))
+                    fired += 1
+                    fired_keys.append(event["key"])
+                except Exception:
+                    pass
+            elif etype == "key_release":
+                try:
+                    self._kb.release(self._parse_key(event["key"]))
+                    if extra_delay > 0:
+                        time.sleep(extra_delay)
+                except Exception:
+                    pass
+            elif etype == "mouse_move":
+                self._ms.position = (event["x"], event["y"])
+            elif etype == "mouse_press":
+                btn = Button.left if event["button"] == "left" else Button.right
+                self._ms.press(btn)
+            elif etype == "mouse_release":
+                btn = Button.left if event["button"] == "left" else Button.right
+                self._ms.release(btn)
+                if extra_delay > 0:
+                    time.sleep(extra_delay)
+
+        return fired, fired_keys
+
     def _parse_key(self, key_str: str):
         """Convert stored key string back to a pynput Key or character."""
         if key_str.startswith("Key."):
