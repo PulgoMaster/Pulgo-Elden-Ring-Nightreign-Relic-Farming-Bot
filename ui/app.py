@@ -394,7 +394,8 @@ class RelicBotApp(tk.Tk):
         self.bot_thread: threading.Thread | None = None
         self.bot_running = False
         self.attempt_count = 0
-        self._batch_log_path: str = ""   # set while a batch run is active
+        self._batch_log_path: str = ""        # set while a batch run is active (process log)
+        self._batch_relic_log_path: str = ""  # set while a batch run is active (relic log)
 
         # Manual iteration reset (user-triggered soft nuke from overlay)
         self._reset_iter_requested = False
@@ -595,7 +596,7 @@ class RelicBotApp(tk.Tk):
         self.phase_max_vars   = [None, tk.StringVar(value="50"),
                                  None, None, tk.StringVar(value="30")]
         self.phase_settle_vars = [None, tk.StringVar(value="0"),
-                                  None, None, tk.StringVar(value="0.45")]
+                                  None, None, tk.StringVar(value="0.25")]
         self.phase_count_vars = [tk.StringVar(value="0 events")
                                  for _ in self._PHASE_NAMES]
 
@@ -1124,7 +1125,7 @@ class RelicBotApp(tk.Tk):
         self.phase_stop_text_vars[1].set(data.get("phase1_stop_text", "Insufficient murk"))
         self.phase_max_vars[1].set(str(data.get("phase1_max_loops", "50")))
         self.phase_settle_vars[1].set(str(data.get("phase1_settle", "0.5")))
-        self.phase_settle_vars[4].set(str(data.get("phase4_settle", data.get("phase3_settle", "0.5"))))
+        self.phase_settle_vars[4].set(str(data.get("phase4_settle", data.get("phase3_settle", "0.3"))))
         self.relic_type_var.set(data.get("relic_type", "night"))
         self._parallel_enabled_var.set(data.get("parallel_enabled", False))
         self._parallel_workers_var.set(data.get("parallel_workers", 2))
@@ -1827,11 +1828,12 @@ class RelicBotApp(tk.Tk):
                     self._batch_log_path = batch_log_path
                 except Exception:
                     pass
-                # live_log.txt: per-relic analysis summary only
+                # live_log.txt: relic analysis output only
                 try:
                     with open(live_log_path, "w", encoding="utf-8") as _f:
-                        _f.write(f"Live Analysis Log — {run_stamp}\n")
+                        _f.write(f"Relic Analysis Log — {run_stamp}\n")
                         _f.write("=" * 60 + "\n")
+                    self._batch_relic_log_path = live_log_path
                 except Exception:
                     pass
                 self._log(f"Batch output folder: {run_dir}")
@@ -2902,6 +2904,29 @@ class RelicBotApp(tk.Tk):
         _p0_expected_keys = [e["key"] for e in self.phase_events[0] if e["type"] == "key_press"]
         _P01_MAX_ATTEMPTS = 3   # max Phase 0+1 retries before aborting iteration
 
+        # Dynamic wait for Phase 0: polls for "Small Jar Bazaar" text in the top
+        # portion of the screen for up to 30 s before firing section 2 of Phase 0.
+        # _shop_found[0] is set True only if the text is detected — used as a hard
+        # validation gate after play_split() returns.
+        _shop_found = [False]
+
+        def _p0_shop_wait():
+            _shop_found[0] = False
+            _deadline = time.time() + 30
+            while time.time() < _deadline:
+                if not self.bot_running or self._reset_iter_requested:
+                    return
+                try:
+                    _si = screen_capture.capture(region)
+                    if relic_analyzer.check_text_visible(_si, "small jar bazaar"):
+                        self._log("  Shop screen detected.")
+                        _shop_found[0] = True
+                        return
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            self._log("  WARNING: Shop screen not detected within 30 s.")
+
         # ── Phase 0 + Murk read + Phase 1 — with retry loop ────────────── #
         # Wrapped in a retry loop: if Phase 0 input count is short (play was
         # interrupted) or a reset is requested, ESC-recover and retry up to
@@ -2921,27 +2946,33 @@ class RelicBotApp(tk.Tk):
                     self._focus_game_window(_p0_exe, timeout=3.0)
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
-                # play_split: fire M + down×6 + F (8 keys), wait 3 s for the shop
-                # screen to finish loading, then fire the remaining shop-nav inputs.
+                # play_split: fire M + down×6 + F (8 keys), poll for "Small Jar
+                # Bazaar" text (up to 30 s) to confirm shop loaded, then fire the
+                # remaining shop-nav inputs.
                 # extra_delay=0.1 adds 100 ms after each key release so down arrows
                 # don't fire during the menu-open animation and get eaten.
                 # Applies to both normal and deep-of-night Phase 0 recordings.
                 _p0_sent, _p0_sent_keys = self.player.play_split(
-                    self.phase_events[0], split_after_n_keys=8, mid_pause=3.0,
-                    bypass_focus=True, extra_delay=0.1)
+                    self.phase_events[0], split_after_n_keys=8,
+                    wait_fn=_p0_shop_wait, bypass_focus=True, extra_delay=0.1)
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
 
-                # Validate input count AND exact key sequence.
+                # Validate input count, key sequence, AND shop screen detection.
+                # Shop detection is the real gate — pynput always succeeds at the OS
+                # level regardless of whether the game processed the inputs.
                 _p0_count_ok = (_p0_sent == _p0_expected)
                 _p0_seq_ok   = (_p0_sent_keys == _p0_expected_keys)
-                if not _p0_count_ok or not _p0_seq_ok:
+                _p0_shop_ok  = _shop_found[0]
+                if not _p0_count_ok or not _p0_seq_ok or not _p0_shop_ok:
                     if not _p0_count_ok:
                         _mismatch_desc = f"count {_p0_sent}/{_p0_expected}"
-                    else:
+                    elif not _p0_seq_ok:
                         _mismatch_desc = "sequence mismatch"
+                    else:
+                        _mismatch_desc = "shop screen not detected"
                     self._log(
-                        f"  Phase 0: input validation failed ({_mismatch_desc}) "
+                        f"  Phase 0: validation failed ({_mismatch_desc}) "
                         f"— ESC recovery and retry.")
                     # Reset tracking vars so stale values can't cause a false positive
                     _p0_sent = 0
@@ -2964,7 +2995,7 @@ class RelicBotApp(tk.Tk):
             # ── Murk read — calculates buy count ───────────────────────── #
             if self.phase_events[1] and self.phase_events[4]:
                 self._set_status(f"{label}: waiting for shop screen…", "green")
-                time.sleep(0.5)   # shop already loaded during play_split pause
+                time.sleep(0.5)   # brief settle after shop detection confirmed
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
 
@@ -3023,7 +3054,7 @@ class RelicBotApp(tk.Tk):
                     for buy_i in range(buy_count):
                         if not self.bot_running or self._reset_iter_requested:
                             return relic_results
-                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.35)
+                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.50)
                         if p1_settle > 0:
                             time.sleep(p1_settle)
                         if self._overlay:
@@ -3038,7 +3069,7 @@ class RelicBotApp(tk.Tk):
                     for buy_i in range(_P1_FAILSAFE):
                         if not self.bot_running or self._reset_iter_requested:
                             return relic_results
-                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.35)
+                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.50)
                         if p1_settle > 0:
                             time.sleep(p1_settle)
                         if not self.bot_running or self._reset_iter_requested:
@@ -3087,8 +3118,8 @@ class RelicBotApp(tk.Tk):
                     if not self.bot_running or self._reset_iter_requested:
                         return relic_results
                     self.player.play_split(
-                        self.phase_events[0], split_after_n_keys=8, mid_pause=3.0,
-                        bypass_focus=True, extra_delay=0.1)
+                        self.phase_events[0], split_after_n_keys=8,
+                        wait_fn=_p0_shop_wait, bypass_focus=True, extra_delay=0.1)
                     if not self.bot_running or self._reset_iter_requested:
                         return relic_results
                 time.sleep(1.5)   # inter-phase buffer before Phase 2
@@ -3708,7 +3739,8 @@ class RelicBotApp(tk.Tk):
         self.start_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
         self.bot_running = False
-        self._batch_log_path = ""   # stop mirroring to file
+        self._batch_log_path = ""        # stop mirroring to process log
+        self._batch_relic_log_path = ""  # stop mirroring to relic log
         if self._overlay:
             self._overlay.destroy()
             self._overlay = None
@@ -3737,6 +3769,25 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
 
+    def _log_relic(self, message: str):
+        """Log a relic analysis line: main UI box + overlay relic panel + live_log.txt."""
+        timestamp = time.strftime("%H:%M:%S")
+        line = f"[{timestamp}] {message}\n"
+        def _write():
+            self.log_box.config(state="normal")
+            self.log_box.insert("end", line)
+            self.log_box.see("end")
+            self.log_box.config(state="disabled")
+            if self._overlay:
+                self._overlay.append_relic_log(line.rstrip())
+        self.after(0, _write)
+        if self._batch_relic_log_path:
+            try:
+                with open(self._batch_relic_log_path, "a", encoding="utf-8") as _f:
+                    _f.write(line)
+            except Exception:
+                pass
+
     def _log_result(self, result: dict):
         relics = result.get("relics_found", [])
         relic = relics[0] if relics else {}
@@ -3748,16 +3799,16 @@ class RelicBotApp(tk.Tk):
 
         status = "MATCH" if match else "No match"
         passive_str = ", ".join(passives) if passives else "—"
-        self._log(f"  [{status}]  {name}")
-        self._log(f"    Passives: {passive_str}")
+        self._log_relic(f"  [{status}]  {name}")
+        self._log_relic(f"    Passives: {passive_str}")
         if curses:
-            self._log(f"    Curses:   {', '.join(curses)}")
+            self._log_relic(f"    Curses:   {', '.join(curses)}")
         if match and matched_passives:
-            self._log(f"    Matched:  {', '.join(matched_passives)}")
+            self._log_relic(f"    Matched:  {', '.join(matched_passives)}")
         elif not match:
             nms = result.get("near_misses", [])
             if nms:
                 nm = max(nms, key=lambda x: x.get("matching_passive_count", 0))
                 nm_p = nm.get("matching_passives", [])
                 if nm_p:
-                    self._log(f"    Near miss: {', '.join(nm_p)}")
+                    self._log_relic(f"    Near miss: {', '.join(nm_p)}")

@@ -144,7 +144,8 @@ class BotOverlay:
         self._sv: dict[str, tk.StringVar] = {}
         self._reset_iter_btn: tk.Label | None   = None
         self._abort_btn: tk.Label | None        = None
-        self._log_box:  tk.Text  | None         = None
+        self._log_box:        tk.Text | None = None   # process log (left panel)
+        self._relic_log_box:  tk.Text | None = None   # relic analysis log (right panel)
         self._overflow_hits_frame: tk.Frame | None = None
         self._stop_pending   = False       # True once graceful stop is requested
 
@@ -337,20 +338,46 @@ class BotOverlay:
 
         _hline(w)
 
-        # ── Log box ──────────────────────────────────────────────────── #
+        # ── Log panels — Process (left) | Relics (right) ────────────── #
         lf = tk.Frame(w, bg=_BG)
         lf.pack(fill="both", expand=True, padx=6, pady=(2, 0))
+
+        # Process panel
+        pf = tk.Frame(lf, bg=_BG)
+        pf.pack(side="left", fill="both", expand=True, padx=(0, 2))
+        tk.Label(pf, text="PROCESS", bg=_BG, fg=_DIM,
+                 font=("Consolas", 7, "bold")).pack(anchor="w")
         self._log_box = tk.Text(
-            lf, bg="#080b18", fg=_FG,
+            pf, bg="#080b18", fg=_FG,
             font=("Consolas", 7), wrap="word",
             state="disabled", relief="flat", borderwidth=0,
         )
-        sb = tk.Scrollbar(lf, orient="vertical",
-                          command=self._log_box.yview,
-                          bg=_BG, troughcolor=_SURFACE)
-        self._log_box.configure(yscrollcommand=sb.set)
+        psb = tk.Scrollbar(pf, orient="vertical",
+                           command=self._log_box.yview,
+                           bg=_BG, troughcolor=_SURFACE)
+        self._log_box.configure(yscrollcommand=psb.set)
+        psb.pack(side="right", fill="y")
         self._log_box.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+
+        # Vertical separator
+        tk.Frame(lf, bg=_SEP, width=1).pack(side="left", fill="y", pady=4)
+
+        # Relic panel
+        rf = tk.Frame(lf, bg=_BG)
+        rf.pack(side="left", fill="both", expand=True, padx=(2, 0))
+        tk.Label(rf, text="RELICS", bg=_BG, fg=_DIM,
+                 font=("Consolas", 7, "bold")).pack(anchor="w")
+        self._relic_log_box = tk.Text(
+            rf, bg="#080b18", fg=_FG,
+            font=("Consolas", 7), wrap="word",
+            state="disabled", relief="flat", borderwidth=0,
+        )
+        rsb = tk.Scrollbar(rf, orient="vertical",
+                           command=self._relic_log_box.yview,
+                           bg=_BG, troughcolor=_SURFACE)
+        self._relic_log_box.configure(yscrollcommand=rsb.set)
+        rsb.pack(side="right", fill="y")
+        self._relic_log_box.pack(side="left", fill="both", expand=True)
 
         # ── Resize grip — bottom-right corner ───────────────────────── #
         grip = tk.Label(w, text="⤡", bg=_GRIP_C, fg=_DIM,
@@ -442,13 +469,22 @@ class BotOverlay:
                     pass
 
     def append_log(self, line: str) -> None:
-        """Append one log line. Must be called from the main thread."""
+        """Append one process log line (left panel). Must be called from the main thread."""
         if not self._win or not self._log_box:
             return
         self._log_box.configure(state="normal")
         self._log_box.insert("end", line.rstrip() + "\n")
         self._log_box.see("end")
         self._log_box.configure(state="disabled")
+
+    def append_relic_log(self, line: str) -> None:
+        """Append one relic analysis line (right panel). Must be called from the main thread."""
+        if not self._win or not self._relic_log_box:
+            return
+        self._relic_log_box.configure(state="normal")
+        self._relic_log_box.insert("end", line.rstrip() + "\n")
+        self._relic_log_box.see("end")
+        self._relic_log_box.configure(state="disabled")
 
     def set_overflow_hits(self, count: int) -> None:
         """Show/update the previous-batch overflow hit counter.  Must be called from main thread."""

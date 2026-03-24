@@ -276,14 +276,19 @@ class InputPlayer:
 
         return fired, fired_keys
 
-    def play_split(self, events: list, split_after_n_keys: int, mid_pause: float,
-                   bypass_focus: bool = False, extra_delay: float = 0.0) -> tuple:
+    def play_split(self, events: list, split_after_n_keys: int, mid_pause: float = 0.0,
+                   wait_fn=None, bypass_focus: bool = False,
+                   extra_delay: float = 0.0) -> tuple:
         """
         Replay events with a mid-sequence pause after the first split_after_n_keys
         key_release events have been processed, then continue with the remainder.
 
         Use this for sequences that cross a UI transition — the pause lets the game
         finish loading before the second section of inputs fires.
+
+        mid_pause: fixed seconds to sleep between sections (used when wait_fn is None).
+        wait_fn:   optional callable; called instead of sleeping mid_pause. Use this
+                   for dynamic waits (e.g. polling OCR until a screen is ready).
 
         Returns (fired_count, fired_keys) across both sections combined.
         """
@@ -313,7 +318,10 @@ class InputPlayer:
 
             # Inject the mid-pause between sections
             if idx == _split_idx:
-                time.sleep(mid_pause)
+                if wait_fn is not None:
+                    wait_fn()
+                else:
+                    time.sleep(mid_pause)
                 prev_time = event["time"]   # reset so section-2 timing is relative
 
             delay = event["time"] - prev_time
