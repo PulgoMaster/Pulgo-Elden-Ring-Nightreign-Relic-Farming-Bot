@@ -10,6 +10,7 @@ Two modes:
 """
 
 import ctypes
+import gc
 import json
 import math
 import os
@@ -358,6 +359,32 @@ class _Tooltip:
         if self._win:
             self._win.destroy()
             self._win = None
+
+
+# ── System RAM helper (Windows only) ──────────────────────────────────────── #
+
+class _MEMORYSTATUSEX(ctypes.Structure):
+    _fields_ = [
+        ("dwLength",                ctypes.c_uint32),
+        ("dwMemoryLoad",            ctypes.c_uint32),
+        ("ullTotalPhys",            ctypes.c_uint64),
+        ("ullAvailPhys",            ctypes.c_uint64),
+        ("ullTotalPageFile",        ctypes.c_uint64),
+        ("ullAvailPageFile",        ctypes.c_uint64),
+        ("ullTotalVirtual",         ctypes.c_uint64),
+        ("ullAvailVirtual",         ctypes.c_uint64),
+        ("ullAvailExtendedVirtual", ctypes.c_uint64),
+    ]
+
+def _available_ram_mb() -> float:
+    """Return available physical RAM in MB using the Windows API (no extra deps)."""
+    try:
+        stat = _MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(stat)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+        return stat.ullAvailPhys / (1024 * 1024)
+    except Exception:
+        return 9999.0   # if the call fails, don't block
 
 
 class RelicBotApp(tk.Tk):
@@ -733,11 +760,16 @@ class RelicBotApp(tk.Tk):
         bf_chk.grid(row=4, column=0, columnspan=2, sticky="w", **pad)
         _Tooltip(bf_chk,
                  "Runs multiple OCR workers in parallel to speed up relic analysis.\n"
-                 "Each extra worker loads an additional ~100 MB of RAM for the OCR model.\n\n"
-                 "Recommended: 2–4 workers (safe for most PCs).\n"
-                 "6+ workers: use at your own discretion — very high CPU/RAM usage.\n"
-                 "Max: 8 workers.\n\n"
-                 "Leave OFF if you notice crashes or system slowdowns.")
+                 "Each worker loads its own OCR model into RAM (~200 MB each).\n"
+                 "CPU cores are shared evenly so workers don't fight each other.\n\n"
+                 "Recommended workers by system RAM:\n"
+                 "  8 GB   →  OFF (use single-threaded mode)\n"
+                 " 12 GB   →  2 workers\n"
+                 " 16 GB   →  2–3 workers\n"
+                 " 24 GB   →  4–5 workers\n"
+                 " 32 GB+  →  6–8 workers\n\n"
+                 "Workers automatically pause if RAM drops critically low.\n"
+                 "Leave OFF if you notice crashes, freezes, or system slowdowns.")
         ttk.Label(self.batch_frame, text="Workers:").grid(row=4, column=2, **pad)
         self._parallel_spin = ttk.Spinbox(
             self.batch_frame, from_=2, to=8, width=4,
@@ -746,9 +778,12 @@ class RelicBotApp(tk.Tk):
         self._parallel_spin.grid(row=4, column=3, sticky="w", **pad)
         _Tooltip(self._parallel_spin,
                  "Number of parallel OCR workers (2–8).\n"
-                 "Each worker uses ~100 MB extra RAM for its own OCR model.\n\n"
-                 "⚠ 6+ workers: use at your own discretion.\n"
-                 "Very high CPU and RAM usage — may destabilise the game or OS.")
+                 "Each worker uses ~200 MB RAM for its own OCR model.\n\n"
+                 "8 GB RAM system  →  use 1 worker (Brute Force OFF or 2 minimum)\n"
+                 "16 GB RAM system →  2–3 workers safe\n"
+                 "32 GB RAM system →  4+ workers\n\n"
+                 "⚠ 4+ workers on 8 GB: will exhaust RAM and cause crashes.\n"
+                 "Workers automatically pause when system RAM is critically low.")
         self._ram_label_var = tk.StringVar(value="")
         self._ram_label = ttk.Label(self.batch_frame, textvariable=self._ram_label_var,
                                     foreground=theme.TEXT_MUTED)
@@ -1046,8 +1081,11 @@ class RelicBotApp(tk.Tk):
         except (ValueError, tk.TclError):
             self._ram_label_var.set("")
             return
-        mb = w * 100
-        if w >= 6:
+        mb = w * 200
+        if w >= 4:
+            self._ram_label_var.set(f"~{mb} MB RAM — needs 16 GB+ ⚠")
+            self._ram_label.configure(foreground="#c0392b")
+        elif w >= 3:
             self._ram_label_var.set(f"~{mb} MB RAM ⚠")
             self._ram_label.configure(foreground="#d4a843")
         else:
@@ -1900,9 +1938,17 @@ class RelicBotApp(tk.Tk):
             _async_relic_q = queue.PriorityQueue()
             _async_workers = (max(1, min(8, self._parallel_workers_var.get()))
                               if self._parallel_enabled_var.get() else 1)
+
+            # Distribute CPU cores evenly across workers so PyTorch inferences
+            # don't oversubscribe — each worker gets cpu_cores/workers threads.
+            _cpu_cores  = os.cpu_count() or 4
+            _torch_t    = max(1, _cpu_cores // _async_workers)
+            relic_analyzer.configure_torch_threads(_torch_t)
+
             self._log(
                 f"Async Analysis enabled — {_async_workers} worker(s); "
-                "relics queued by priority across all iterations."
+                f"PyTorch threads per inference: {_torch_t} "
+                f"({_cpu_cores} CPU cores ÷ {_async_workers} workers)."
             )
 
             def _relic_worker():  # noqa: E306
@@ -1911,11 +1957,18 @@ class RelicBotApp(tk.Tk):
                     if _task is None:   # sentinel
                         _async_relic_q.task_done()
                         break
+                    # Overflow tasks embed their own state so main workers can
+                    # handle them without extra threads.
+                    _ovf = _task.pop("_ovf_state", None)
+                    _w_state, _w_lock, _w_dmap, _w_res = (
+                        _ovf if _ovf
+                        else (_async_iter_state, _async_state_lock,
+                              _async_dir_map, results)
+                    )
                     try:
                         _rt = threading.Thread(
                             target=self._analyze_relic_task,
-                            args=(_task, _async_iter_state, _async_state_lock,
-                                  _async_dir_map, results),
+                            args=(_task, _w_state, _w_lock, _w_dmap, _w_res),
                             daemon=True,
                         )
                         _rt.start()
@@ -1936,13 +1989,11 @@ class RelicBotApp(tk.Tk):
                                     f"{_task['step_i'] + 1} timed out permanently."
                                 )
                                 self._mark_relic_failed(
-                                    _task, _async_iter_state, _async_state_lock,
-                                    _async_dir_map, results)
+                                    _task, _w_state, _w_lock, _w_dmap, _w_res)
                     except Exception as _re:
                         self._log(f"ERROR in async relic worker: {_re}")
                         self._mark_relic_failed(
-                            _task, _async_iter_state, _async_state_lock,
-                            _async_dir_map, results)
+                            _task, _w_state, _w_lock, _w_dmap, _w_res)
                     finally:
                         _async_relic_q.task_done()
 
@@ -1971,55 +2022,91 @@ class RelicBotApp(tk.Tk):
                     )
 
             # ── Overflow workers for previous batch tasks ──────────────── #
-            # If the previous batch had leftover tasks when it was stopped, spawn
-            # 2 independent workers to finish them without consuming new-batch slots.
+            # Default: 2 dedicated overflow workers (independent threads).
+            # RAM-sensitive: if free RAM < 1 GB, skip dedicated workers entirely
+            # and route tasks directly through the main worker queue instead —
+            # no extra threads or model instances are loaded.
+            # 1-worker mode: overflow is dropped to avoid adding pressure on an
+            # already-constrained machine.
             _ovf = self._overflow_handoff
             if _ovf is not None:
                 self._overflow_handoff = None
-                _ovf_q = queue.PriorityQueue()
-                for _oi in _ovf["tasks"]:
-                    _ovf_q.put(_oi)
-                for _ in range(2):
-                    _ovf_q.put(((float("inf"), float("inf")), None))
+                _ovf_ram_mb = _available_ram_mb()
+                _use_dedicated_ovf = _ovf_ram_mb >= 1000 or _async_workers < 2
 
-                def _overflow_worker(
-                    _oq=_ovf_q,
-                    _ois=_ovf["iter_state"],
-                    _ol=_ovf["lock"],
-                    _odm=_ovf["dir_map"],
-                    _or=_ovf["results"],
-                ):
-                    while True:
-                        _prio, _task = _oq.get()
-                        if _task is None:
-                            _oq.task_done()
-                            break
-                        try:
-                            _rt = threading.Thread(
-                                target=self._analyze_relic_task,
-                                args=(_task, _ois, _ol, _odm, _or),
-                                daemon=True,
-                            )
-                            _rt.start()
-                            _rt.join(timeout=_ASYNC_TASK_TIMEOUT)
-                            if _rt.is_alive():
-                                _retries = _task.get("_retries", 0)
-                                if _retries < 2:
-                                    _oq.put((_prio, {**_task, "_retries": _retries + 1}))
-                                else:
-                                    self._mark_relic_failed(
-                                        _task, _ois, _ol, _odm, _or)
-                        except Exception:
-                            self._mark_relic_failed(_task, _ois, _ol, _odm, _or)
-                        finally:
-                            _oq.task_done()
+                if _use_dedicated_ovf and _async_workers >= 2:
+                    # Plenty of RAM — spawn 2 independent overflow worker threads
+                    _ovf_q = queue.PriorityQueue()
+                    for _oi in _ovf["tasks"]:
+                        _ovf_q.put(_oi)
+                    for _ in range(2):
+                        _ovf_q.put(((float("inf"), float("inf")), None))
 
-                for _wn in range(2):
-                    threading.Thread(
-                        target=_overflow_worker, daemon=True,
-                        name=f"overflow-worker-{_wn}",
-                    ).start()
-                self._log("Overflow: 2 workers started for previous batch leftovers.")
+                    def _overflow_worker(
+                        _oq=_ovf_q,
+                        _ois=_ovf["iter_state"],
+                        _ol=_ovf["lock"],
+                        _odm=_ovf["dir_map"],
+                        _or=_ovf["results"],
+                    ):
+                        while True:
+                            _prio, _task = _oq.get()
+                            if _task is None:
+                                _oq.task_done()
+                                break
+                            try:
+                                _rt = threading.Thread(
+                                    target=self._analyze_relic_task,
+                                    args=(_task, _ois, _ol, _odm, _or),
+                                    daemon=True,
+                                )
+                                _rt.start()
+                                _rt.join(timeout=_ASYNC_TASK_TIMEOUT)
+                                if _rt.is_alive():
+                                    _retries = _task.get("_retries", 0)
+                                    if _retries < 2:
+                                        _oq.put((_prio, {**_task, "_retries": _retries + 1}))
+                                    else:
+                                        self._mark_relic_failed(
+                                            _task, _ois, _ol, _odm, _or)
+                            except Exception:
+                                self._mark_relic_failed(_task, _ois, _ol, _odm, _or)
+                            finally:
+                                _oq.task_done()
+
+                    for _wn in range(2):
+                        threading.Thread(
+                            target=_overflow_worker, daemon=True,
+                            name=f"overflow-worker-{_wn}",
+                        ).start()
+                    self._log("Overflow: 2 dedicated workers started for previous batch leftovers.")
+
+                elif _async_workers >= 2:
+                    # RAM is low — route overflow tasks through main worker queue.
+                    # Embeds the previous batch's state in each task so main workers
+                    # can resolve them without loading extra OCR model instances.
+                    _ois = _ovf["iter_state"]
+                    _ol  = _ovf["lock"]
+                    _odm = _ovf["dir_map"]
+                    _or  = _ovf["results"]
+                    _n_routed = 0
+                    for _prio, _task in _ovf["tasks"]:
+                        if _task is not None:
+                            _task["_ovf_state"] = (_ois, _ol, _odm, _or)
+                            _async_relic_q.put((_prio, _task))
+                            _n_routed += 1
+                    self._log(
+                        f"Overflow: RAM low ({_ovf_ram_mb:.0f} MB free) — "
+                        f"{_n_routed} leftover task(s) routed to main workers "
+                        f"(no extra threads spawned)."
+                    )
+
+                else:
+                    # 1 worker + low RAM — skip overflow to avoid extra pressure.
+                    self._log(
+                        f"Overflow: RAM low ({_ovf_ram_mb:.0f} MB free) and only "
+                        f"1 main worker — previous batch leftovers dropped."
+                    )
 
         _MAX_RESTARTS           = 3    # abort after this many hung-game restarts on same iteration
         _MAX_P0_ITER_RESTARTS   = 3    # abort if Phase 0 fails this many restarts of same iteration
@@ -2685,6 +2772,8 @@ class RelicBotApp(tk.Tk):
         iteration     = task["iteration"]
         step_i        = task["step_i"]
         img_bytes     = task["img_bytes"]
+        task["img_bytes"] = None   # release from queue task dict immediately — don't hold
+                                   # two copies of the screenshot while OCR is running
         pending_path  = task["pending_path"]
         iter_dir      = task["iter_dir"]
         criteria      = task["criteria"]
@@ -2692,13 +2781,33 @@ class RelicBotApp(tk.Tk):
         live_log_path = task["live_log_path"]
         is_current_batch = task.get("batch_id") == self._current_batch_id
 
+        # Memory pressure gate: if available RAM is critically low, hold off until
+        # it recovers. The game loading during iteration N+1 can consume several GB
+        # which leaves PyTorch/EasyOCR unable to allocate even small tensors.
+        _MEM_THRESHOLD_MB = 400
+        _mem_wait_logged  = False
+        while _available_ram_mb() < _MEM_THRESHOLD_MB:
+            if not self.bot_running:
+                return
+            if not _mem_wait_logged:
+                self._log(
+                    f"  [Worker] Low RAM — pausing OCR for relic {step_i + 1} "
+                    f"(iter {iteration}) until memory recovers…", overlay=False)
+                _mem_wait_logged = True
+            time.sleep(1.0)
+
         try:
             result = relic_analyzer.analyze(img_bytes, criteria)
         except Exception as exc:
             if is_current_batch:
                 self._log(f"  [Async iter {iteration}] ERROR relic {step_i + 1}: {exc}")
             self._mark_relic_failed(task, iter_state, lock, dir_map, results)
+            img_bytes = None
+            gc.collect()
             return
+        finally:
+            img_bytes = None   # release screenshot bytes as soon as OCR is done
+            gc.collect()       # prompt Python to return freed memory to the OS promptly
 
         if pending_path and os.path.exists(pending_path):
             try:
@@ -2708,7 +2817,6 @@ class RelicBotApp(tk.Tk):
 
         # Route per-relic log output: current batch → UI panel; old batch → its own run_log
         if is_current_batch:
-            self._log(f"  [Async iter {iteration}] Relic {step_i + 1}:")
             self._log_result(result)
             time.sleep(0.05)
         else:
@@ -2745,7 +2853,7 @@ class RelicBotApp(tk.Tk):
                     with open(os.path.join(iter_dir, saved_fname), "wb") as _f:
                         _f.write(img_bytes)
                     if is_current_batch:
-                        self._log(f"  Screenshot saved: {saved_fname}")
+                        self._log(f"  Screenshot saved: {saved_fname}", overlay=False)
                 except Exception as _e:
                     if is_current_batch:
                         self._log(f"WARNING: could not save screenshot: {_e}")
@@ -2792,6 +2900,12 @@ class RelicBotApp(tk.Tk):
                 self.after(0, lambda at33=at33, at23=at23, atd=atd, tot=tot:
                            ov.update(at_33=at33, at_23=at23, at_duds=atd, stored=tot)
                            if ov._win else None)
+            if r_g3 > 0:
+                self._log(
+                    f"★★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 3/3")
+            elif r_g2 > 0:
+                self._log(
+                    f"★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 2/3")
 
         with lock:
             istate = iter_state.get(iteration)
@@ -3630,7 +3744,6 @@ class RelicBotApp(tk.Tk):
                         _t.join(timeout=1.0)
                     return None
 
-                self._log(f"  [{label}] Relic {step_i + 1}:")
                 self._log_result(result)
                 time.sleep(0.05)   # let the main thread render the log line
 
@@ -3650,7 +3763,7 @@ class RelicBotApp(tk.Tk):
                         try:
                             with open(os.path.join(iter_dir, saved_fname), "wb") as _f:
                                 _f.write(img)
-                            self._log(f"  Screenshot saved: {saved_fname}")
+                            self._log(f"  Screenshot saved: {saved_fname}", overlay=False)
                         except Exception as _e:
                             self._log(f"WARNING: could not save screenshot: {_e}")
                             saved_fname = ""
@@ -3685,6 +3798,12 @@ class RelicBotApp(tk.Tk):
                 self._ov_duds         += r_dud
                 self._ov_at_duds      += r_dud
                 self._ov_total_relics += r_g3 + r_g2 + r_dud
+                if r_g3 > 0:
+                    self._log(
+                        f"★★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 3/3")
+                elif r_g2 > 0:
+                    self._log(
+                        f"★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 2/3")
                 # Track per-iteration contributions for rollback on reset
                 if iteration:
                     with self._iter_contrib_lock:
@@ -3995,7 +4114,7 @@ class RelicBotApp(tk.Tk):
             self.status_label.config(foreground=color)
         self.after(0, _apply)
 
-    def _log(self, message: str):
+    def _log(self, message: str, overlay: bool = True):
         timestamp = time.strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}\n"
         def _write():
@@ -4003,7 +4122,7 @@ class RelicBotApp(tk.Tk):
             self.log_box.insert("end", line)
             self.log_box.see("end")
             self.log_box.config(state="disabled")
-            if self._overlay:
+            if overlay and self._overlay:
                 self._overlay.append_log(line.rstrip())
         self.after(0, _write)
         if self._batch_log_path:

@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.4.2] – 2026-03-24
+
+### Fixed
+- **RAM exhaustion prevention** — async OCR workers now check free system RAM before each inference call. If available RAM drops below 400 MB, the worker sleeps and retries until memory recovers. Prevents PyTorch OOM crashes on machines where the game's memory footprint spikes during loading.
+- **Screenshot bytes released immediately** — each worker task's screenshot reference is cleared as soon as the worker picks it up, rather than being held until after analysis completes.
+- **Forced GC after every OCR call** — `gc.collect()` runs after each inference so Python returns freed objects and tensor memory to the OS promptly instead of accumulating in the heap.
+- **CPU oversubscription fixed** — PyTorch defaults to using all CPU cores per inference. With multiple workers this causes severe thread contention. Workers now share cores evenly: `torch.set_num_threads(cpu_cores / workers)` is applied before any worker starts.
+- **Overflow workers adaptive to RAM** — dedicated overflow threads are only spawned when free RAM ≥ 1 GB. On constrained machines, leftover tasks from the previous batch are routed directly through main workers (no extra model instances loaded). With 1 worker + low RAM, overflow is dropped to avoid destabilising the host.
+- **Sell value misread as relic name** — OCR was picking up the sell price (e.g. "620 /") as the relic's name because it was the first high-confidence token in the panel. Tokens that start with a digit are now skipped during name extraction.
+
+### Changed
+- **Overlay process log cleaned up** — per-relic `"[Async iter X] Relic Y:"` header lines removed from the overlay and run_log (detail is already in live_log via `_log_result`). Screenshot saved lines also suppressed from overlay.
+- **Per-relic match notifications in overlay** — when a relic is confirmed as a match, the overlay immediately shows `"★★★ Match Found! Iter X · Relic Y — 3/3"` or `"★★ Match Found! … — 2/3"` without flooding the log with passive lists.
+- **Worker RAM warnings updated** — estimate corrected to ~200 MB per worker (was 100 MB). Label turns red at 4+ workers with "needs 16 GB+". Brute Force tooltip now includes a recommendation chart (8 GB → off, 12 GB → 2 workers, 16 GB → 2–3, 24 GB → 4–5, 32 GB+ → 6–8).
+
+---
+
 ## [1.4.1] – 2026-03-24
 
 ### Fixed

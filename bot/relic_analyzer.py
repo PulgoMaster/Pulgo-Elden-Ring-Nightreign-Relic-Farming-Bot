@@ -23,12 +23,35 @@ from PIL import Image
 # The model is loaded lazily on the first call from each thread (~2-3 s
 # one-time cost; subsequent calls on the same thread are instant).
 
-_thread_local = threading.local()
+_thread_local   = threading.local()
+_torch_threads  = 1   # set via configure_torch_threads() before workers start
+
+
+def configure_torch_threads(n: int) -> None:
+    """Set PyTorch's per-inference CPU thread count for all subsequent calls.
+
+    With multiple workers each defaulting to all available cores, threads
+    fight each other (oversubscription).  Setting this to cpu_cores/workers
+    distributes cores evenly so workers run in parallel without contention.
+    Call once from the main thread before spawning async workers.
+    """
+    global _torch_threads
+    _torch_threads = max(1, n)
+    try:
+        import torch
+        torch.set_num_threads(_torch_threads)
+    except Exception:
+        pass
 
 
 def _get_reader():
     """Return the EasyOCR reader for the calling thread, loading it if needed."""
     if not hasattr(_thread_local, "reader"):
+        try:
+            import torch
+            torch.set_num_threads(_torch_threads)
+        except Exception:
+            pass
         import easyocr
         _thread_local.reader = easyocr.Reader(["en"], gpu=False, verbose=False)
     return _thread_local.reader
@@ -374,7 +397,8 @@ def analyze(image_bytes: bytes, criteria: dict) -> dict:
             else:
                 if matched not in passives:
                     passives.append(matched)
-        elif relic_name is None and conf > 0.55 and color != "curse":
+        elif relic_name is None and conf > 0.55 and color != "curse" \
+                and not text.strip()[0].isdigit():
             relic_name = text.strip()
 
     relic_name = relic_name or "Unknown Relic"
