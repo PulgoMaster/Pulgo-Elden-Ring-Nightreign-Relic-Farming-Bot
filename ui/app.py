@@ -3059,23 +3059,56 @@ class RelicBotApp(tk.Tk):
             return relic_results   # all retry attempts exhausted without completion
 
         # ── Phase 2: Relic Rites Nav (Esc → M → down arrows → F) ───────── #
+        # On input mismatch: ESC recovery → re-run Phase 0 → skip Phase 1
+        # (Phase 1 already succeeded) → re-run Phase 2. Up to 3 attempts total.
+        # Phase 1 skip is exclusive to this recovery path — it never skips otherwise.
         _p2_expected      = sum(1 for e in self.phase_events[2] if e["type"] == "key_press")
         _p2_expected_keys = [e["key"] for e in self.phase_events[2] if e["type"] == "key_press"]
-        time.sleep(1.5)   # inter-phase buffer
-        if self.phase_events[2]:
-            self._set_status(f"{label}: navigating to Relic Rites menu…", "green")
+        _P2_MAX_ATTEMPTS  = 3
+        for _p2_att in range(_P2_MAX_ATTEMPTS):
+            if not self.bot_running or self._reset_iter_requested:
+                return relic_results
+
+            # On retry: ESC recovery → Phase 0 (skip Phase 1 — already done) → Phase 2
+            if _p2_att > 0:
+                self._log(f"  Phase 2 retry {_p2_att}/{_P2_MAX_ATTEMPTS - 1}: ESC recovery → Phase 0 → Phase 2…")
+                self._esc_to_game_screen(region)
+                if not self.bot_running or self._reset_iter_requested:
+                    return relic_results
+                if self.phase_events[0]:
+                    if _p0_exe:
+                        self._focus_game_window(_p0_exe, timeout=3.0)
+                    if not self.bot_running or self._reset_iter_requested:
+                        return relic_results
+                    self.player.play(self.phase_events[0], bypass_focus=True, extra_delay=0.25)
+                    if not self.bot_running or self._reset_iter_requested:
+                        return relic_results
+                time.sleep(1.5)   # inter-phase buffer before Phase 2
+                if not self.bot_running or self._reset_iter_requested:
+                    return relic_results
+            else:
+                time.sleep(1.5)   # normal inter-phase buffer
+
+            if not self.phase_events[2]:
+                break
+
+            attempt_label = (f" (attempt {_p2_att + 1}/{_P2_MAX_ATTEMPTS})" if _p2_att > 0 else "")
+            self._set_status(f"{label}: navigating to Relic Rites menu{attempt_label}…", "green")
             _p2_sent, _p2_sent_keys = self.player.play(self.phase_events[2], extra_delay=0.25)
             if not self.bot_running or self._reset_iter_requested:
                 return relic_results
-            # Log any input mismatch so it's visible in the run log
+
             _p2_count_ok = (_p2_sent == _p2_expected)
             _p2_seq_ok   = (_p2_sent_keys == _p2_expected_keys)
             if not _p2_count_ok or not _p2_seq_ok:
-                if not _p2_count_ok:
-                    _p2_desc = f"count {_p2_sent}/{_p2_expected}"
-                else:
-                    _p2_desc = "sequence mismatch"
-                self._log(f"  WARNING: Phase 2 input validation failed ({_p2_desc}) — Phase 3 fallback will attempt recovery.")
+                _p2_desc = (f"count {_p2_sent}/{_p2_expected}" if not _p2_count_ok
+                            else "sequence mismatch")
+                self._log(f"  Phase 2: input validation failed ({_p2_desc}) — recovering and retrying.")
+                # Reset tracking vars so stale values can't carry over to next attempt
+                _p2_sent = 0
+                _p2_sent_keys = []
+                continue
+            break   # Phase 2 succeeded
 
         # ── Phase 3: Navigate to Sell (smart tab detection + targeted F2) ─ #
         # Runs whenever Phase 2 (Relic Rites Nav) is configured.
