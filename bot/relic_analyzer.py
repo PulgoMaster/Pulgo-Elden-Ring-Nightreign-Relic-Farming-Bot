@@ -485,6 +485,59 @@ def check_text_visible(image_bytes: bytes, text: str, top_fraction: float = 0.50
     return text.lower() in all_text
 
 
+def verify_shop_item(image_bytes: bytes, relic_type: str) -> tuple:
+    """
+    Confirm the highlighted shop item is the correct relic before Phase 1 runs.
+
+    The tooltip panel sits in the horizontal middle third of the shop screen
+    (approximately 33 %–67 % of width, top 65 % of height).  OCR-ing only
+    that region avoids interference from the item grid on the left and the
+    character model on the right.
+
+    Checks:
+      1. Correct item name is present in the tooltip.
+           night  → "Deep Scenic Flatstone"
+           normal → "Scenic Flatstone" (not the Deep variant)
+      2. Old-version marker is absent ("1.02" from the N.B. note that reads
+         "Yields items from up to ver. 1.02 of the game.").
+
+    Returns:
+        (True,  "OK")         correct relic, no old-version marker.
+        (False, reason_str)   wrong item, old-version relic, or inconclusive.
+    """
+    reader = _get_reader()
+    img = _to_array(image_bytes, max_width=0)
+    h, w = img.shape[:2]
+
+    # Middle horizontal third, top 65 % — isolates the tooltip panel.
+    roi = img[:int(h * 0.65), int(w * 0.33):int(w * 0.67)]
+    results = reader.readtext(roi)
+    all_text = " ".join(t for _, t, c in results if c > 0.25).lower()
+
+    # ── Old-version check (applies to both modes) ──────────────────────── #
+    if "1.02" in all_text:
+        return False, "Old-version relic detected ('1.02' in tooltip)"
+
+    # ── Item name check ────────────────────────────────────────────────── #
+    _has_deep_scenic = "deep scenic" in all_text
+    _has_scenic      = "scenic"      in all_text
+
+    if relic_type == "night":
+        if _has_deep_scenic:
+            return True, "OK"
+        if _has_scenic:
+            # "scenic" found but "deep" not present — normal relic, wrong mode
+            return False, "Normal relic (Scenic Flatstone) highlighted but night mode is active"
+        return False, f"'Deep Scenic Flatstone' not found in tooltip — inconclusive OCR"
+    else:
+        # Normal mode: Scenic Flatstone (not Deep variant)
+        if _has_deep_scenic:
+            return False, "Night relic (Deep Scenic Flatstone) highlighted but normal mode is active"
+        if _has_scenic:
+            return True, "OK"
+        return False, f"'Scenic Flatstone' not found in tooltip — inconclusive OCR"
+
+
 def check_condition(image_bytes: bytes, condition_text: str) -> bool:
     """
     Check whether the given text is visible anywhere on screen using OCR.

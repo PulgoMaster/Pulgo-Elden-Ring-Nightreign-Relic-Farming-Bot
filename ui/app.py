@@ -400,6 +400,10 @@ class RelicBotApp(tk.Tk):
         # Manual iteration reset (user-triggered soft nuke from overlay)
         self._reset_iter_requested = False
 
+        # Elapsed seconds from game window focus to equipment-menu confirmation,
+        # recorded by the adaptive load wait. Used to scale Phase 0 shop wait.
+        self._last_load_elapsed: float = 45.0
+
         # Backup/startup ready event
         self._ready_event = threading.Event()
 
@@ -511,12 +515,6 @@ class RelicBotApp(tk.Tk):
         self.game_exe_var = tk.StringVar()
         ttk.Entry(save_frame, textvariable=self.game_exe_var, width=52).grid(row=2, column=1, **pad)
         ttk.Button(save_frame, text="Browse", command=self._browse_game_exe).grid(row=2, column=2, **pad)
-
-        ttk.Label(save_frame, text="Game load wait (s):").grid(row=3, column=0, sticky="w", **pad)
-        self.game_load_wait_var = tk.StringVar(value="30")
-        _glw_entry = ttk.Entry(save_frame, textvariable=self.game_load_wait_var, width=7)
-        _glw_entry.grid(row=3, column=1, sticky="w", **pad)
-        _Tooltip(_glw_entry, "Seconds to wait after launch before sending inputs.\nAdjust in small increments based on your PC speed — lower if the game loads fast, higher if inputs arrive too early.")
 
         ttk.Label(save_frame, text="Confirm key:").grid(row=4, column=0, sticky="w", **pad)
         self.confirm_key_var = tk.StringVar(value="f")
@@ -1076,7 +1074,6 @@ class RelicBotApp(tk.Tk):
             "save_path": self.save_path_var.get(),
             "backup_folder": self.backup_path_var.get(),
             "game_executable": self.game_exe_var.get(),
-            "game_load_wait": self.game_load_wait_var.get(),
             "game_close_buffer": self.game_close_buffer_var.get(),
             "confirm_key": self.confirm_key_var.get(),
             "batch_limit_type": self.batch_limit_type.get(),
@@ -1105,7 +1102,6 @@ class RelicBotApp(tk.Tk):
         self.save_path_var.set(data.get("save_path", ""))
         self.backup_path_var.set(data.get("backup_folder", _default_backup))
         self.game_exe_var.set(data.get("game_executable", ""))
-        self.game_load_wait_var.set(str(data.get("game_load_wait", "30")))
         self.game_close_buffer_var.set(str(data.get("game_close_buffer", "4")))
         self.confirm_key_var.set(data.get("confirm_key", "e"))
         self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
@@ -1368,59 +1364,80 @@ class RelicBotApp(tk.Tk):
         self._log("[Recovery] Could not find Equipment menu within 30 s — aborting.")
         return False
 
-    def _confirm_in_game(self, region, exe_name: str) -> bool:
-        """Phase -0.5: verify the game has loaded past the title screen into the
-        game world before Phase 0 begins.
+    def _confirm_in_game(self, region, exe_name: str) -> tuple:
+        """Phase -0.5: adaptive game-load wait and in-game confirmation.
 
-        Presses ESC repeatedly (up to 10 s per attempt) and checks for the
-        Equipment menu tab via OCR. Presence of the Equipment tab confirms the
-        game world is active. On confirmation, one final ESC dismisses the menu
-        and leaves the bot in a neutral in-game state ready for Phase 0.
+        Replaces the fixed Game Load Time wait. Each cycle:
+          1. Spam F for 9 s at 0.15 s intervals (~60 presses) to advance through
+             all title/splash/offline screens.
+          2. Wait 1 s to let the game settle.
+          3. Press ESC.
+          4. Wait 1 s then OCR-check for the Equipment menu.
+          5. If found: press ESC once to exit the menu, wait 2.5 s, return.
+          6. If not found: repeat from step 1.
 
-        If Equipment is not found in 10 s, presses F for 10 s (0.5 s interval)
-        to advance through the title screen, then retries the ESC check.
-        Up to 3 full ESC-check cycles. Returns False if all cycles fail.
+        Hard timeout: 90 s. Returns (True, elapsed_seconds) on success,
+        (False, 0.0) on timeout.
         """
-        _MAX_CYCLES = 3
-        for _cycle in range(_MAX_CYCLES):
-            self._log(
-                f"[Phase -0.5] Confirming in-game state "
-                f"(cycle {_cycle + 1}/{_MAX_CYCLES})…")
-            _esc_deadline = time.time() + 10
-            while time.time() < _esc_deadline:
-                if not self.bot_running:
-                    return False
-                self.player.tap("Key.esc")
-                time.sleep(0.5)
-                try:
-                    _img = screen_capture.capture(region)
-                    if relic_analyzer.check_text_visible(_img, "equipment"):
-                        self._log("[Phase -0.5] Equipment menu detected — in-game confirmed.")
-                        time.sleep(0.2)
-                        self.player.tap("Key.esc")
-                        time.sleep(2.5)   # wait for menu to fully close before Phase 0
-                        return True
-                except Exception as _ce:
-                    self._log(f"[Phase -0.5] OCR error: {_ce}")
+        _F_BURST    = 9.0    # seconds of F spam per cycle
+        _F_INTERVAL = 0.15   # gap between F presses (seconds)
+        _PRE_ESC    = 1.0    # settle after F burst before pressing ESC
+        _POST_ESC   = 1.0    # settle after ESC before OCR check
+        _MAX_WAIT   = 90.0   # hard timeout (seconds)
 
-            # ESC check timed out — press F to advance through title screen
-            if _cycle < _MAX_CYCLES - 1:
+        _start = time.time()
+        _cycle = 0
+
+        if exe_name:
+            self._focus_game_window(exe_name, timeout=2.0)
+
+        self._log("[Phase -0.5] Adaptive load wait — watching for in-game state…")
+
+        while True:
+            if not self.bot_running:
+                return False, 0.0
+
+            _elapsed = time.time() - _start
+            if _elapsed >= _MAX_WAIT:
                 self._log(
-                    "[Phase -0.5] Equipment menu not found — "
-                    "pressing F for 10 s to advance through title screen.")
-                _f_deadline = time.time() + 10
-                _f_focused  = self._focus_game_window(exe_name) if exe_name else False
-                while time.time() < _f_deadline:
-                    if not self.bot_running:
-                        return False
-                    if _f_focused:
-                        self.player.tap("f")
-                    time.sleep(0.5)
-                    if not _f_focused and exe_name:
-                        _f_focused = self._focus_game_window(exe_name, timeout=1.0)
+                    "[Phase -0.5] Could not confirm in-game state within 90 s — aborting.")
+                return False, 0.0
 
-        self._log("[Phase -0.5] Could not confirm in-game state after 3 cycles — aborting.")
-        return False
+            _cycle += 1
+            self._set_status(
+                f"Adaptive load wait — cycle {_cycle}…", "orange")
+
+            # ── F-spam burst ──────────────────────────────────────────── #
+            _burst_end = time.time() + _F_BURST
+            while time.time() < _burst_end:
+                if not self.bot_running:
+                    return False, 0.0
+                self.player.tap("f", hold=0.05)
+                time.sleep(_F_INTERVAL)
+
+            # ── Settle → ESC → settle → OCR ──────────────────────────── #
+            time.sleep(_PRE_ESC)
+            if not self.bot_running:
+                return False, 0.0
+
+            self.player.tap("Key.esc")
+            time.sleep(_POST_ESC)
+            if not self.bot_running:
+                return False, 0.0
+
+            try:
+                _img = screen_capture.capture(region)
+                if relic_analyzer.check_text_visible(_img, "equipment"):
+                    _elapsed = time.time() - _start
+                    self._log(
+                        f"[Phase -0.5] Equipment menu detected — in-game confirmed "
+                        f"({_elapsed:.1f} s after window focus).")
+                    time.sleep(0.2)
+                    self.player.tap("Key.esc")
+                    time.sleep(2.5)   # wait for menu to fully close before Phase 0
+                    return True, _elapsed
+            except Exception as _ce:
+                self._log(f"[Phase -0.5] OCR error: {_ce}")
 
     def _game_watchdog(self):
         """Background thread: polls for a hung game window every 5 s.
@@ -1651,14 +1668,8 @@ class RelicBotApp(tk.Tk):
         dlg.protocol("WM_DELETE_WINDOW", lambda: (listener.stop(), dlg.destroy()))
 
     def _request_reset_iter(self):
-        """Overlay Reset Iteration button: confirm then signal the batch loop to soft-nuke this iteration."""
+        """Overlay Reset Iteration button: signal the batch loop to soft-nuke this iteration."""
         if not self.bot_running:
-            return
-        if not messagebox.askyesno(
-            "Reset Iteration",
-            "Close the game, delete this iteration's folder, restore the save, and re-run this iteration?",
-            parent=self,
-        ):
             return
         self._reset_iter_requested = True
         self.player.stop()   # interrupt any ongoing play() so the phase exits quickly
@@ -1799,7 +1810,6 @@ class RelicBotApp(tk.Tk):
         limit_value = float(self.batch_limit_var.get())
         mode_desc = "loops" if limit_type == "loops" else "hours"
         base_output = self.batch_output_var.get()
-        load_wait = float(self.game_load_wait_var.get())
         # Minimum passive count for a result to be labelled a "HIT" tier.
         # If the user's criteria requires all 3 passives, 2/3 near-misses are
         # not counted as hits and won't get a HIT folder or ★★ log message.
@@ -2090,27 +2100,11 @@ class RelicBotApp(tk.Tk):
                 self.after(0, self._reset_controls)
                 return
 
-            # Game window confirmed — start load wait timer now.
-            self._log(f"Game window focused. Waiting {load_wait}s for game to load (spamming confirm key)…")
-            self._set_status(f"Iteration {iteration}: loading game…", "orange")
-            for i in range(int(load_wait * 2)):
-                if not self.bot_running:
-                    self.after(0, self._reset_controls)
-                    return
-                if i % 10 == 0 and exe_name:
-                    _game_focused = self._focus_game_window(exe_name, timeout=1.0)
-                    if _game_focused:
-                        self.player.tap("f")
-                if _game_focused:
-                    self.player.tap(confirm_key)
-                time.sleep(0.45)
-
-            # ── Phase -0.5: Confirm in-game state before Phase 0 ────────── #
-            # Verifies the game has loaded past the title screen into the game
-            # world using ESC → Equipment menu detection. Prevents Phase 0 from
-            # firing on the wrong screen.
-            self._set_status(f"Iteration {iteration}: confirming in-game state…", "orange")
-            if not self._confirm_in_game(region, exe_name):
+            # Game window confirmed — begin adaptive load wait (Phase -0.5).
+            self._log("Game window focused — starting adaptive load wait…")
+            _in_game_ok, _load_elapsed = self._confirm_in_game(region, exe_name)
+            self._last_load_elapsed = _load_elapsed
+            if not _in_game_ok:
                 _iter_restart_count += 1
                 self._log(
                     f"[Phase -0.5] In-game confirmation failed "
@@ -2919,7 +2913,11 @@ class RelicBotApp(tk.Tk):
             time.sleep(1.0)
             if not self.bot_running or self._reset_iter_requested:
                 return
-            _deadline = time.time() + 29   # 1 s already spent on settle
+            # Scale the shop-detection window with the observed game load time:
+            # faster machines get a shorter window; slower machines more time.
+            # Min 35 s, max 70 s, scaled at 60% of last load elapsed time.
+            _shop_secs = max(35, min(70, round(self._last_load_elapsed * 0.6)))
+            _deadline = time.time() + _shop_secs - 1   # 1 s already spent on settle
             while time.time() < _deadline:
                 if not self.bot_running or self._reset_iter_requested:
                     return
@@ -2932,7 +2930,7 @@ class RelicBotApp(tk.Tk):
                 except Exception:
                     pass
                 time.sleep(0.5)
-            self._log("  WARNING: Shop screen not detected within 30 s.")
+            self._log(f"  WARNING: Shop screen not detected within {_shop_secs} s.")
 
         # ── Phase 0 + Murk read + Phase 1 — with retry loop ────────────── #
         # Wrapped in a retry loop: if Phase 0 input count is short (play was
@@ -2965,19 +2963,42 @@ class RelicBotApp(tk.Tk):
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
 
-                # Validate input count, key sequence, AND shop screen detection.
+                # Validate input count, key sequence, shop screen detection,
+                # AND highlighted item identity.
                 # Shop detection is the real gate — pynput always succeeds at the OS
                 # level regardless of whether the game processed the inputs.
                 _p0_count_ok = (_p0_sent == _p0_expected)
                 _p0_seq_ok   = (_p0_sent_keys == _p0_expected_keys)
                 _p0_shop_ok  = _shop_found[0]
-                if not _p0_count_ok or not _p0_seq_ok or not _p0_shop_ok:
+
+                # Item verification: OCR the tooltip in the middle horizontal
+                # third of the screen to confirm the cursor landed on the correct
+                # relic and that it is not the old-version (1.02) variant.
+                _p0_item_ok     = True
+                _p0_item_reason = ""
+                if _p0_count_ok and _p0_seq_ok and _p0_shop_ok:
+                    try:
+                        _item_img = screen_capture.capture(region)
+                        _p0_item_ok, _p0_item_reason = relic_analyzer.verify_shop_item(
+                            _item_img, self.relic_type_var.get())
+                        if _p0_item_ok:
+                            self._log(f"  Phase 0: shop item verified — {_p0_item_reason}.")
+                        else:
+                            self._log(
+                                f"  Phase 0: shop item check FAILED — {_p0_item_reason}.")
+                    except Exception as _p0ie:
+                        self._log(f"  Phase 0: shop item check error: {_p0ie} — proceeding.")
+                        _p0_item_ok = True   # don't block on OCR error
+
+                if not _p0_count_ok or not _p0_seq_ok or not _p0_shop_ok or not _p0_item_ok:
                     if not _p0_count_ok:
                         _mismatch_desc = f"count {_p0_sent}/{_p0_expected}"
                     elif not _p0_seq_ok:
                         _mismatch_desc = "sequence mismatch"
-                    else:
+                    elif not _p0_shop_ok:
                         _mismatch_desc = "shop screen not detected"
+                    else:
+                        _mismatch_desc = f"wrong shop item ({_p0_item_reason})"
                     self._log(
                         f"  Phase 0: validation failed ({_mismatch_desc}) "
                         f"— ESC recovery and retry.")
@@ -2988,7 +3009,7 @@ class RelicBotApp(tk.Tk):
                         self._esc_to_game_screen(region)
                         continue
                     else:
-                        self._log("  Phase 0 failed 3 times — aborting iteration.")
+                        self._log("  Phase 0 failed 3 times — skipping iteration.")
                         self._close_game()
                         try:
                             save_manager.restore(
@@ -2997,7 +3018,7 @@ class RelicBotApp(tk.Tk):
                                              os.path.basename(self.save_path_var.get())))
                         except Exception:
                             pass
-                        return None
+                        return relic_results
 
             # ── Murk read — calculates buy count ───────────────────────── #
             if self.phase_events[1] and self.phase_events[4]:
@@ -3630,11 +3651,6 @@ class RelicBotApp(tk.Tk):
         if not self.game_exe_var.get().strip():
             messagebox.showwarning("No Game Executable",
                 "Set the game executable path so the bot can close the game.")
-            return False
-        try:
-            float(self.game_load_wait_var.get())
-        except ValueError:
-            messagebox.showwarning("Invalid Load Wait", "Game load wait must be a number.")
             return False
         try:
             float(self.game_close_buffer_var.get())
