@@ -86,10 +86,10 @@ _RESET_C = "#1a3a5c"   # reset iteration button colour
 _WARN_C  = "#ff8800"
 _GRIP_C  = "#3a3d5c"   # resize grip colour
 
-_MIN_W = 340
-_MIN_H = 380
-_DEF_W = 500
-_DEF_H = 620
+_MIN_W = 480
+_MIN_H = 480
+_DEF_W = 720
+_DEF_H = 800
 
 
 # ── Tooltip helper ────────────────────────────────────────────────── #
@@ -339,14 +339,20 @@ class BotOverlay:
         _hline(w)
 
         # ── Log panels — Process (left) | Relics (right) ────────────── #
+        # Grid with equal column weights guarantees a true 50/50 split.
         lf = tk.Frame(w, bg=_BG)
         lf.pack(fill="both", expand=True, padx=6, pady=(2, 0))
+        lf.columnconfigure(0, weight=1, uniform="logcol")
+        lf.columnconfigure(1, weight=1, uniform="logcol")
+        lf.rowconfigure(0, weight=1)
 
         # Process panel
         pf = tk.Frame(lf, bg=_BG)
-        pf.pack(side="left", fill="both", expand=True, padx=(0, 2))
+        pf.grid(row=0, column=0, sticky="nsew", padx=(0, 1))
+        pf.columnconfigure(0, weight=1)
+        pf.rowconfigure(1, weight=1)
         tk.Label(pf, text="PROCESS", bg=_BG, fg=_DIM,
-                 font=("Consolas", 7, "bold")).pack(anchor="w")
+                 font=("Consolas", 7, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
         self._log_box = tk.Text(
             pf, bg="#080b18", fg=_FG,
             font=("Consolas", 7), wrap="word",
@@ -356,17 +362,19 @@ class BotOverlay:
                            command=self._log_box.yview,
                            bg=_BG, troughcolor=_SURFACE)
         self._log_box.configure(yscrollcommand=psb.set)
-        psb.pack(side="right", fill="y")
-        self._log_box.pack(side="left", fill="both", expand=True)
+        self._log_box.grid(row=1, column=0, sticky="nsew")
+        psb.grid(row=1, column=1, sticky="ns")
 
         # Vertical separator
-        tk.Frame(lf, bg=_SEP, width=1).pack(side="left", fill="y", pady=4)
+        tk.Frame(lf, bg=_SEP, width=1).grid(row=0, column=0, sticky="nse", pady=4)
 
         # Relic panel
         rf = tk.Frame(lf, bg=_BG)
-        rf.pack(side="left", fill="both", expand=True, padx=(2, 0))
+        rf.grid(row=0, column=1, sticky="nsew", padx=(1, 0))
+        rf.columnconfigure(0, weight=1)
+        rf.rowconfigure(1, weight=1)
         tk.Label(rf, text="RELICS", bg=_BG, fg=_DIM,
-                 font=("Consolas", 7, "bold")).pack(anchor="w")
+                 font=("Consolas", 7, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
         self._relic_log_box = tk.Text(
             rf, bg="#080b18", fg=_FG,
             font=("Consolas", 7), wrap="word",
@@ -376,8 +384,8 @@ class BotOverlay:
                            command=self._relic_log_box.yview,
                            bg=_BG, troughcolor=_SURFACE)
         self._relic_log_box.configure(yscrollcommand=rsb.set)
-        rsb.pack(side="right", fill="y")
-        self._relic_log_box.pack(side="left", fill="both", expand=True)
+        self._relic_log_box.grid(row=1, column=0, sticky="nsew")
+        rsb.grid(row=1, column=1, sticky="ns")
 
         # ── Resize grip — bottom-right corner ───────────────────────── #
         grip = tk.Label(w, text="⤡", bg=_GRIP_C, fg=_DIM,

@@ -2912,7 +2912,14 @@ class RelicBotApp(tk.Tk):
 
         def _p0_shop_wait():
             _shop_found[0] = False
-            _deadline = time.time() + 30
+            # Settle before polling: the menu-close animation briefly keeps "Small
+            # Jar Bazaar" visible on screen even if F was pressed on the wrong item.
+            # Waiting 1 s lets the transition complete so the check reflects the
+            # actual loaded screen, not a transient menu frame.
+            time.sleep(1.0)
+            if not self.bot_running or self._reset_iter_requested:
+                return
+            _deadline = time.time() + 29   # 1 s already spent on settle
             while time.time() < _deadline:
                 if not self.bot_running or self._reset_iter_requested:
                     return
