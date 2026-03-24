@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from pynput import keyboard as _kb
 
@@ -426,6 +426,14 @@ class RelicBotApp(tk.Tk):
         # Best-batch scoreboard (reset each START)
         self._best_33_iter   = None  # {"iteration": n, "count": x}
         self._best_hits_iter = None  # {"iteration": n, "count": x}
+        # Total relics finalized this run (duds + 2/3 + 3/3 combined; reset each START)
+        self._ov_total_relics = 0
+        # Iterations cancelled mid-run (workers skip counter updates for these)
+        self._async_cancelled_iters: set = set()
+        # Per-iteration counter contributions for async rollback:
+        # {iteration: {at_33, at_23, at_duds, total_relics}} — never touches other iterations
+        self._iter_contributions: dict = {}
+        self._iter_contrib_lock = threading.Lock()
 
         # Batch identity and overflow state
         self._current_batch_id: str = ""
@@ -1536,6 +1544,7 @@ class RelicBotApp(tk.Tk):
                 return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
             self._overlay.update(
                 at_33=self._ov_at_33, at_23=self._ov_at_23, at_duds=self._ov_at_duds,
+                stored=self._ov_total_relics,
                 best_33=_fmt_best(self._best_33_iter, "★★★"),
                 best_hits=_fmt_best(self._best_hits_iter, "hits"),
             )
@@ -1752,9 +1761,12 @@ class RelicBotApp(tk.Tk):
         self._ov_at_33       = 0
         self._ov_at_23       = 0
         self._ov_at_duds     = 0
-        self._best_33_iter   = None
-        self._best_hits_iter = None
-        self._reset_iter_requested = False
+        self._best_33_iter          = None
+        self._best_hits_iter        = None
+        self._ov_total_relics       = 0
+        self._async_cancelled_iters = set()
+        self._iter_contributions    = {}
+        self._reset_iter_requested  = False
         # Tell the player which exe to watch so inputs are blocked if game loses focus
         self.player.game_exe = os.path.basename(self.game_exe_var.get().strip())
         self.start_btn.config(state="disabled")
@@ -2003,9 +2015,11 @@ class RelicBotApp(tk.Tk):
                     ).start()
                 self._log("Overflow: 2 workers started for previous batch leftovers.")
 
-        _MAX_RESTARTS       = 3    # abort after this many consecutive hung-game restarts
-        _iter_restart_count = 0    # restarts for the current iteration (reset on new iter)
-        _is_restart         = False  # True when retrying the same iteration after a hang
+        _MAX_RESTARTS           = 3    # abort after this many hung-game restarts on same iteration
+        _MAX_P0_ITER_RESTARTS   = 3    # abort if Phase 0 fails this many restarts of same iteration
+        _iter_restart_count     = 0    # hung-game restarts for current iteration (reset on advance)
+        _phase0_iter_restarts   = 0    # Phase 0 restarts for current iteration (reset on advance)
+        _is_restart             = False  # True when retrying the same iteration
 
         while self.bot_running:
             # Check stopping condition
@@ -2016,7 +2030,8 @@ class RelicBotApp(tk.Tk):
 
             if not _is_restart:
                 iteration += 1
-                _iter_restart_count = 0   # fresh iteration resets the hung counter
+                _iter_restart_count   = 0   # fresh iteration resets the hung counter
+                _phase0_iter_restarts = 0   # fresh iteration resets the Phase 0 restart counter
                 self.attempt_count = iteration
                 self.after(0, lambda n=iteration: self.attempt_var.set(f"Attempts: {n}"))
             else:
@@ -2134,7 +2149,7 @@ class RelicBotApp(tk.Tk):
                     label, criteria, region, delay,
                     iter_dir=iter_dir, hit_min=hit_min,
                     live_log_path=live_log_path,
-                    capture_only=True)
+                    capture_only=True, iteration=iteration)
 
                 if captures is None:
                     # Fatal capture error — shut down workers and abort
@@ -2143,6 +2158,31 @@ class RelicBotApp(tk.Tk):
                     self.after(0, self._reset_controls)
                     return
 
+                # Phase 0 failed 3 times — restart the same iteration
+                if self._phase0_skipped:
+                    _phase0_iter_restarts += 1
+                    self._cancel_and_rollback_iteration(iteration)
+                    if _phase0_iter_restarts >= _MAX_P0_ITER_RESTARTS:
+                        self._log(
+                            f"Phase 0 failed on all {_MAX_P0_ITER_RESTARTS} attempts "
+                            f"of iteration {iteration} — aborting batch.")
+                        _shutdown_async_workers()
+                        _async_join_timed()
+                        self.after(0, self._reset_controls)
+                        return
+                    self._log(
+                        f"  Phase 0 failed — restarting iteration {iteration} "
+                        f"(attempt {_phase0_iter_restarts + 1}/{_MAX_P0_ITER_RESTARTS}).")
+                    try:
+                        shutil.rmtree(iter_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                    _prev_save_dir = None
+                    _is_restart = True
+                    # Allow workers from fresh attempt to update counters again
+                    self._async_cancelled_iters.discard(iteration)
+                    continue
+
                 if not self.bot_running:
                     break
 
@@ -2150,6 +2190,7 @@ class RelicBotApp(tk.Tk):
                 if self._reset_iter_requested:
                     self._reset_iter_requested = False
                     self._log(f"[Reset] Discarding iteration {iteration} and restarting.")
+                    self._cancel_and_rollback_iteration(iteration)
                     self._close_game()
                     _rs = self.save_path_var.get()
                     _rb = os.path.join(self.backup_path_var.get(), os.path.basename(_rs))
@@ -2164,6 +2205,8 @@ class RelicBotApp(tk.Tk):
                     _prev_save_dir = None
                     _iter_restart_count = 0
                     _is_restart = True
+                    # Allow the restarted iteration to accumulate fresh contributions
+                    self._async_cancelled_iters.discard(iteration)
                     continue
 
                 # Watchdog detected a hung game during this iteration
@@ -2242,17 +2285,40 @@ class RelicBotApp(tk.Tk):
             relic_results = self._run_iteration_phases(
                 label, criteria, region, delay,
                 iter_dir=iter_dir, hit_min=hit_min,
-                live_log_path=live_log_path)
+                live_log_path=live_log_path, iteration=iteration)
 
             if relic_results is None:
                 # Fatal error inside phases — abort
                 self.after(0, self._reset_controls)
                 return
 
+            # Phase 0 failed 3 times — restart the same iteration
+            if self._phase0_skipped:
+                _phase0_iter_restarts += 1
+                self._cancel_and_rollback_iteration(iteration)
+                if _phase0_iter_restarts >= _MAX_P0_ITER_RESTARTS:
+                    self._log(
+                        f"Phase 0 failed on all {_MAX_P0_ITER_RESTARTS} attempts "
+                        f"of iteration {iteration} — aborting batch.")
+                    self.after(0, self._reset_controls)
+                    return
+                self._log(
+                    f"  Phase 0 failed — restarting iteration {iteration} "
+                    f"(attempt {_phase0_iter_restarts + 1}/{_MAX_P0_ITER_RESTARTS}).")
+                try:
+                    shutil.rmtree(iter_dir, ignore_errors=True)
+                except Exception:
+                    pass
+                _prev_save_dir = None
+                _is_restart = True
+                self._async_cancelled_iters.discard(iteration)
+                continue
+
             # User-requested soft nuke of this iteration
             if self._reset_iter_requested:
                 self._reset_iter_requested = False
                 self._log(f"[Reset] Discarding iteration {iteration} and restarting.")
+                self._cancel_and_rollback_iteration(iteration)
                 self._close_game()
                 _rs = self.save_path_var.get()
                 _rb = os.path.join(self.backup_path_var.get(), os.path.basename(_rs))
@@ -2267,6 +2333,7 @@ class RelicBotApp(tk.Tk):
                 _prev_save_dir = None
                 _iter_restart_count = 0
                 _is_restart = True
+                self._async_cancelled_iters.discard(iteration)
                 continue
 
             # Watchdog detected a hung game during this iteration
@@ -2360,12 +2427,13 @@ class RelicBotApp(tk.Tk):
                 ov = self._overlay
                 h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
                 at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+                tot  = self._ov_total_relics
                 b33  = _fmt_best(self._best_33_iter,   "★★★")
                 bhit = _fmt_best(self._best_hits_iter, "hits")
                 self.after(0, lambda: ov.update(
                     hits_33=h33, hits_23=h23, duds=dds,
                     at_33=at33, at_23=at23, at_duds=atd,
-                    best_33=b33, best_hits=bhit,
+                    stored=tot, best_33=b33, best_hits=bhit,
                 ) if ov._win else None)
 
             # Persist stats after every iteration
@@ -2631,17 +2699,26 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
 
-        # Only update current-batch overlay counters
-        if is_current_batch:
+        # Only update current-batch overlay counters; skip if this iteration was cancelled
+        if is_current_batch and iteration not in self._async_cancelled_iters:
             r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
-            self._ov_at_33   += r_g3
-            self._ov_at_23   += r_g2
-            self._ov_at_duds += r_dud
+            self._ov_at_33        += r_g3
+            self._ov_at_23        += r_g2
+            self._ov_at_duds      += r_dud
+            self._ov_total_relics += r_g3 + r_g2 + r_dud
+            # Track this iteration's contributions so it can be rolled back on cancel
+            with self._iter_contrib_lock:
+                c = self._iter_contributions.setdefault(iteration, {})
+                c["at_33"]        = c.get("at_33",        0) + r_g3
+                c["at_23"]        = c.get("at_23",        0) + r_g2
+                c["at_duds"]      = c.get("at_duds",      0) + r_dud
+                c["total_relics"] = c.get("total_relics", 0) + r_g3 + r_g2 + r_dud
             if self._overlay:
                 ov = self._overlay
                 at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
-                self.after(0, lambda at33=at33, at23=at23, atd=atd:
-                           ov.update(at_33=at33, at_23=at23, at_duds=atd)
+                tot = self._ov_total_relics
+                self.after(0, lambda at33=at33, at23=at23, atd=atd, tot=tot:
+                           ov.update(at_33=at33, at_23=at23, at_duds=atd, stored=tot)
                            if ov._win else None)
 
         with lock:
@@ -2689,10 +2766,65 @@ class RelicBotApp(tk.Tk):
             self._finalize_async_iter_state(
                 iteration, iter_state, lock, dir_map, results)
 
+    def _cancel_and_rollback_iteration(self, iteration: int) -> None:
+        """Cancel in-flight workers for `iteration` and subtract its counter contributions.
+
+        Safe to call from either sync or async mode — contributions dict tracks both.
+        Must be called on the main thread or with counters already thread-safe.
+        """
+        # 1. Prevent any still-running workers for this iteration from updating counters
+        self._async_cancelled_iters.add(iteration)
+
+        # 2. Extract accumulated contributions for this iteration
+        with self._iter_contrib_lock:
+            contrib = self._iter_contributions.pop(iteration, {})
+
+        if not contrib:
+            return  # nothing was counted yet — nothing to roll back
+
+        # 3. Subtract from live counters (clamp at zero to absorb any tiny races)
+        self._ov_at_33        = max(0, self._ov_at_33   - contrib.get("at_33",   0))
+        self._ov_at_23        = max(0, self._ov_at_23   - contrib.get("at_23",   0))
+        self._ov_at_duds      = max(0, self._ov_at_duds - contrib.get("at_duds", 0))
+        self._ov_hits_33      = max(0, self._ov_hits_33 - contrib.get("hits_33", 0))
+        self._ov_hits_23      = max(0, self._ov_hits_23 - contrib.get("hits_23", 0))
+        self._ov_duds         = max(0, self._ov_duds    - contrib.get("duds",    0))
+        self._ov_total_relics = max(0, self._ov_total_relics - contrib.get("total_relics", 0))
+
+        # 4. Clear best-batch records that pointed to this iteration
+        if self._best_33_iter and self._best_33_iter["iteration"] == iteration:
+            self._best_33_iter = None
+        if self._best_hits_iter and self._best_hits_iter["iteration"] == iteration:
+            self._best_hits_iter = None
+
+        # 5. Push rolled-back numbers to the overlay
+        if self._overlay:
+            def _fmt_best(info, suffix):
+                if info is None:
+                    return "N/A"
+                return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
+            ov = self._overlay
+            h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
+            at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+            tot  = self._ov_total_relics
+            b33  = _fmt_best(self._best_33_iter,   "★★★")
+            bhit = _fmt_best(self._best_hits_iter, "hits")
+            self.after(0, lambda: ov.update(
+                hits_33=h33, hits_23=h23, duds=dds,
+                at_33=at33, at_23=at23, at_duds=atd,
+                stored=tot, best_33=b33, best_hits=bhit,
+            ) if ov._win else None)
+
     def _finalize_async_iter_state(self, iteration: int, iter_state: dict,
                                    lock: threading.Lock, dir_map: dict,
                                    results: list) -> None:
         """Post-process a completed async iteration (all relics analyzed/failed)."""
+        # If this iteration was cancelled mid-run, skip scoreboard / log updates
+        if iteration in self._async_cancelled_iters:
+            with lock:
+                iter_state.pop(iteration, None)
+            return
+
         with lock:
             istate = iter_state.get(iteration)
             if istate is None:
@@ -2759,11 +2891,12 @@ class RelicBotApp(tk.Tk):
                     return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
                 ov   = self._overlay
                 at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+                tot  = self._ov_total_relics
                 b33  = _fmt_best(self._best_33_iter,   "★★★")
                 bhit = _fmt_best(self._best_hits_iter, "hits")
                 self.after(0, lambda: ov.update(
                     at_33=at33, at_23=at23, at_duds=atd,
-                    best_33=b33, best_hits=bhit,
+                    stored=tot, best_33=b33, best_hits=bhit,
                 ) if ov._win else None)
 
             self._save_stats()
@@ -2864,7 +2997,8 @@ class RelicBotApp(tk.Tk):
                               region, delay: float,
                               iter_dir: str = "", hit_min: int = 2,
                               live_log_path: str = "",
-                              capture_only: bool = False) -> list | None:
+                              capture_only: bool = False,
+                              iteration: int = 0) -> list | None:
         """
         Run all configured sequence phases for one bot iteration.
 
@@ -2892,6 +3026,7 @@ class RelicBotApp(tk.Tk):
         murk_val  = 0
 
         relic_results = []
+        self._phase0_skipped = False   # set True if Phase 0 fails 3 times this iteration
 
         # Expected Phase 0 input count and exact key sequence (for validation)
         _p0_expected      = sum(1 for e in self.phase_events[0] if e["type"] == "key_press")
@@ -3010,6 +3145,7 @@ class RelicBotApp(tk.Tk):
                         continue
                     else:
                         self._log("  Phase 0 failed 3 times — skipping iteration.")
+                        self._phase0_skipped = True
                         self._close_game()
                         try:
                             save_manager.restore(
@@ -3472,20 +3608,33 @@ class RelicBotApp(tk.Tk):
 
                 # Live-update overlay tier counters after each relic
                 r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
-                self._ov_hits_33 += r_g3
-                self._ov_at_33   += r_g3
-                self._ov_hits_23 += r_g2
-                self._ov_at_23   += r_g2
-                self._ov_duds    += r_dud
-                self._ov_at_duds += r_dud
+                self._ov_hits_33      += r_g3
+                self._ov_at_33        += r_g3
+                self._ov_hits_23      += r_g2
+                self._ov_at_23        += r_g2
+                self._ov_duds         += r_dud
+                self._ov_at_duds      += r_dud
+                self._ov_total_relics += r_g3 + r_g2 + r_dud
+                # Track per-iteration contributions for rollback on reset
+                if iteration:
+                    with self._iter_contrib_lock:
+                        c = self._iter_contributions.setdefault(iteration, {})
+                        c["at_33"]        = c.get("at_33",        0) + r_g3
+                        c["at_23"]        = c.get("at_23",        0) + r_g2
+                        c["at_duds"]      = c.get("at_duds",      0) + r_dud
+                        c["hits_33"]      = c.get("hits_33",      0) + r_g3
+                        c["hits_23"]      = c.get("hits_23",      0) + r_g2
+                        c["duds"]         = c.get("duds",         0) + r_dud
+                        c["total_relics"] = c.get("total_relics", 0) + r_g3 + r_g2 + r_dud
                 if self._overlay:
                     ov = self._overlay
                     h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
                     at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
+                    tot = self._ov_total_relics
                     self.after(0, lambda h33=h33, h23=h23, dds=dds,
-                               at33=at33, at23=at23, atd=atd:
+                               at33=at33, at23=at23, atd=atd, tot=tot:
                                ov.update(hits_33=h33, hits_23=h23, duds=dds,
-                                         at_33=at33, at_23=at23, at_duds=atd)
+                                         at_33=at33, at_23=at23, at_duds=atd, stored=tot)
                                if ov._win else None)
 
             for _t in _worker_threads:
@@ -3555,8 +3704,9 @@ class RelicBotApp(tk.Tk):
                     key = key.strip(); val = val.strip()
                     if section == "All Time":
                         if key == "hits_33":   self._ov_at_33   = int(val)
-                        elif key == "hits_23": self._ov_at_23   = int(val)
-                        elif key == "duds":    self._ov_at_duds = int(val)
+                        elif key == "hits_23":       self._ov_at_23        = int(val)
+                        elif key == "duds":          self._ov_at_duds      = int(val)
+                        elif key == "total_relics":  self._ov_total_relics = int(val)
                     elif section == "Best Batches":
                         if key == "most_33_iteration":    best33["iteration"]  = int(val)
                         elif key == "most_33_count":      best33["count"]      = int(val)
@@ -3589,7 +3739,8 @@ class RelicBotApp(tk.Tk):
                 f.write("[All Time]\n")
                 f.write(f"hits_33 = {self._ov_at_33}\n")
                 f.write(f"hits_23 = {self._ov_at_23}\n")
-                f.write(f"duds = {self._ov_at_duds}\n\n")
+                f.write(f"duds = {self._ov_at_duds}\n")
+                f.write(f"total_relics = {self._ov_total_relics}\n\n")
 
                 f.write("[Best Batches]\n")
                 if self._best_33_iter:

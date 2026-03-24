@@ -209,13 +209,14 @@ class BotOverlay:
 
         _hline(w)
 
-        # ── Stats row 1: Murk | Est. After | Relics to buy | Bought ─── #
+        # ── Stats row 1: Murk | Est. After | Relics to buy | Bought | Stored ─ #
         r1 = tk.Frame(w, bg=_BG)
         r1.pack(fill="x", padx=10, pady=2)
         _stat(r1, "Murk",       sv("murk"),                _GOLD)
         _stat(r1, "Est. After", sv("est_murk_after", "—"), _GOLD)
         _stat(r1, "Relics",     sv("to_buy"),              _CYAN)
-        _stat(r1, "Bought",     sv("bought"),               _CYAN)
+        _stat(r1, "Bought",     sv("bought"),              _CYAN)
+        _stat(r1, "Stored",     sv("stored", "0"),         _FG)
 
         # ── Stats row 2: Current relic # | Analysing ───────────────── #
         r2 = tk.Frame(w, bg=_BG)

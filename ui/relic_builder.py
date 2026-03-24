@@ -856,8 +856,8 @@ class _PassivePoolTab(ttk.Frame):
         """Rebuild the pairings listbox."""
         self._pair_lb.delete(0, "end")
         for p in self._pairings:
-            left_label  = _entry_label({"accepted": p.get("left",  []), "pair_required": []})
-            right_label = _entry_label({"accepted": p.get("right", []), "pair_required": []})
+            left_label  = _entry_label({"accepted": p.get("left",  [])})
+            right_label = _entry_label({"accepted": p.get("right", [])})
             self._pair_lb.insert("end", f"{left_label}  ↔  {right_label}")
 
     def _create_pairing(self):
@@ -904,11 +904,11 @@ class _PassivePoolTab(ttk.Frame):
             f" (passives count individually; pairs count as 1 only if BOTH are present):", "",
         ]
         for e in self._entries:
-            label = _entry_label({"accepted": e["accepted"], "pair_required": []})
+            label = _entry_label({"accepted": e["accepted"]})
             lines.append(f"  • {label}")
         for p in self._pairings:
-            left_label  = _entry_label({"accepted": p["left"],  "pair_required": []})
-            right_label = _entry_label({"accepted": p["right"], "pair_required": []})
+            left_label  = _entry_label({"accepted": p["left"]})
+            right_label = _entry_label({"accepted": p["right"]})
             lines.append(f"  • PAIR: {left_label}  ↔  {right_label}")
         lines += ["", f"The relic is a MATCH if {t} or more of the above are satisfied simultaneously."]
         return "\n".join(lines)

@@ -512,30 +512,61 @@ def verify_shop_item(image_bytes: bytes, relic_type: str) -> tuple:
     # Middle horizontal third, top 65 % — isolates the tooltip panel.
     roi = img[:int(h * 0.65), int(w * 0.33):int(w * 0.67)]
     results = reader.readtext(roi)
-    all_text = " ".join(t for _, t, c in results if c > 0.25).lower()
+    # Low-confidence threshold — short words and small description text can
+    # score below 0.25 in stylised game fonts; 0.05 keeps sensitivity high.
+    all_text_lo = " ".join(t for _, t, c in results if c > 0.05).lower()
 
-    # ── Old-version check (applies to both modes) ──────────────────────── #
-    if "1.02" in all_text:
-        return False, "Old-version relic detected ('1.02' in tooltip)"
+    def _lx(bbox): return min(pt[0] for pt in bbox)
+    def _ty(bbox): return min(pt[1] for pt in bbox)
 
-    # ── Item name check ────────────────────────────────────────────────── #
-    _has_deep_scenic = "deep scenic" in all_text
-    _has_scenic      = "scenic"      in all_text
+    # ── Item name check then old-version check ─────────────────────────── #
+    # EasyOCR splits "Deep Scenic Flatstone" into separate tokens: a "Deep"
+    # token and a "Scenic Flatstone" token.  We confirm the deep variant by
+    # checking that a "deep"-containing token sits to the LEFT of (or at the
+    # same x as) the "Scenic Flatstone" token at the same y-level (≤40 px
+    # apart) — i.e. they are on the same title line.  The description also
+    # contains "Deep" for the deep variant but ~160 px lower, so the y-
+    # tolerance filter excludes it and prevents false positives in normal mode.
+
+    # Find the first "Scenic Flatstone" title token.
+    _scenic_bbox = None
+    for _bbox, _txt, _c in results:
+        if "scenic flatstone" in _txt.lower() and _c > 0.05:
+            _scenic_bbox = _bbox
+            break
+
+    _has_scenic = _scenic_bbox is not None
+
+    # Confirm "Deep" is present immediately to the left on the title line.
+    _has_deep_scenic = False
+    if _has_scenic:
+        _s_lx, _s_ty = _lx(_scenic_bbox), _ty(_scenic_bbox)
+        for _bbox, _txt, _c in results:
+            if "deep" in _txt.lower() and _c > 0.05:
+                _d_lx, _d_ty = _lx(_bbox), _ty(_bbox)
+                if _d_lx <= _s_lx and abs(_d_ty - _s_ty) <= 40:
+                    _has_deep_scenic = True
+                    break
+
+    _has_old_version = "1.02" in all_text_lo
 
     if relic_type == "night":
         if _has_deep_scenic:
+            if _has_old_version:
+                return False, "Old-version Deep Scenic Flatstone ('1.02' in description)"
             return True, "OK"
         if _has_scenic:
-            # "scenic" found but "deep" not present — normal relic, wrong mode
             return False, "Normal relic (Scenic Flatstone) highlighted but night mode is active"
-        return False, f"'Deep Scenic Flatstone' not found in tooltip — inconclusive OCR"
+        return False, "'Deep Scenic Flatstone' not found in tooltip — inconclusive OCR"
     else:
         # Normal mode: Scenic Flatstone (not Deep variant)
         if _has_deep_scenic:
             return False, "Night relic (Deep Scenic Flatstone) highlighted but normal mode is active"
         if _has_scenic:
+            if _has_old_version:
+                return False, "Old-version Scenic Flatstone ('1.02' in description)"
             return True, "OK"
-        return False, f"'Scenic Flatstone' not found in tooltip — inconclusive OCR"
+        return False, "'Scenic Flatstone' not found in tooltip — inconclusive OCR"
 
 
 def check_condition(image_bytes: bytes, condition_text: str) -> bool:

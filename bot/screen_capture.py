@@ -7,7 +7,6 @@ import io
 from typing import Optional, Tuple
 from PIL import Image
 import mss
-import mss.tools
 
 _JPEG_QUALITY = 85
 
