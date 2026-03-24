@@ -2104,19 +2104,82 @@ class RelicBotApp(tk.Tk):
                 self.after(0, self._reset_controls)
                 return
             self._set_status(f"Iteration {iteration}: launching game…", "orange")
-            self._launch_game()
             confirm_key = self.confirm_key_var.get().strip() or "e"
             exe_name    = os.path.basename(self.game_exe_var.get().strip())
 
             # Wait for the game window to appear before starting the load timer.
             # Inputs sent before focus would go to the desktop, not the game.
-            self._log("Waiting for game window to appear…")
-            self._set_status(f"Iteration {iteration}: waiting for game window…", "orange")
-            _game_focused = False
+            #
+            # Three states after a launch command:
+            #   A) Window visible          → focus and proceed (normal)
+            #   B) Process running, no window → game is loading slowly; keep waiting,
+            #                                   never relaunch while process exists
+            #   C) Process not found       → Steam may have dropped the request,
+            #                                but give a 15 s grace period first in
+            #                                case the process just hasn't spawned yet
+            #                                before deciding to relaunch
+            #
+            # _launch_attempts counts actual launch() calls. Up to 3 before aborting.
+            _FOCUS_POLL_INTERVAL  = 20   # s between "check process / window" cycles
+            _PROCESS_GRACE        = 15   # s to wait for process to appear before relaunch
+            _LAUNCH_MAX_ATTEMPTS  = 3
+
+            _game_focused    = False
+            _launch_attempts = 0
+
             while self.bot_running and not _game_focused:
-                _game_focused = self._focus_game_window(exe_name, timeout=1.0)
-                if not _game_focused:
+                # Only fire the launch command if the process is not already running.
+                # This prevents double-launching when the game is just slow to start.
+                if not self._is_game_running(exe_name):
+                    if _launch_attempts >= _LAUNCH_MAX_ATTEMPTS:
+                        self._log(
+                            f"ERROR: Game failed to open after {_launch_attempts} "
+                            f"launch attempt(s) — cancelling batch.")
+                        if _async_mode and _async_relic_q is not None:
+                            _shutdown_async_workers()
+                            _async_join_timed()
+                        self.after(0, self._reset_controls)
+                        return
+                    _launch_attempts += 1
+                    self._log(
+                        f"Launching game "
+                        f"(attempt {_launch_attempts}/{_LAUNCH_MAX_ATTEMPTS})…")
+                    self._launch_game()
+                    self._set_status(
+                        f"Iteration {iteration}: waiting for game window…", "orange")
+
+                    # Grace period: give Steam time to spawn the process before we
+                    # check whether it took. Poll for both process and window.
+                    _grace_end = time.time() + _PROCESS_GRACE
+                    while self.bot_running and time.time() < _grace_end:
+                        _game_focused = self._focus_game_window(exe_name, timeout=1.0)
+                        if _game_focused:
+                            break
+                        if self._is_game_running(exe_name):
+                            break   # process appeared — fall through to window poll
+                        time.sleep(0.5)
+                    if _game_focused:
+                        break
+                else:
+                    self._set_status(
+                        f"Iteration {iteration}: waiting for game window…", "orange")
+
+                # Process is (or just became) running — poll for window up to
+                # _FOCUS_POLL_INTERVAL seconds, then loop back to re-check state.
+                _poll_end = time.time() + _FOCUS_POLL_INTERVAL
+                while self.bot_running and time.time() < _poll_end:
+                    _game_focused = self._focus_game_window(exe_name, timeout=1.0)
+                    if _game_focused:
+                        break
                     time.sleep(0.5)
+
+                if not _game_focused and self.bot_running:
+                    if self._is_game_running(exe_name):
+                        self._log(
+                            "  Game process running but window not visible yet "
+                            "— still waiting…")
+                    # loop continues: if process gone → relaunch; if running → wait more
+
             if not self.bot_running:
                 self.after(0, self._reset_controls)
                 return
@@ -2124,7 +2187,10 @@ class RelicBotApp(tk.Tk):
             # Game window confirmed — begin adaptive load wait (Phase -0.5).
             self._log("Game window focused — starting adaptive load wait…")
             _in_game_ok, _load_elapsed = self._confirm_in_game(region, exe_name)
-            self._last_load_elapsed = _load_elapsed
+            if _in_game_ok:
+                # Only update on success — don't let a timed-out attempt (0.0)
+                # clobber the last known good value and starve the Phase 0 window.
+                self._last_load_elapsed = _load_elapsed
             if not _in_game_ok:
                 _iter_restart_count += 1
                 self._log(

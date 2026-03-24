@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.4.1] – 2026-03-24
+
+### Fixed
+- **Game launch retry loop** — if the bot closed the game and Steam was slow to re-register the session, the "waiting for game window" loop could spin forever. Replaced with three-state logic: (A) window visible → proceed; (B) process running, no window yet → keep polling up to 20 s per cycle; (C) process not found → 15 s grace period for Steam to spawn, then relaunch. After 3 failed launch attempts the batch cancels cleanly.
+- **Adaptive load time not corrupted by failed attempts** — `_last_load_elapsed` (used to scale the Phase 0 shop detection window) is now only updated when Phase -0.5 succeeds. A timed-out Phase -0.5 returning 0.0 previously overwrote the last known-good value, shrinking the shop detection window to its minimum (35 s) for all subsequent iterations on slow hardware.
+- **Game window focus before every phase** — `_focus_game_window` is now called before Phase 1, Phase 2, Phase 3, Phase 4, and at the start of every ESC recovery. Prevents inputs being eaten by an unfocused window after long waits or game transitions.
+
+---
+
 ## [1.4.0] – 2026-03-24
 
 ### Fixed
