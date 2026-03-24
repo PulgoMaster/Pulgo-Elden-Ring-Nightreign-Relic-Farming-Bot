@@ -626,8 +626,6 @@ class RelicBotApp(tk.Tk):
         # Per-phase status labels (event counts)
         self.phase_stop_text_vars = [None, tk.StringVar(value="Insufficient murk"),
                                      None, None, None]
-        self.phase_max_vars   = [None, tk.StringVar(value="50"),
-                                 None, None, tk.StringVar(value="30")]
         self.phase_settle_vars = [None, tk.StringVar(value="0"),
                                   None, None, tk.StringVar(value="0.25")]
         self.phase_count_vars = [tk.StringVar(value="0 events")
@@ -1128,7 +1126,6 @@ class RelicBotApp(tk.Tk):
             "batch_output": self.batch_output_var.get(),
             "phase_events": self.phase_events,
             "phase1_stop_text": self.phase_stop_text_vars[1].get(),
-            "phase1_max_loops": self.phase_max_vars[1].get(),
             "phase1_settle": self.phase_settle_vars[1].get(),
             "phase4_settle": self.phase_settle_vars[4].get(),
             "relic_type": self.relic_type_var.get(),
@@ -1165,7 +1162,6 @@ class RelicBotApp(tk.Tk):
         for i, var in enumerate(self.phase_count_vars):
             var.set(f"{len(self.phase_events[i])} events")
         self.phase_stop_text_vars[1].set(data.get("phase1_stop_text", "Insufficient murk"))
-        self.phase_max_vars[1].set(str(data.get("phase1_max_loops", "50")))
         self.phase_settle_vars[1].set(str(data.get("phase1_settle", "0.5")))
         self.phase_settle_vars[4].set(str(data.get("phase4_settle", data.get("phase3_settle", "0.3"))))
         self.relic_type_var.set(data.get("relic_type", "night"))
@@ -3207,7 +3203,8 @@ class RelicBotApp(tk.Tk):
         _P4_FAILSAFE = 200          # internal only — never shown in UI
         p4_settle = float(self.phase_settle_vars[4].get() or "0")
         murk_cost = 1800 if self.relic_type_var.get() == "night" else 600
-        _p3_count = None            # set by murk read below; None = use failsafe
+        _p3_count    = None   # set by murk read below; None = use failsafe
+        _actual_bought = None   # set after Phase 1 via murk re-read; used for Phase 4 count
         _p0_exe   = os.path.basename(self.game_exe_var.get().strip())
         murk_val  = 0
 
@@ -3398,7 +3395,8 @@ class RelicBotApp(tk.Tk):
                 if _p0_exe:
                     self._focus_game_window(_p0_exe, timeout=2.0)
                 if _p3_count is not None:
-                    buy_count = math.ceil(_p3_count / 10)
+                    _MAX_BUY_BATCHES = math.ceil(1950 / 10)  # 195 — game's relic inventory cap
+                    buy_count = min(math.ceil(_p3_count / 10), _MAX_BUY_BATCHES)
                     self._set_status(
                         f"{label}: buying relics ({buy_count} batch(es) of 10)…", "green")
                     self._log(
@@ -3409,6 +3407,8 @@ class RelicBotApp(tk.Tk):
                         self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.50)
                         if p1_settle > 0:
                             time.sleep(p1_settle)
+                        if not self.bot_running or self._reset_iter_requested:
+                            return relic_results
                         if self._overlay:
                             ov = self._overlay
                             bought_n = min((buy_i + 1) * 10, _p3_count)
@@ -3416,6 +3416,19 @@ class RelicBotApp(tk.Tk):
                             self.after(0, lambda b=bought_n, t=tot_n: ov.update(
                                 bought=f"{b} / {t}"
                             ) if ov._win else None)
+                        if p1_stop:
+                            self.after(0, self._flash_capture)
+                            try:
+                                img = screen_capture.capture(region)
+                                stopped = relic_analyzer.check_condition(img, p1_stop)
+                            except Exception as e:
+                                self._log(f"WARNING: buy condition check failed: {e}")
+                                stopped = False
+                            if stopped:
+                                self._log(
+                                    f"  Buy stop condition met after {buy_i + 1} batch(es)"
+                                    f" (~{(buy_i + 1) * 10} relic(s)) — murk depleted.")
+                                break
                 else:
                     self._set_status(f"{label}: buying relics…", "green")
                     for buy_i in range(_P1_FAILSAFE):
@@ -3440,6 +3453,25 @@ class RelicBotApp(tk.Tk):
                                 break
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
+
+            # Re-read murk to get exact count of relics actually bought.
+            # Phase 4 uses this instead of the murk estimate so pre-existing relics
+            # in the save are never scanned.
+            if self.phase_events[1] and _p3_count is not None and murk_val > 0:
+                try:
+                    self.after(0, self._flash_capture)
+                    _murk_after_img = screen_capture.capture(region)
+                    _murk_after_val = relic_analyzer.read_murk(_murk_after_img)
+                    if _murk_after_val is not None and _murk_after_val >= 0:
+                        _actual_bought = (murk_val - _murk_after_val) // murk_cost
+                        if _actual_bought != _p3_count:
+                            self._log(
+                                f"  Murk after buying: {_murk_after_val:,} — "
+                                f"{_actual_bought} relic(s) bought "
+                                f"(Phase 4 will scan {_actual_bought}, not {_p3_count}).")
+                except Exception as _mre:
+                    self._log(f"  WARNING: post-buy murk re-read failed ({_mre})"
+                              " — Phase 4 will use murk estimate.")
 
             _p01_success = True
             break   # Phase 0+1 completed — proceed to Phase 2
@@ -3582,7 +3614,8 @@ class RelicBotApp(tk.Tk):
 
         # ── Phase 4: Review Step Loop (analyze each relic) ─────────── #
         if self.phase_events[4]:
-            total = _p3_count if _p3_count is not None else _P4_FAILSAFE
+            _p4_count = _actual_bought if _actual_bought is not None else _p3_count
+            total = _p4_count if _p4_count is not None else _P4_FAILSAFE
             if _p0_exe:
                 self._focus_game_window(_p0_exe, timeout=2.0)
 

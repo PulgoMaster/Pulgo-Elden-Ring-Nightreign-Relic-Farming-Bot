@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.4.3] – 2026-03-24
+
+### Fixed
+- **Phase 4 scanning pre-existing relics** — Phase 4's relic count was derived from murk math (`murk ÷ 1800`) rather than the number of relics actually purchased. If the save file contained pre-existing relics, Phase 4 would scan them too, producing false positives. The bot now re-reads the murk counter immediately after Phase 1 completes and calculates `actual_bought = (murk_before − murk_after) / cost`. Phase 4 uses this value instead of the estimate.
+- **Phase 1 not spending all available murk** — the buy loop lacked a stop-condition check in the murk-known code path, so it could run fewer effective purchases than expected if the game's "Insufficient murk" dialog appeared mid-run. The stop condition (`"Insufficient murk"`) is now checked after every buy batch in both the murk-known and fallback paths.
+
+### Changed
+- **Phase 1 capped at 1950-relic equivalent** — the buy loop now caps at `ceil(1950 / 10) = 195` batches, matching the game's built-in relic inventory limit. No practical user will ever hit this ceiling, but it prevents unbounded loops on edge-case saves.
+- **Removed dead profile key `phase1_max_loops`** — this field was saved and loaded by every profile but was never referenced in the buy loop. Removed from save, load, and UI init to avoid confusion.
+
+---
+
 ## [1.4.2] – 2026-03-24
 
 ### Fixed
