@@ -233,9 +233,9 @@ def detect_current_tab(image_bytes: bytes) -> tuple:
 
     Returns:
         (tab_name, f2_presses_needed)  e.g. ("Guardian", 9)
-        (None, 10)                     if detection is inconclusive — callers
-                                       should fall back to the F2 failsafe loop
-                                       (10 = worst-case press count for Wylder)
+        (None, None)                   if detection is inconclusive — callers
+                                       should press F2 × 1 to shift position
+                                       and re-detect on the next cycle
     """
     reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)
@@ -301,7 +301,7 @@ def detect_current_tab(image_bytes: bytes) -> tuple:
         if len(brightness_candidates) < 2 or brightness_candidates[0][0] - brightness_candidates[1][0] >= 15:
             return best_tab, _TAB_F2_COUNT[best_tab]
 
-    return None, 10  # nothing conclusive — caller uses failsafe
+    return None, None  # nothing conclusive — caller presses F2 × 1 and re-detects
 
 
 # ── Relic color detection ─────────────────────────────────────────────── #

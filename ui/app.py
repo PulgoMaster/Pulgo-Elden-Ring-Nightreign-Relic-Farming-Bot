@@ -1343,6 +1343,9 @@ class RelicBotApp(tk.Tk):
         until the Equipment menu tab is detected, then press ESC once more to
         return to the game screen.
 
+        Attempts to focus the game window first so ESC inputs land in the game
+        rather than the desktop or another application.
+
         Each ESC press is followed by a 0.5 s settle delay and a full OCR check.
         The next press fires only after the analysis completes — recovery speed
         is proportional to actual UI transition time rather than a fixed timer.
@@ -1352,6 +1355,9 @@ class RelicBotApp(tk.Tk):
 
         Returns True on success, False on timeout.
         """
+        _exe = os.path.basename(self.game_exe_var.get().strip())
+        if _exe:
+            self._focus_game_window(_exe, timeout=3.0)
         self._log("[Recovery] ESC recovery — pressing ESC until Equipment menu appears…")
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -3209,6 +3215,8 @@ class RelicBotApp(tk.Tk):
 
             # ── Phase 1: Buy Loop ───────────────────────────────────────── #
             if self.phase_events[1]:
+                if _p0_exe:
+                    self._focus_game_window(_p0_exe, timeout=2.0)
                 if _p3_count is not None:
                     buy_count = math.ceil(_p3_count / 10)
                     self._set_status(
@@ -3297,6 +3305,8 @@ class RelicBotApp(tk.Tk):
 
             attempt_label = (f" (attempt {_p2_att + 1}/{_P2_MAX_ATTEMPTS})" if _p2_att > 0 else "")
             self._set_status(f"{label}: navigating to Relic Rites menu{attempt_label}…", "green")
+            if _p0_exe:
+                self._focus_game_window(_p0_exe, timeout=2.0)
             # play_split: fire ESC (1 key), wait 2 s for the menu to fully close,
             # then fire M + down×3 + F to open Relic Rites.
             _p2_sent, _p2_sent_keys = self.player.play_split(
@@ -3311,96 +3321,90 @@ class RelicBotApp(tk.Tk):
                 _p2_desc = (f"count {_p2_sent}/{_p2_expected}" if not _p2_count_ok
                             else "sequence mismatch")
                 self._log(f"  Phase 2: input validation failed ({_p2_desc}) — recovering and retrying.")
-                # Reset tracking vars so stale values can't carry over to next attempt
                 _p2_sent = 0
                 _p2_sent_keys = []
                 continue
             break   # Phase 2 succeeded
 
-        # ── Phase 3: Navigate to Sell (smart tab detection + targeted F2) ─ #
-        # Runs whenever Phase 2 (Relic Rites Nav) is configured.
-        # 1. Wait for the menu to finish loading, then screenshot and OCR to
-        #    identify the active character tab.
-        # 2. Press F2 exactly N times (0.20 s gap) to reach Sell.
-        # 3. Verify we landed on Sell.  If not, run a fast fallback F2 loop
-        #    that checks OCR every 3rd press to avoid stalling on slow OCR.
-        _P3_FAILSAFE = 15   # max extra F2 presses in the fallback loop
+        # ── Phase 3: Navigate to Sell (smart tab-aware F2 loop) ──────────── #
+        # Runs whenever Phase 2 is configured.
+        # Each cycle: capture → check Sell → if not, detect tab → press exact
+        # F2 count → repeat. Never presses F2 blindly. If tab is inconclusive,
+        # presses F2 × 1 to shift position then re-detects. Runs for up to 80 s.
+        # If Sell is never confirmed the iteration aborts — Phase 4 is NEVER
+        # entered without a confirmed Sell page.
         if self.phase_events[2]:
-            # Settle: let the Relic Rites menu finish animating before we
-            # screenshot — without this the OCR fires before the UI loads and
-            # falls back to the worst-case 10-press guess.
+            # Settle: let the Relic Rites menu finish animating before OCR.
             time.sleep(1.5)
             if not self.bot_running or self._reset_iter_requested:
                 return relic_results
-            self._set_status(f"{label}: detecting tab position…", "green")
-
-            # Step 1 — detect current tab
-            self.after(0, self._flash_capture)
-            try:
-                img = screen_capture.capture(region)
-                tab_name, f2_count = relic_analyzer.detect_current_tab(img)
-            except Exception as e:
-                self._log(f"  WARNING: tab detection error: {e}")
-                tab_name, f2_count = None, 10
-
-            if tab_name:
-                self._log(f"  Tab detected: {tab_name} — pressing F2 × {f2_count}.")
-            else:
-                self._log(f"  Tab detection inconclusive — pressing F2 × {f2_count} (worst-case).")
-
-            # Step 2 — press F2 the calculated number of times
+            if _p0_exe:
+                self._focus_game_window(_p0_exe, timeout=2.0)
             self._set_status(f"{label}: navigating to sell page…", "green")
-            for _ in range(f2_count):
+
+            _p3_sell_reached = False
+            _p3_deadline     = time.time() + 80.0
+
+            while time.time() < _p3_deadline:
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
-                self.player.tap("Key.f2", hold=0.05)
-                time.sleep(0.20)
 
-            # Step 3 — verify we landed on Sell
-            if not self.bot_running or self._reset_iter_requested:
-                return relic_results
-            time.sleep(0.20)
-            self.after(0, self._flash_capture)
-            try:
-                img = screen_capture.capture(region)
-                on_sell_page = relic_analyzer.check_condition(img, "sell")
-            except Exception as e:
-                self._log(f"  WARNING: sell verification error: {e}")
-                on_sell_page = False
+                # Capture once — reuse for both sell check and tab detect
+                self.after(0, self._flash_capture)
+                try:
+                    img = screen_capture.capture(region)
+                    on_sell_page = relic_analyzer.check_condition(img, "sell")
+                except Exception:
+                    on_sell_page = False
+                    img = None
 
-            if on_sell_page:
-                self._log("  Sell page confirmed.")
-            else:
-                # Fallback — press F2 quickly and check OCR every 3rd press
-                # to avoid stalling when each OCR check is slow.
-                self._log("  Sell page not confirmed — running F2 fallback loop…")
-                sell_reached = False
-                for nav_i in range(_P3_FAILSAFE):
-                    if not self.bot_running or self._reset_iter_requested:
-                        return relic_results
+                if on_sell_page:
+                    self._log("  Sell page confirmed.")
+                    _p3_sell_reached = True
+                    break
+
+                # Detect active tab to know exact F2 count needed
+                try:
+                    tab_name, f2_count = relic_analyzer.detect_current_tab(img) if img is not None \
+                        else (None, None)
+                except Exception:
+                    tab_name, f2_count = None, None
+
+                if tab_name is not None and f2_count > 0:
+                    # Known tab, known distance — press exactly the right number of F2s
+                    self._log(f"  Tab detected: {tab_name} — pressing F2 × {f2_count}.")
+                    for _ in range(f2_count):
+                        if not self.bot_running or self._reset_iter_requested:
+                            return relic_results
+                        self.player.tap("Key.f2", hold=0.05)
+                        time.sleep(0.20)
+                elif tab_name == "Sell":
+                    # detect says Sell but sell-check returned False — brief OCR glitch,
+                    # settle and re-verify without pressing anything
+                    time.sleep(0.5)
+                else:
+                    # Tab detection inconclusive — press F2 × 1 to shift to a new
+                    # position then re-detect on the next iteration
+                    self._log("  Tab detection inconclusive — pressing F2 × 1 and retrying.")
                     self.player.tap("Key.f2", hold=0.05)
-                    time.sleep(0.10)
-                    # Check OCR every 3rd press (and on the last press)
-                    if (nav_i + 1) % 3 == 0 or nav_i == _P3_FAILSAFE - 1:
-                        self.after(0, self._flash_capture)
-                        try:
-                            img = screen_capture.capture(region)
-                            on_sell_page = relic_analyzer.check_condition(img, "sell")
-                        except Exception:
-                            on_sell_page = False
-                        if on_sell_page:
-                            self._log(f"  Sell page reached after {nav_i + 1} fallback step(s).")
-                            sell_reached = True
-                            break
-                if not sell_reached:
-                    self._log("  WARNING: Sell page not detected after fallback — continuing anyway.")
+                    time.sleep(0.20)
 
-            if not self.bot_running or self._reset_iter_requested:
+                time.sleep(0.30)  # settle before re-evaluating
+
+            if not _p3_sell_reached:
+                self._log(
+                    "  Phase 3: Sell page not confirmed within 80 s "
+                    "— aborting iteration to prevent wrong-screen inputs.")
                 return relic_results
+
+        if not self.bot_running or self._reset_iter_requested:
+            return relic_results
 
         # ── Phase 4: Review Step Loop (analyze each relic) ─────────── #
         if self.phase_events[4]:
             total = _p3_count if _p3_count is not None else _P4_FAILSAFE
+            if _p0_exe:
+                self._focus_game_window(_p0_exe, timeout=2.0)
 
             # ── Capture-only mode (async analysis) ──────────────────── #
             if capture_only:

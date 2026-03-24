@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.4.0] – 2026-03-24
+
+### Fixed
+- **Phase 3: smart F2 loop replaces blind fallback** — tab detection now runs in an 80-second loop: capture → check if on Sell → if not, detect active tab → press exact F2 count → repeat. If detection is inconclusive, presses F2 ×1 to shift position and re-detects. The old "worst-case 10 presses" and blind F2 fallback are removed; F2 ×10 wrapped the circular tab list and made navigation worse, not better.
+- **Phase 4 hard gate** — Phase 4 (right-arrow relic review) is now blocked unless Phase 3 explicitly confirms the Sell page. If Phase 3's 80-second loop exhausts without confirming Sell, the iteration aborts cleanly. Previously the bot continued into Phase 4 with a warning, causing right-arrow inputs on the wrong screen.
+- **Game window focus added before every phase** — `_focus_game_window` is now called before Phase 1, Phase 2, Phase 3, Phase 4, and at the start of every ESC recovery. Prevents inputs being eaten by an unfocused window after long waits or game transitions.
+
+---
+
 ## [1.3.9] – 2026-03-24
 
 ### Fixed
