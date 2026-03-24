@@ -3056,38 +3056,6 @@ class RelicBotApp(tk.Tk):
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
 
-            # ── Post-Phase 1 murk check ─────────────────────────────────── #
-            # Re-read murk to verify relics were actually purchased.
-            # If murk hasn't dropped, Phase 0 landed in the wrong menu and
-            # Phase 1 fired into empty air — recover and retry.
-            if murk_val > 0:
-                time.sleep(1.5)   # let buy animation finish
-                if not self.bot_running or self._reset_iter_requested:
-                    return relic_results
-                try:
-                    _post_img  = screen_capture.capture(region)
-                    _murk_post = relic_analyzer.read_murk(_post_img)
-                except Exception:
-                    _murk_post = -1   # unreadable — treat as OK
-                if _murk_post > 0 and _murk_post >= murk_val * 0.95:
-                    self._log(
-                        f"  Phase 1 check: murk unchanged "
-                        f"({murk_val:,} → {_murk_post:,}) — no relics bought; recovery needed.")
-                    if _p01_att < _P01_MAX_ATTEMPTS - 1:
-                        self._esc_to_game_screen(region)
-                        continue
-                    else:
-                        self._log("  Phase 0+1 failed 3 times — aborting iteration.")
-                        self._close_game()
-                        try:
-                            save_manager.restore(
-                                self.save_path_var.get(),
-                                os.path.join(self.backup_path_var.get(),
-                                             os.path.basename(self.save_path_var.get())))
-                        except Exception:
-                            pass
-                        return None
-
             _p01_success = True
             break   # Phase 0+1 completed — proceed to Phase 2
 
