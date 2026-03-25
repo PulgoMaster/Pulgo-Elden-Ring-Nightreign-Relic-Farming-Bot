@@ -445,53 +445,66 @@ def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
     return np.array(pil.convert("RGB"))
 
 
-def read_murk(image_bytes: bytes) -> int:
-    """
-    Read the murk (currency) amount from the screen using OCR.
-    Returns 0 if the amount cannot be reliably determined.
+# Normalised crop region for the shop murk counter.
+# The counter lives in the top-left of the shop UI — roughly the top 18 % of
+# screen height and left 45 % of screen width.  Using fractions makes this
+# resolution-independent (works identically at 1080p, 1440p, etc.).
+# All other screens (in-game HUD, Relic Rites sell page, Collector Signboard)
+# place the murk counter in completely different regions, so restricting the
+# scan to this zone also acts as an implicit shop-screen filter.
+MURK_SHOP_REGION = (0.0, 0.0, 0.45, 0.18)
 
-    Strategy:
-      1. Top-right third of the screen (HUD area) — raw then preprocessed.
-      2. Full image fallback — restricts candidates to plausible murk range.
+
+def read_murk(image_bytes: bytes,
+              region: tuple | None = None) -> tuple[int, tuple]:
     """
+    Read the murk (currency) amount from the shop screen.
+
+    region : (x1, y1, x2, y2) as fractions of the full image dimensions.
+             Defaults to MURK_SHOP_REGION if None.
+
+    Returns (murk_value, region_used).
+    murk_value is 0 when the counter cannot be read confidently.
+    region_used is always the normalised crop that was actually scanned —
+    callers can save it and pass it back on subsequent calls to guarantee the
+    same pixels are examined every time.
+    """
+    if region is None:
+        region = MURK_SHOP_REGION
+
     reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)   # full resolution — murk digits are small
 
     h, w = img.shape[:2]
-    # Slightly wider ROI: top 40 % of the screen, right 55 %
-    roi_raw  = img[0: int(h * 0.40), int(w * 0.45):]
+    x1 = int(w * region[0])
+    y1 = int(h * region[1])
+    x2 = int(w * region[2])
+    y2 = int(h * region[3])
+    roi_raw  = img[y1:y2, x1:x2]
     roi_proc = _preprocess_for_ocr(roi_raw)
 
     candidates = []
 
-    def _extract(results, min_val=1, max_val=9_999_999):
+    def _extract(results):
         for _, text, conf in results:
-            if conf < 0.45:   # reject low-confidence hits (price labels, misreads)
+            if conf < 0.45:
                 continue
             clean = text.replace(",", "").replace(".", "").replace(" ", "")
             for n in re.findall(r"\d+", clean):
                 val = int(n)
-                if min_val <= val <= max_val:
+                if 1 <= val <= 9_999_999:
                     candidates.append((conf, val))
 
-    # Pass 1: raw ROI
     _extract(reader.readtext(roi_raw))
-    # Pass 2: preprocessed ROI (catches low-contrast gold text)
     if not candidates:
         _extract(reader.readtext(roi_proc))
-    # Pass 3: full image with plausible murk range
-    if not candidates:
-        _extract(reader.readtext(img), min_val=100, max_val=9_999_999)
 
     if not candidates:
-        return 0
+        return 0, region
 
-    # The real murk total is always the largest number visible in the HUD area.
-    # Sorting by value (descending) avoids picking up small fragments or price labels
-    # (e.g. 1800 per relic) when the actual balance is e.g. 170,032.
-    # Among candidates within the same order of magnitude, prefer higher confidence.
+    # Largest value wins; ties broken by confidence.
     candidates.sort(key=lambda x: (x[1], x[0]), reverse=True)
-    return candidates[0][1]
+    return candidates[0][1], region
 
 
 def check_text_visible(image_bytes: bytes, text: str, top_fraction: float = 0.50) -> bool:

@@ -1873,6 +1873,8 @@ class RelicBotApp(tk.Tk):
         batch_id  = time.strftime("%Y%m%d_%H%M%S")
         self._current_batch_id = batch_id
         self._ov_overflow_hits = 0
+        self._global_murk_expected = None   # murk verified against each iteration; None = first run
+        self._murk_region          = None   # pinned crop from first successful murk read
         run_dir = os.path.join(base_output, f"batch_run_{run_stamp}")
         live_log_path = os.path.join(run_dir, "live_log.txt")
         batch_log_path = os.path.join(run_dir, "run_log.txt")
@@ -2206,9 +2208,11 @@ class RelicBotApp(tk.Tk):
             _FOCUS_POLL_INTERVAL  = 20   # s between "check process / window" cycles
             _PROCESS_GRACE        = 15   # s to wait for process to appear before relaunch
             _LAUNCH_MAX_ATTEMPTS  = 3
+            _NO_WINDOW_MAX        = 180  # s before assuming crashed process with no window
 
-            _game_focused    = False
-            _launch_attempts = 0
+            _game_focused      = False
+            _launch_attempts   = 0
+            _no_window_since   = None   # timestamp of first "process running, no window" observation
 
             while self.bot_running and not _game_focused:
                 # Only fire the launch command if the process is not already running.
@@ -2258,9 +2262,21 @@ class RelicBotApp(tk.Tk):
 
                 if not _game_focused and self.bot_running:
                     if self._is_game_running(exe_name):
-                        self._log(
-                            "  Game process running but window not visible yet "
-                            "— still waiting…")
+                        if _no_window_since is None:
+                            _no_window_since = time.time()
+                        elapsed_no_win = time.time() - _no_window_since
+                        if elapsed_no_win >= _NO_WINDOW_MAX:
+                            self._log(
+                                f"  Game process has been running without a window for "
+                                f"{int(elapsed_no_win)}s — assuming crash. Force-killing…")
+                            self._close_game()
+                            _no_window_since = None
+                        else:
+                            self._log(
+                                "  Game process running but window not visible yet "
+                                "— still waiting…")
+                    else:
+                        _no_window_since = None   # process gone — reset timer
                     # loop continues: if process gone → relaunch; if running → wait more
 
             if not self.bot_running:
@@ -2802,8 +2818,7 @@ class RelicBotApp(tk.Tk):
             gc.collect()
             return
         finally:
-            img_bytes = None   # release screenshot bytes as soon as OCR is done
-            gc.collect()       # prompt Python to return freed memory to the OS promptly
+            gc.collect()   # return freed tensor memory to the OS promptly
 
         if pending_path and os.path.exists(pending_path):
             try:
@@ -2854,6 +2869,8 @@ class RelicBotApp(tk.Tk):
                     if is_current_batch:
                         self._log(f"WARNING: could not save screenshot: {_e}")
                     saved_fname = ""
+
+        img_bytes = None   # release screenshot bytes after saving (or skipping if not a hit)
 
         result["_image_bytes"]    = None
         result["_screenshot_file"] = saved_fname
@@ -3346,6 +3363,7 @@ class RelicBotApp(tk.Tk):
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
 
+                _murk_below_cost = False
                 for attempt in range(1, 4):
                     if not self.bot_running or self._reset_iter_requested:
                         return relic_results
@@ -3354,7 +3372,7 @@ class RelicBotApp(tk.Tk):
                     self.after(0, self._flash_capture)
                     try:
                         murk_img = screen_capture.capture(region)
-                        murk_val = relic_analyzer.read_murk(murk_img)
+                        murk_val, self._murk_region = relic_analyzer.read_murk(murk_img)
                     except Exception as e:
                         self._log(f"  Murk read attempt {attempt}/3 error: {e}")
                         murk_val = 0
@@ -3364,6 +3382,17 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             f"  Murk: {murk_val:,}  →  {_p3_count} relic(s) to review "
                             f"({murk_cost} murk each).")
+                        # Global murk check: first iteration sets expected value;
+                        # subsequent iterations verify save restore returned the same amount.
+                        if self._global_murk_expected is None:
+                            self._global_murk_expected = murk_val
+                        elif murk_val != self._global_murk_expected:
+                            self._log(
+                                f"  ERROR: Murk is {murk_val:,} but expected "
+                                f"{self._global_murk_expected:,} — save restore may have "
+                                "failed. Aborting batch.")
+                            self.bot_running = False
+                            return relic_results
                         if self._overlay:
                             ov = self._overlay
                             mv, pc = murk_val, _p3_count
@@ -3379,14 +3408,21 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             f"  Murk read attempt {attempt}/3: {murk_val:,} — below relic cost "
                             f"({murk_cost}), retrying.")
+                        _murk_below_cost = True
                         murk_val = 0
                     else:
                         self._log(f"  Murk read attempt {attempt}/3 returned 0.")
 
                 if _p3_count is None:
-                    self._log(
-                        "  WARNING: Murk could not be read — "
-                        "falling back to failsafe buy mode (runs until stop condition).")
+                    if _murk_below_cost:
+                        self._log(
+                            f"  WARNING: Murk is below the relic cost ({murk_cost:,} each). "
+                            "Need at least that much to buy one relic — recommend 100k+ for best "
+                            "results. Skipping buy phase this iteration.")
+                    else:
+                        self._log(
+                            "  WARNING: Murk could not be read — "
+                            "falling back to failsafe buy mode (runs until stop condition).")
             else:
                 time.sleep(1.5)   # inter-phase buffer even without murk read
 
@@ -3454,21 +3490,108 @@ class RelicBotApp(tk.Tk):
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
 
-            # Re-read murk to get exact count of relics actually bought.
-            # Phase 4 uses this instead of the murk estimate so pre-existing relics
-            # in the save are never scanned.
+            # ── Post-Phase 1 murk validation ─────────────────────────────── #
+            # Re-read murk to verify the right number of relics were purchased.
+            # Uses the pinned shop region so no false-positive reads from other screens.
+            # Four outcomes:
+            #   1. Exact match         → all relics bought as expected; proceed.
+            #   2. Fewer bought        → bought less than planned (stop condition fired early);
+            #                           spend amounts are divisible → resume buying remainder.
+            #   3. Amount indivisible  → unexpected spend pattern (wrong item?);
+            #                           restore save and skip iteration.
+            #   4. Overspent           → murk after < expected floor; restore and skip.
             if self.phase_events[1] and _p3_count is not None and murk_val > 0:
                 try:
                     self.after(0, self._flash_capture)
                     _murk_after_img = screen_capture.capture(region)
-                    _murk_after_val = relic_analyzer.read_murk(_murk_after_img)
+                    _murk_after_val, _ = relic_analyzer.read_murk(
+                        _murk_after_img, region=self._murk_region)
                     if _murk_after_val is not None and _murk_after_val >= 0:
-                        _actual_bought = (murk_val - _murk_after_val) // murk_cost
-                        if _actual_bought != _p3_count:
+                        _expected_remainder = murk_val % murk_cost
+                        _spent              = murk_val - _murk_after_val
+
+                        if _murk_after_val == _expected_remainder:
+                            # Case 1: exact — all planned relics bought
+                            _actual_bought = _p3_count
                             self._log(
-                                f"  Murk after buying: {_murk_after_val:,} — "
-                                f"{_actual_bought} relic(s) bought "
-                                f"(Phase 4 will scan {_actual_bought}, not {_p3_count}).")
+                                f"  Post-buy murk: {_murk_after_val:,} — "
+                                f"all {_actual_bought} relic(s) bought as expected.")
+
+                        elif _murk_after_val > _expected_remainder and _spent % murk_cost == 0:
+                            # Case 2: bought fewer than planned; murk divisible → resume
+                            _actual_bought   = _spent // murk_cost
+                            _can_buy_more    = _murk_after_val // murk_cost
+                            _resume_batches  = min(
+                                math.ceil(_can_buy_more / 10), _MAX_BUY_BATCHES)
+                            self._log(
+                                f"  Post-buy murk: {_murk_after_val:,} — only "
+                                f"{_actual_bought} relic(s) bought so far. "
+                                f"Resuming Phase 1 for {_resume_batches} more batch(es)…")
+                            for _r_i in range(_resume_batches):
+                                if not self.bot_running or self._reset_iter_requested:
+                                    return relic_results
+                                self.player.play_fast(
+                                    self.phase_events[1], hold=0.05, gap=0.50)
+                                if p1_settle > 0:
+                                    time.sleep(p1_settle)
+                                if not self.bot_running or self._reset_iter_requested:
+                                    return relic_results
+                                if p1_stop:
+                                    self.after(0, self._flash_capture)
+                                    try:
+                                        _r_img = screen_capture.capture(region)
+                                        if relic_analyzer.check_condition(_r_img, p1_stop):
+                                            self._log(
+                                                f"  Resume stop condition met after "
+                                                f"{_r_i + 1} batch(es).")
+                                            break
+                                    except Exception:
+                                        pass
+                            # Re-read murk after resume to get final actual count
+                            try:
+                                _resume_img = screen_capture.capture(region)
+                                _resume_val, _ = relic_analyzer.read_murk(
+                                    _resume_img, region=self._murk_region)
+                                if _resume_val is not None and _resume_val >= 0:
+                                    _actual_bought = (murk_val - _resume_val) // murk_cost
+                                    self._log(
+                                        f"  After resume: {_murk_after_val:,} → {_resume_val:,} murk "
+                                        f"— {_actual_bought} relic(s) total.")
+                            except Exception:
+                                pass
+
+                        elif _murk_after_val > _expected_remainder:
+                            # Case 3: spent amount not divisible → unexpected purchase
+                            self._log(
+                                f"  ERROR: Post-buy murk {_murk_after_val:,} is above expected "
+                                f"floor {_expected_remainder:,} but spend is not divisible by "
+                                f"relic cost. Possible wrong item purchased — restoring save.")
+                            try:
+                                _sp = self.save_path_var.get()
+                                save_manager.restore(
+                                    _sp,
+                                    os.path.join(self.backup_path_var.get(),
+                                                 os.path.basename(_sp)))
+                            except Exception as _re2:
+                                self._log(f"  Save restore failed: {_re2}")
+                            return relic_results
+
+                        else:
+                            # Case 4: overspent (murk_after < expected floor)
+                            self._log(
+                                f"  ERROR: Post-buy murk {_murk_after_val:,} is below "
+                                f"expected floor {_expected_remainder:,}. "
+                                "Possible wrong item purchased — restoring save.")
+                            try:
+                                _sp = self.save_path_var.get()
+                                save_manager.restore(
+                                    _sp,
+                                    os.path.join(self.backup_path_var.get(),
+                                                 os.path.basename(_sp)))
+                            except Exception as _re2:
+                                self._log(f"  Save restore failed: {_re2}")
+                            return relic_results
+
                 except Exception as _mre:
                     self._log(f"  WARNING: post-buy murk re-read failed ({_mre})"
                               " — Phase 4 will use murk estimate.")
@@ -3536,7 +3659,26 @@ class RelicBotApp(tk.Tk):
                 _p2_sent = 0
                 _p2_sent_keys = []
                 continue
-            break   # Phase 2 succeeded
+
+            # Screen verify: confirm navigation landed in Relic Rites, not another menu
+            # (Journal has an identical tab layout and will fool Phase 3 for 80 s).
+            time.sleep(0.8)
+            if not self.bot_running or self._reset_iter_requested:
+                return relic_results
+            _on_relic_rites = True   # assume correct if OCR fails
+            try:
+                _p2_verify_img = screen_capture.capture(region)
+                _on_relic_rites = relic_analyzer.check_condition(
+                    _p2_verify_img, "Relic Rites")
+            except Exception:
+                pass
+            if not _on_relic_rites:
+                self._log(
+                    "  Phase 2: 'Relic Rites' not found after navigation "
+                    "— wrong screen (Journal?). Recovering and retrying.")
+                continue
+
+            break   # Phase 2 succeeded — confirmed on Relic Rites screen
 
         # ── Phase 3: Navigate to Sell (smart tab-aware F2 loop) ──────────── #
         # Runs whenever Phase 2 is configured.
