@@ -1322,12 +1322,8 @@ class RelicBotApp(tk.Tk):
     _STEAM_APP_ID = "2622380"
 
     def _launch_game(self):
-        exe_path = self.game_exe_var.get().strip()
         self._log(f"Launching via Steam (App ID: {self._STEAM_APP_ID})…")
         os.startfile(f"steam://rungameid/{self._STEAM_APP_ID}")
-        if exe_path:
-            # Also store exe path so focus can find the process window
-            pass
 
     def _focus_game_window(self, exe_name: str, timeout: float = 15.0) -> bool:
         """Find the game window by process exe name and bring it to the foreground.
@@ -2067,7 +2063,12 @@ class RelicBotApp(tk.Tk):
                                     else:
                                         self._mark_relic_failed(
                                             _task, _ois, _ol, _odm, _or)
-                            except Exception:
+                            except Exception as _oexc:
+                                self._log(
+                                    f"  [Overflow worker] Unhandled error on relic "
+                                    f"{_task.get('step_i', '?') + 1} "
+                                    f"(iter {_task.get('iteration', '?')}): {_oexc}",
+                                    overlay=False)
                                 self._mark_relic_failed(_task, _ois, _ol, _odm, _or)
                             finally:
                                 _oq.task_done()
