@@ -49,6 +49,10 @@ elden-ring-relic-bot/
 - Elden Ring Nightreign installed via Steam (App ID: `2622380`)
 - Windows 10 or 11
 - ~500 MB free disk space (for the EasyOCR model download on first run)
+- **16:9 display** — the bot crops specific screen regions by fixed fractions tuned for 16:9.
+  Any resolution is fine (1080p, 1440p, 4K, etc.) as long as the aspect ratio is 16:9.
+  Ultrawide (21:9), 4:3, and other non-standard ratios are **not supported** and will cause
+  OCR to read the wrong parts of the screen.
 
 ### Install dependencies
 
@@ -121,12 +125,11 @@ Switch between **Normal** and **Deep of Night** gem images using the radio butto
 
 Add any curses you want to block. Relics carrying a blocked curse will be rejected even if their passives match.
 
-### 8. Choose a Bot Mode
+### 8. Configure Batch Mode
 
-- **Live Mode** — runs until a match is found, then pauses and asks you to keep it or keep searching
-- **Batch Mode** — runs for a set number of loops or hours, saves every iteration for manual review
+The bot runs in **Batch Mode** — it runs for a set number of loops or hours and saves every iteration for manual review.
 
-For Batch Mode, point the **Output folder** to `batch_output/` inside this repo (or any folder).
+Point the **Output folder** to `batch_output/` inside this repo (or any folder).
 After the run, open `README.txt` in the output folder — hits are marked with `*`.
 
 ### 9. Save a Profile

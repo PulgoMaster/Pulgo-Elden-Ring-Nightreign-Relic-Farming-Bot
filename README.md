@@ -14,9 +14,16 @@ Works fully offline. No internet connection required after the first launch.
 
 ## ⚠️ Important Warnings
 
-- **Always back up your save file before using the bot.**
+- **Back up your save file manually — separately from the bot's own backup.**
+  The bot keeps its own working backup, but you should also keep a personal copy you control before you start.
   Your save is located at:
   `C:\Users\<YourName>\AppData\Roaming\Nightreign\<SteamID>\NR0000.sl2`
+
+- **16:9 aspect ratio required.**
+  The bot crops specific screen regions using fixed fractions tuned for 16:9 displays.
+  Any resolution works (1080p, 1440p, 4K) as long as the aspect ratio is 16:9.
+  Ultrawide (21:9), 4:3, and other non-standard aspect ratios are **not supported** —
+  OCR crops will land on the wrong areas and the bot will not function correctly.
 
 - **Always give the bot your most current save.**
   The bot restores that save before every iteration — it must be from before any run you have played.
