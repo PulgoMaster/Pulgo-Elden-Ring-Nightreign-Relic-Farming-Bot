@@ -26,11 +26,9 @@ List the steps that cause the issue to happen. If it happens consistently, say s
 
 ### 5. Your setup
 - **Relic type:** Normal or Deep of Night
-- **Bot mode:** Live or Batch
 - **Async Analysis:** enabled or disabled
 - **Number of workers** (if Brute Force Analysis is on)
-- **Game load wait (s):** what value you have set
-- **Close buffer (s):** what value you have set
+- **Low Performance Mode:** enabled or disabled
 - **PC specs (optional but helpful):** CPU, RAM, SSD or HDD — relevant if timing-related
 
 ### 6. Screenshot or log (if possible)
@@ -41,9 +39,9 @@ List the steps that cause the issue to happen. If it happens consistently, say s
 
 ## Tips Before Reporting
 
-- **Timing issues:** If the bot starts on the wrong screen or inputs seem to fire too early, try increasing **Game load wait** by 5–10 seconds before reporting. Most timing problems are machine-specific and can be fixed this way.
+- **Timing issues:** If the bot consistently ends up on the wrong screen or misfires inputs, try enabling **Low Performance Mode** in Batch Mode Settings before reporting. This widens input gaps across all phases and resolves most timing-related failures.
 - **Sequence issues:** If the bot navigates incorrectly, check that your Phase 0 and Phase 2 sequences match your in-game shop layout. If shops are in different positions (DLC not owned, different unlock state), re-recording those phases may fix the issue without needing a bug report.
-- **OCR failures:** If relics are not being read correctly, make sure the game is running in **Borderless Windowed or Fullscreen** — windowed mode shifts the capture area.
+- **OCR failures:** If relics are not being read correctly, make sure the game is running in **Borderless Windowed** mode — fullscreen and standard windowed both shift the capture area.
 
 ---
 

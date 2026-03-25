@@ -89,37 +89,13 @@ anything else.
 | **Save file** | The save the bot restores before every iteration | Full path to `NR0000.sl2` (see above) |
 | **Backup folder** | Where the bot keeps its own copies of your save | Point to `save_backups/` inside the bot folder |
 | **Game executable** | How the bot launches the game | Full path to `nightreign.exe` (see above) |
-| **Game load wait** | How long the bot waits after launch before sending inputs | See tuning section below |
-| **Close buffer (s)** | How long to wait after game closes before relaunching | See tuning section below |
-| **Manage game automatically** | Tells the bot to close, restore, and relaunch the game each run | Must be enabled |
 | **Relic type** | Normal (600 murk) or Deep of Night (1800 murk) | Set before loading sequences |
 
 ---
 
 ## Tuning the Bot for Your Machine
 
-**This is the most important step for reliability.** The default timing values are conservative, but
-every machine loads the game at a different speed. If you do not calibrate these settings, the bot
-will start sending inputs before the game is ready and Phase 0 will fail.
-
-### Game Load Wait
-
-This controls how many seconds the bot waits after launching the game before it begins Phase 0.
-
-**How to calibrate:**
-1. Launch the game manually and start a timer the moment the process opens
-2. Stop the timer when you have full control at Roundtable Hold
-3. Add 5–10 seconds of buffer on top — the bot needs some margin
-4. Enter that value in the **Game load wait** field
-
-Machines with fast NVMe SSDs typically load in 20–30 seconds. Slower HDDs may need 60–70 seconds or
-more. **If the bot consistently ends up on the wrong screen or misfires inputs, increase this value
-first before investigating anything else.**
-
-### Close Buffer
-
-After force-closing the game, the bot waits this many seconds before relaunching. If your machine
-leaves lingering background processes after the game closes, set this to 6–8 seconds. The default is 4.
+The bot uses an adaptive load-wait system — it watches for the in-game Equipment menu to appear after each launch, so it does not need a manually calibrated load timer. It will wait up to 150 seconds for the game to become ready before aborting.
 
 ### Input Timing in Sequences
 
@@ -127,6 +103,7 @@ The pre-recorded sequences include small delays between inputs to account for me
 the bot's inputs arrive faster than your menus can render:
 - Re-record the sequence (see SETUP.md) and pause briefly between each input
 - Menus typically need 0.2–0.5 seconds to respond — if a sequence skips a step, this is why
+- Enable **Low Performance Mode** in Batch Mode Settings if the bot consistently misfires inputs on your machine
 
 ---
 
@@ -137,11 +114,9 @@ Checklist before running the bot for the first time:
 - [ ] Save file path entered and pointing to your current `NR0000.sl2`
 - [ ] Personal backup of that save file made in a separate location
 - [ ] Game executable path entered correctly
-- [ ] **Manage game automatically** is enabled
-- [ ] Game load wait calibrated to your machine
 - [ ] Relic type selected (Normal or Deep of Night) to match what you are farming
 - [ ] At least one relic criterion set (the bot needs to know what it is looking for)
-- [ ] Game is running in **Borderless Windowed or Fullscreen** — windowed mode shifts the capture
+- [ ] Game is running in **Borderless Windowed** — fullscreen and windowed modes shift the capture
       area and will cause OCR to read the wrong screen region
 
 ---
@@ -151,6 +126,9 @@ Checklist before running the bot for the first time:
 - **Farm Murk before running the bot.** The bot buys as many relics as your current Murk balance
   allows each iteration. More Murk per session means more relics reviewed and fewer total iterations
   to find what you are looking for. Going in with a large Murk stockpile makes a significant difference.
+
+- **The bot automatically boosts the game's process priority** to HIGH after each load. This reduces
+  input-drop frequency on busy systems and improves consistency across long runs — no configuration needed.
 
 - **Start from Roundtable Hold.** The included sequences navigate from a specific position at
   Roundtable Hold. Make sure you are standing there, facing the Relic Rites merchant area, before

@@ -81,9 +81,6 @@ python main.py
 | **Backup folder** | Point to the `save_backups/` folder inside this repo, or any folder you choose |
 | **Game executable** | Path to `nightreign.exe` inside your Steam install |
 | **Steam App ID** | Pre-filled: `2622380` |
-| **Game load wait** | Seconds to wait for the game to load after launch (default 45 — lower if your PC loads faster) |
-| **Confirm key** | Pre-filled: `F` (the interact/confirm key in-game) |
-| **Manage game automatically** | Enable this — the bot will close, restore your save, and relaunch the game each iteration |
 
 ### 3. Select Relic Type
 
@@ -142,11 +139,9 @@ Click **Save As…** in the Profile section to save all your settings (save path
 
 | Key | Action |
 |-----|--------|
-| **F9** | Toggle input recording on/off |
-| **F8** | Pause / resume the bot |
+| **F7** | Show / hide the overlay HUD (configurable in Batch Mode Settings) |
 
-Both hotkeys are configurable in the bot UI. The bot will automatically stop
-sending inputs if the Nightreign window loses focus, so alt-tabbing is safe.
+The bot will automatically stop sending inputs if the Nightreign window loses focus, so alt-tabbing is safe.
 
 ---
 
@@ -157,7 +152,7 @@ If the standard sequences don't work for your setup:
 1. Click the **Phase** tab you want to re-record (Setup, Buy Loop, etc.)
 2. Click **⏺ Record** — you have 3 seconds to switch to the game window
 3. Perform the inputs for that phase **exactly once**
-4. Press **F9** to stop recording
+4. Press the recording hotkey (configurable, shown in the Manual Key Recording panel) to stop recording
 5. Click **▶ Test** to verify playback
 6. Click **Save** to save the sequence as a JSON file
 

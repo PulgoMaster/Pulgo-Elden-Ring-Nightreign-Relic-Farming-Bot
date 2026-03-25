@@ -6,7 +6,7 @@ Each iteration the bot:
 1. Restores a clean save file and relaunches the game
 2. Navigates to the Relic Rites merchant and buys a batch of relics
 3. Reviews each relic using local OCR and checks it against your criteria
-4. Saves the result — in Batch Mode it keeps every save for manual review; in Live Mode it stops and alerts you when a match is found
+4. Saves the result — every iteration is kept for manual review; runs marked as HIT or GOD ROLL are renamed so they stand out
 
 Works fully offline. No internet connection required after the first launch.
 
@@ -82,7 +82,8 @@ See [SETUP.md](SETUP.md) for step-by-step recording instructions.
 ## Tips for Best Results
 
 - **Start with as much Murk as possible.** The bot calculates how many relics it can afford each iteration based on your current Murk balance. More Murk = more relics reviewed per run = fewer total iterations needed to find a match. Farming a large Murk stockpile before starting the bot will significantly speed up your search.
-- Run the game in **Borderless or Fullscreen** for reliable OCR — windowed mode changes the capture area.
+- **The bot automatically boosts the game's process priority** to HIGH after each load. This reduces input-drop frequency on busy systems and helps keep phase timing consistent over long runs.
+- Run the game in **Borderless Windowed** mode. Fullscreen and standard windowed both shift the capture area and will cause OCR to read the wrong screen regions.
 
 ---
 
@@ -100,10 +101,9 @@ See [SETUP.md](SETUP.md) for step-by-step recording instructions.
 
 | Key | Action |
 |-----|--------|
-| **F9** | Toggle input recording on/off |
-| **F8** | Pause / resume the bot |
+| **F7** | Show / hide the overlay HUD (configurable in Batch Mode Settings) |
 
-Both hotkeys are configurable in the UI. Inputs are automatically blocked if the Nightreign window loses focus — alt-tabbing is safe.
+Inputs are automatically blocked if the Nightreign window loses focus — alt-tabbing is safe.
 
 ---
 
