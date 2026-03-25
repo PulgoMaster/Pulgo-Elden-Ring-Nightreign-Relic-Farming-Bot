@@ -1370,13 +1370,41 @@ class RelicBotApp(tk.Tk):
     # ------------------------------------------------------------------ #
 
     def _is_game_running(self, exe_name: str) -> bool:
+        """Check whether a process with the given exe name is running.
+        Uses CreateToolhelp32Snapshot via ctypes — no subprocess, no console window."""
         try:
-            result = subprocess.run(
-                ["tasklist", "/fi", f"imagename eq {exe_name}"],
-                capture_output=True, text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            return exe_name.lower() in result.stdout.lower()
+            TH32CS_SNAPPROCESS = 0x00000002
+            class _PROCESSENTRY32(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize",              ctypes.c_ulong),
+                    ("cntUsage",            ctypes.c_ulong),
+                    ("th32ProcessID",       ctypes.c_ulong),
+                    ("th32DefaultHeapID",   ctypes.POINTER(ctypes.c_ulong)),
+                    ("th32ModuleID",        ctypes.c_ulong),
+                    ("cntThreads",          ctypes.c_ulong),
+                    ("th32ParentProcessID", ctypes.c_ulong),
+                    ("pcPriClassBase",      ctypes.c_long),
+                    ("dwFlags",             ctypes.c_ulong),
+                    ("szExeFile",           ctypes.c_char * 260),
+                ]
+            snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(
+                TH32CS_SNAPPROCESS, 0)
+            if snap == ctypes.c_void_p(-1).value:
+                return False
+            entry = _PROCESSENTRY32()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
+            target = exe_name.lower().encode("utf-8")
+            found = False
+            if ctypes.windll.kernel32.Process32First(snap, ctypes.byref(entry)):
+                while True:
+                    if entry.szExeFile.lower() == target:
+                        found = True
+                        break
+                    if not ctypes.windll.kernel32.Process32Next(
+                            snap, ctypes.byref(entry)):
+                        break
+            ctypes.windll.kernel32.CloseHandle(snap)
+            return found
         except Exception:
             return False
 
@@ -1417,7 +1445,10 @@ class RelicBotApp(tk.Tk):
 
     def _launch_game(self):
         self._log(f"Launching via Steam (App ID: {self._STEAM_APP_ID})…")
-        os.startfile(f"steam://rungameid/{self._STEAM_APP_ID}")
+        subprocess.Popen(
+            ["explorer.exe", f"steam://rungameid/{self._STEAM_APP_ID}"],
+            close_fds=True
+        )
 
     def _focus_game_window(self, exe_name: str, timeout: float = 15.0) -> bool:
         """Find the game window by process exe name and bring it to the foreground.
