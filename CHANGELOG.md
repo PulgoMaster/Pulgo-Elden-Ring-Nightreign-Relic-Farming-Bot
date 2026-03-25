@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.4.4] – 2026-03-24
+
+### Fixed
+- **Screenshots missing from HIT folders** — v1.4.2's RAM optimisation placed `img_bytes = None` in the `finally` block, which ran before the screenshot-save check. Screenshots were silently never written. Bytes are now cleared after the save section so all HIT/MATCH images are correctly written to disk.
+- **Journal screen causing Phase 3 infinite loop** — Phase 2 now performs a post-navigation screen check: OCR confirms "Relic Rites" is visible before proceeding. If a look-alike menu (e.g. the Journal, which has an identical tab layout) is detected, the attempt retries rather than entering Phase 3's 80-second loop on the wrong screen.
+- **Zombie process preventing game relaunch** — if the game crashes and leaves its process alive with no window (Windows access-violation crash), the launch-wait loop now force-kills the process after 180 s and lets the relaunch path run cleanly.
+- **Murk counter scanning the wrong screen region** — `read_murk()` had an ROI that covered the top-right of the screen, completely missing the shop murk counter (which is top-left). The function now uses a normalised `MURK_SHOP_REGION = (0, 0, 0.45, 0.18)` pinned to the top-left corner where the counter always appears. Resolution-independent.
+
+### Changed
+- **`read_murk()` returns `(value, region)` tuple** — the pinned crop region is returned alongside the value so the same region can be reused on the post-buy re-read, avoiding any drift.
+- **Global murk expected check** — after the first successful murk read the value is stored. Every subsequent iteration verifies murk matches after save restore. A mismatch aborts the batch immediately with a clear message (save restore failure).
+- **Too-low murk guard** — if all three murk read attempts return a value below the relic cost, a specific warning is logged ("need at least N murk to buy one relic; recommend 100k+") rather than silently falling back to failsafe mode.
+- **Post-Phase 1 murk validation expanded to 4-case logic**:
+  1. Exact match → all planned relics bought; proceed.
+  2. Fewer bought, spend divisible → stop condition fired early; bot resumes Phase 1 for the remaining batches automatically.
+  3. Amount indivisible → unexpected purchase pattern; restore save and skip iteration.
+  4. Overspent → murk after below expected floor; restore save and skip iteration.
+
+---
+
 ## [1.4.3] – 2026-03-24
 
 ### Fixed
