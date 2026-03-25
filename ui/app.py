@@ -436,7 +436,15 @@ class RelicBotApp(tk.Tk):
 
         # Overlay (Batch Mode only)
         self._overlay = None
-        self._overlay_enabled_var  = tk.BooleanVar(value=True)
+        self._overlay_enabled_var    = tk.BooleanVar(value=True)
+        # Overlay element visibility / behaviour
+        self._ov_mouse_lock_var      = tk.BooleanVar(value=False)
+        self._ov_show_stats_var      = tk.BooleanVar(value=True)
+        self._ov_show_rolls_var      = tk.BooleanVar(value=True)
+        self._ov_show_overflow_var   = tk.BooleanVar(value=True)
+        self._ov_show_proc_log_var   = tk.BooleanVar(value=True)
+        self._ov_show_relic_log_var  = tk.BooleanVar(value=True)
+        self._ov_elem_widgets: list  = []   # populated in _build_ui; toggled by overlay enable
         self._parallel_enabled_var  = tk.BooleanVar(value=False)
         self._parallel_workers_var  = tk.IntVar(value=2)
         self._async_enabled_var     = tk.BooleanVar(value=False)
@@ -804,6 +812,50 @@ class RelicBotApp(tk.Tk):
                  "to fully finish before stopping (grace period).\n\n"
                  "Best paired with Brute Force Analysis for maximum throughput.")
 
+        # ── Overlay Elements sub-section ────────────────────────────── #
+        ov_elem_lf = ttk.LabelFrame(self.batch_frame, text="Overlay Elements")
+        ov_elem_lf.grid(row=6, column=0, columnspan=5, sticky="ew", **pad)
+
+        self._ov_elem_widgets = []
+
+        def _ov_chk(parent, text, var, row, col, tooltip=None):
+            chk = ttk.Checkbutton(parent, text=text, variable=var,
+                                  command=self._on_ov_settings_change)
+            chk.grid(row=row, column=col, sticky="w", **pad)
+            if tooltip:
+                _Tooltip(chk, tooltip)
+            self._ov_elem_widgets.append(chk)
+            return chk
+
+        _ov_chk(ov_elem_lf, "Lock mouse to overlay (cursor stays inside while overlay is visible)",
+                self._ov_mouse_lock_var, 0, 0,
+                "Calls Windows ClipCursor to keep your mouse inside the overlay window.\n"
+                "Prevents accidental game inputs when reaching for the overlay.\n\n"
+                "Note: the game still receives raw mouse input for camera movement;\n"
+                "this only prevents the cursor from visually leaving the overlay.\n\n"
+                "Drag the header to reposition the overlay while locked.\n"
+                "Use the W/H sliders on the overlay itself to resize.")
+
+        _ov_chk(ov_elem_lf, "Show Stats  (Murk, Relics, Bought, etc.)",
+                self._ov_show_stats_var, 1, 0)
+        _ov_chk(ov_elem_lf, "Track Rolls  (God Roll / Good / Duds counters + Best Batches)",
+                self._ov_show_rolls_var, 1, 1)
+        _ov_chk(ov_elem_lf, "Show Overflow Worker Hits",
+                self._ov_show_overflow_var, 2, 0,
+                "Lights up when a background overflow worker from a previous batch\n"
+                "finds a 2/3 or 3/3 hit.  Hidden when count is zero regardless of this setting.")
+        _ov_chk(ov_elem_lf, "Process Log",
+                self._ov_show_proc_log_var, 2, 1,
+                "The left log panel — shows bot phase events and actions.")
+        _ov_chk(ov_elem_lf, "Relic Log",
+                self._ov_show_relic_log_var, 2, 2,
+                "The right log panel — shows per-relic OCR results.\n"
+                "If only one log is enabled it expands to fill the full overlay width.")
+
+        # Gray out element widgets when overlay is disabled
+        self._overlay_enabled_var.trace_add("write", self._on_overlay_enable_toggle)
+        self._on_overlay_enable_toggle()
+
         # ── Bot Control ─────────────────────────────────────────────── #
         ctrl_frame = ttk.LabelFrame(inner, text="Bot Control")
         ctrl_frame.grid(row=7, column=0, sticky="ew", **pad)
@@ -1063,6 +1115,30 @@ class RelicBotApp(tk.Tk):
         if path:
             self.batch_output_var.set(path)
 
+    def _on_overlay_enable_toggle(self, *_) -> None:
+        """Gray out overlay element widgets when the overlay is disabled."""
+        state = "normal" if self._overlay_enabled_var.get() else "disabled"
+        for w in self._ov_elem_widgets:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+
+    def _get_ov_settings(self) -> dict:
+        return {
+            "mouse_lock":       self._ov_mouse_lock_var.get(),
+            "show_stats":       self._ov_show_stats_var.get(),
+            "show_rolls":       self._ov_show_rolls_var.get(),
+            "show_overflow":    self._ov_show_overflow_var.get(),
+            "show_process_log": self._ov_show_proc_log_var.get(),
+            "show_relic_log":   self._ov_show_relic_log_var.get(),
+        }
+
+    def _on_ov_settings_change(self) -> None:
+        """Push overlay element settings to the live overlay (if running)."""
+        if self._overlay:
+            self._overlay.apply_settings(self._get_ov_settings())
+
     def _on_parallel_toggle(self):
         """Enable/disable the workers spinbox based on the Brute Force checkbox."""
         state = "normal" if self._parallel_enabled_var.get() else "disabled"
@@ -1137,6 +1213,13 @@ class RelicBotApp(tk.Tk):
             "parallel_enabled": self._parallel_enabled_var.get(),
             "parallel_workers": self._parallel_workers_var.get(),
             "async_enabled": self._async_enabled_var.get(),
+            "overlay_enabled":      self._overlay_enabled_var.get(),
+            "ov_mouse_lock":        self._ov_mouse_lock_var.get(),
+            "ov_show_stats":        self._ov_show_stats_var.get(),
+            "ov_show_rolls":        self._ov_show_rolls_var.get(),
+            "ov_show_overflow":     self._ov_show_overflow_var.get(),
+            "ov_show_process_log":  self._ov_show_proc_log_var.get(),
+            "ov_show_relic_log":    self._ov_show_relic_log_var.get(),
         }
 
     def _dict_to_profile(self, data: dict):
@@ -1194,6 +1277,15 @@ class RelicBotApp(tk.Tk):
         self._refresh_gem_images()
         if "criteria" in data:
             self.relic_builder.set_state(data["criteria"])
+        # Overlay settings
+        self._overlay_enabled_var.set(data.get("overlay_enabled", True))
+        self._ov_mouse_lock_var.set(data.get("ov_mouse_lock", False))
+        self._ov_show_stats_var.set(data.get("ov_show_stats", True))
+        self._ov_show_rolls_var.set(data.get("ov_show_rolls", True))
+        self._ov_show_overflow_var.set(data.get("ov_show_overflow", True))
+        self._ov_show_proc_log_var.set(data.get("ov_show_process_log", True))
+        self._ov_show_relic_log_var.set(data.get("ov_show_relic_log", True))
+        self._on_overlay_enable_toggle()
 
     def _load_profile(self):
         name = self._profile_var.get().strip()
@@ -1570,10 +1662,12 @@ class RelicBotApp(tk.Tk):
             from bot.screen_capture import get_screen_size
             sw, sh = get_screen_size()
             self._overlay = BotOverlay(self)
-            self._overlay.build(sw, sh, async_mode=self._async_enabled_var.get())
+            self._overlay.build(sw, sh, async_mode=self._async_enabled_var.get(),
+                                settings=self._get_ov_settings())
             self._overlay.set_reset_iter_callback(self._request_reset_iter)
             self._overlay.set_stop_callback(self._request_stop_after_batch)
             self._overlay.set_force_stop_callback(self._stop_bot)
+            self._overlay.set_close_game_callback(self._close_game)
             def _fmt_best(info, suffix):
                 if info is None:
                     return "N/A"
@@ -3683,25 +3777,7 @@ class RelicBotApp(tk.Tk):
                 _p2_sent_keys = []
                 continue
 
-            # Screen verify: confirm navigation landed in Relic Rites, not another menu
-            # (Journal has an identical tab layout and will fool Phase 3 for 80 s).
-            time.sleep(0.8)
-            if not self.bot_running or self._reset_iter_requested:
-                return relic_results
-            _on_relic_rites = True   # assume correct if OCR fails
-            try:
-                _p2_verify_img = screen_capture.capture(region)
-                _on_relic_rites = relic_analyzer.check_condition(
-                    _p2_verify_img, "Relic Rites")
-            except Exception:
-                pass
-            if not _on_relic_rites:
-                self._log(
-                    "  Phase 2: 'Relic Rites' not found after navigation "
-                    "— wrong screen (Journal?). Recovering and retrying.")
-                continue
-
-            break   # Phase 2 succeeded — confirmed on Relic Rites screen
+            break   # Phase 2 succeeded
 
         # ── Phase 3: Navigate to Sell (smart tab-aware F2 loop) ──────────── #
         # Runs whenever Phase 2 is configured.
@@ -3793,7 +3869,7 @@ class RelicBotApp(tk.Tk):
                     if not self.bot_running:
                         return captures
                     if step_i > 0:
-                        self.player.play_fast(self.phase_events[4])
+                        self.player.play_fast(self.phase_events[4], gap=0.25)
                         if p4_settle > 0:
                             time.sleep(p4_settle)
                         if not self.bot_running:
@@ -3882,7 +3958,7 @@ class RelicBotApp(tk.Tk):
                     return relic_results
 
                 if step_i > 0:
-                    self.player.play_fast(self.phase_events[4])
+                    self.player.play_fast(self.phase_events[4], gap=0.25)
                     if p4_settle > 0:
                         time.sleep(p4_settle)
                     if not self.bot_running:

@@ -618,9 +618,11 @@ def check_condition(image_bytes: bytes, condition_text: str) -> bool:
     reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)       # full resolution — keep OCR reliable
     h, w = img.shape[:2]
-    # Top 65 %, full width — covers both the Relic Rites "Sell" tab label (top strip)
-    # and centre-screen dialogs like "Insufficient murk" (~50 % height).
-    img = img[: int(h * 0.65), :]
+    # Top-left region — "Sell" tab label lives in the top strip of the Relic Rites menu
+    # and stop-condition text (e.g. phase 1 buy confirmations) appears in the upper-left.
+    # Keeping the crop small is important: check_condition is called after every buy batch
+    # in Phase 1, so OCR area directly drives per-batch time.
+    img = img[: int(h * 0.30), : int(w * 0.65)]
     results = reader.readtext(img)
 
     all_text = " ".join(t for _, t, c in results if c > 0.3).lower()

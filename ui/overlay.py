@@ -7,7 +7,7 @@ Clicking the overlay (e.g. the Pause button) does NOT focus it, so
 the game window keeps keyboard focus throughout.
 
 Drag the header bar to move the overlay.
-Drag the ⤡ grip in the bottom-right corner to resize it.
+Use the W / H sliders at the bottom to resize it.
 """
 
 import tkinter as tk
@@ -18,10 +18,10 @@ import threading
 
 # ── Windows API: prevent the overlay from ever stealing focus ─────── #
 
-_GWL_EXSTYLE          = -20
-_WS_EX_NOACTIVATE     = 0x08000000   # clicks don't activate (steal focus from) this window
-_WS_EX_TOOLWINDOW     = 0x00000080   # hide from taskbar / alt-tab list
-_WDA_EXCLUDEFROMCAPTURE = 0x00000011  # invisible to screen capture (Win10 2004+)
+_GWL_EXSTYLE            = -20
+_WS_EX_NOACTIVATE       = 0x08000000   # clicks don't activate (steal focus from) this window
+_WS_EX_TOOLWINDOW       = 0x00000080   # hide from taskbar / alt-tab list
+_WDA_EXCLUDEFROMCAPTURE = 0x00000011   # invisible to screen capture (Win10 2004+)
 
 
 def _apply_noactivate(win: tk.Toplevel) -> None:
@@ -84,12 +84,13 @@ _BLUE    = "#00aaff"
 _GREY    = "#707080"
 _RESET_C = "#1a3a5c"   # reset iteration button colour
 _WARN_C  = "#ff8800"
-_GRIP_C  = "#3a3d5c"   # resize grip colour
 
 _MIN_W = 480
 _MIN_H = 480
 _DEF_W = 720
 _DEF_H = 800
+_MAX_W = 1400
+_MAX_H = 1400
 
 
 # ── Tooltip helper ────────────────────────────────────────────────── #
@@ -127,11 +128,23 @@ class _Tooltip:
             self._tip = None
 
 
+# ── Section wrapper helper ─────────────────────────────────────────── #
+
+def _section_frame(parent: tk.Widget, with_sep: bool = True) -> tk.Frame:
+    """Create a tk.Frame to wrap a toggleable section, optionally with a leading separator."""
+    outer = tk.Frame(parent, bg=_BG)
+    if with_sep:
+        tk.Frame(outer, bg=_SEP, height=1).pack(fill="x", padx=8, pady=2)
+    return outer
+
+
 # ── Main class ────────────────────────────────────────────────────── #
 
 class BotOverlay:
     """
-    Translucent batch-mode HUD.  Drag the header to move; drag ⤡ to resize.
+    Translucent batch-mode HUD.  Drag the header to move.
+    Use the W/H sliders to resize.  Individual sections can be toggled
+    via apply_settings().
     """
 
     def __init__(self, root: tk.Tk):
@@ -140,34 +153,62 @@ class BotOverlay:
         self._reset_iter_cb  = None
         self._stop_cb        = None        # graceful: stop after current batch
         self._force_stop_cb  = None        # immediate: stop right now
+        self._close_game_cb  = None        # optional: close game after force stop
         self._watching       = False
         self._sv: dict[str, tk.StringVar] = {}
-        self._reset_iter_btn: tk.Label | None   = None
-        self._abort_btn: tk.Label | None        = None
-        self._log_box:        tk.Text | None = None   # process log (left panel)
-        self._relic_log_box:  tk.Text | None = None   # relic analysis log (right panel)
+        self._reset_iter_btn: tk.Label | None  = None
+        self._abort_btn:      tk.Label | None  = None
+        self._log_box:        tk.Text  | None  = None   # process log
+        self._relic_log_box:  tk.Text  | None  = None   # relic analysis log
         self._overflow_hits_frame: tk.Frame | None = None
-        self._stop_pending   = False       # True once graceful stop is requested
+        self._stop_pending   = False
 
         # Drag-to-move state
         self._drag_x = 0
         self._drag_y = 0
 
-        # Drag-to-resize state
-        self._resize_start_x = 0
-        self._resize_start_y = 0
-        self._resize_start_w = _DEF_W
-        self._resize_start_h = _DEF_H
+        # Mouse-lock (ClipCursor) state
+        self._mouse_lock_enabled = False
+
+        # Resize slider vars (created during build)
+        self._w_var: tk.IntVar | None = None
+        self._h_var: tk.IntVar | None = None
+
+        # Section visibility
+        self._section_visible: dict[str, bool] = {
+            "stats":       True,
+            "rolls":       True,
+            "overflow":    True,
+            "process_log": True,
+            "relic_log":   True,
+        }
+
+        # Ordered sections list: (key, frame, pack_kwargs)
+        # Populated during _build_ui(); used by _repack_sections()
+        self._managed_sections: list = []
+
+        # Log panel refs for spanning logic
+        self._log_outer:    tk.Frame | None = None
+        self._process_panel: tk.Frame | None = None
+        self._relic_panel:   tk.Frame | None = None
+        self._log_sep:       tk.Frame | None = None   # vertical divider between panels
 
     # ── Lifecycle ──────────────────────────────────────────────────── #
 
     def build(self, screen_w: int, screen_h: int,
-              async_mode: bool = False) -> None:
+              async_mode: bool = False,
+              settings: dict | None = None) -> None:
         """Create the overlay window, positioned bottom-left of the screen."""
         if self._win:
             return
 
         self._async_mode = async_mode
+
+        if settings:
+            self._mouse_lock_enabled = settings.get("mouse_lock", False)
+            for key in self._section_visible:
+                # profile keys use the same names
+                self._section_visible[key] = settings.get(f"show_{key}", True)
 
         win = tk.Toplevel(self._root)
         win.overrideredirect(True)
@@ -189,28 +230,36 @@ class BotOverlay:
 
     def _build_ui(self) -> None:
         w = self._win
+        self._managed_sections = []
 
         def sv(key: str, default: str = "—") -> tk.StringVar:
             v = tk.StringVar(value=default)
             self._sv[key] = v
             return v
 
+        def _reg(key: str, frame: tk.Frame, **kwargs) -> tk.Frame:
+            """Register a managed section frame."""
+            self._managed_sections.append((key, frame, kwargs))
+            return frame
+
         # ── Header — drag to move ───────────────────────────────────── #
         hdr = tk.Frame(w, bg=_BG, cursor="fleur")
-        hdr.pack(fill="x", padx=10, pady=(8, 2))
+        _reg("always", hdr, fill="x", padx=10, pady=(8, 2))
+
         tk.Label(hdr, text="⚙ RELIC BOT", bg=_BG, fg=_GOLD,
                  font=("Consolas", 10, "bold"), cursor="fleur").pack(side="left")
         tk.Label(hdr, textvariable=sv("batch", "—"),
                  bg=_BG, fg=_DIM, font=("Consolas", 9), cursor="fleur").pack(side="right")
 
         for widget in (hdr,) + tuple(hdr.winfo_children()):
-            widget.bind("<ButtonPress-1>",   self._on_drag_start)
-            widget.bind("<B1-Motion>",       self._on_drag_move)
+            widget.bind("<ButtonPress-1>", self._on_drag_start)
+            widget.bind("<B1-Motion>",     self._on_drag_move)
 
-        _hline(w)
+        # ── Stats section ───────────────────────────────────────────── #
+        stats_sec = _section_frame(w, with_sep=True)
+        _reg("stats", stats_sec, fill="x")
 
-        # ── Stats row 1: Murk | Est. After | Relics to buy | Bought | Stored ─ #
-        r1 = tk.Frame(w, bg=_BG)
+        r1 = tk.Frame(stats_sec, bg=_BG)
         r1.pack(fill="x", padx=10, pady=2)
         _stat(r1, "Murk",       sv("murk"),                _GOLD)
         _stat(r1, "Est. After", sv("est_murk_after", "—"), _GOLD)
@@ -218,16 +267,16 @@ class BotOverlay:
         _stat(r1, "Bought",     sv("bought"),              _CYAN)
         _stat(r1, "Stored",     sv("stored", "0"),         _FG)
 
-        # ── Stats row 2: Current relic # | Analysing ───────────────── #
-        r2 = tk.Frame(w, bg=_BG)
+        r2 = tk.Frame(stats_sec, bg=_BG)
         r2.pack(fill="x", padx=10, pady=2)
         _stat(r2, "Relic #",   sv("relic_num"),  _FG)
         _stat(r2, "Analysing", sv("analysing"),  _FG)
 
-        _hline(w)
+        # ── Rolls section (hit counters + best batches) ─────────────── #
+        rolls_sec = _section_frame(w, with_sep=True)
+        _reg("rolls", rolls_sec, fill="x")
 
-        # ── Hit counters ─────────────────────────────────────────────── #
-        hf = tk.Frame(w, bg=_BG)
+        hf = tk.Frame(rolls_sec, bg=_BG)
         hf.pack(fill="x", padx=10, pady=(4, 6))
         hf.columnconfigure(0, weight=1)
         hf.columnconfigure(1, weight=1)
@@ -255,15 +304,15 @@ class BotOverlay:
                 tk.Label(cell, textvariable=sv(key_all, "0"), bg=_BG, fg=color,
                          font=("Consolas", 22, "bold")).pack()
 
-        _hline(w)
+        # Best Batches scoreboard (inside rolls section)
+        tk.Frame(rolls_sec, bg=_SEP, height=1).pack(fill="x", padx=8, pady=2)
 
-        # ── Best Batches scoreboard ───────────────────────────────────── #
-        bb_hdr = tk.Frame(w, bg=_BG)
+        bb_hdr = tk.Frame(rolls_sec, bg=_BG)
         bb_hdr.pack(fill="x", padx=10, pady=(4, 2))
         tk.Label(bb_hdr, text="BEST BATCHES", bg=_BG, fg=_DIM,
                  font=("Consolas", 8, "bold")).pack(anchor="w")
 
-        bb = tk.Frame(w, bg=_BG)
+        bb = tk.Frame(rolls_sec, bg=_BG)
         bb.pack(fill="x", padx=14, pady=(0, 4))
 
         row_33 = tk.Frame(bb, bg=_BG)
@@ -280,34 +329,34 @@ class BotOverlay:
         tk.Label(row_top, textvariable=sv("best_hits", "N/A"), bg=_BG, fg=_FG,
                  font=("Consolas", 8)).pack(side="left")
 
-        _hline(w)
-
-        # ── Previous Batch Overflow Hits ─────────────────────────────────── #
+        # ── Overflow hits section ────────────────────────────────────── #
         # Invisible when count = 0; lights up when old-batch overflow workers
         # find a 2/3 or 3/3.  Always packed so layout never shifts.
-        self._overflow_hits_frame = tk.Frame(w, bg=_BG)
+        ov_sec = _section_frame(w, with_sep=True)
+        _reg("overflow", ov_sec, fill="x")
+
+        self._overflow_hits_frame = tk.Frame(ov_sec, bg=_BG)
         self._overflow_hits_frame.pack(fill="x", padx=10, pady=0)
         self._sv["overflow_hits_label"] = tk.StringVar(value="")
         self._sv["overflow_hits"]       = tk.StringVar(value="")
-        _ovf_lbl = tk.Label(
+        tk.Label(
             self._overflow_hits_frame,
             textvariable=self._sv["overflow_hits_label"],
             bg=_BG, fg="#ff8800",
             font=("Consolas", 8, "bold"),
-        )
-        _ovf_lbl.pack(side="left")
-        _ovf_num = tk.Label(
+        ).pack(side="left")
+        tk.Label(
             self._overflow_hits_frame,
             textvariable=self._sv["overflow_hits"],
             bg=_BG, fg="#ffcc66",
             font=("Consolas", 14, "bold"),
-        )
-        _ovf_num.pack(side="right", padx=(8, 0))
+        ).pack(side="right", padx=(8, 0))
 
-        _hline(w)
+        # ── Buttons section ──────────────────────────────────────────── #
+        btns_sec = _section_frame(w, with_sep=True)
+        _reg("always", btns_sec, fill="x")
 
-        # ── Reset Iteration + Stop After Batch buttons ───────────────── #
-        bf = tk.Frame(w, bg=_BG)
+        bf = tk.Frame(btns_sec, bg=_BG)
         bf.pack(pady=(3, 5))
 
         self._reset_iter_btn = tk.Label(
@@ -337,64 +386,167 @@ class BotOverlay:
         self._abort_btn.pack(side="left")
         self._abort_btn.bind("<Button-1>", self._on_abort_click)
 
-        _hline(w)
+        # ── Resize row — W / H sliders ───────────────────────────────── #
+        resize_sec = _section_frame(w, with_sep=True)
+        _reg("always", resize_sec, fill="x")
+
+        ctrl_row = tk.Frame(resize_sec, bg=_BG)
+        ctrl_row.pack(fill="x", padx=10, pady=(0, 4))
+
+        self._w_var = tk.IntVar(value=_DEF_W)
+        self._h_var = tk.IntVar(value=_DEF_H)
+
+        tk.Label(ctrl_row, text="W", bg=_BG, fg=_DIM,
+                 font=("Consolas", 7)).pack(side="left")
+        tk.Scale(
+            ctrl_row, from_=_MIN_W, to=_MAX_W, orient="horizontal",
+            variable=self._w_var, command=self._on_resize_scale,
+            bg=_BG, fg=_FG, troughcolor=_SURFACE,
+            highlightthickness=0, sliderlength=12, bd=0, showvalue=0,
+        ).pack(side="left", fill="x", expand=True, padx=(2, 8))
+
+        tk.Label(ctrl_row, text="H", bg=_BG, fg=_DIM,
+                 font=("Consolas", 7)).pack(side="left")
+        tk.Scale(
+            ctrl_row, from_=_MIN_H, to=_MAX_H, orient="horizontal",
+            variable=self._h_var, command=self._on_resize_scale,
+            bg=_BG, fg=_FG, troughcolor=_SURFACE,
+            highlightthickness=0, sliderlength=12, bd=0, showvalue=0,
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
         # ── Log panels — Process (left) | Relics (right) ────────────── #
-        # Grid with equal column weights guarantees a true 50/50 split.
-        lf = tk.Frame(w, bg=_BG)
-        lf.pack(fill="both", expand=True, padx=6, pady=(2, 0))
-        lf.columnconfigure(0, weight=1, uniform="logcol")
-        lf.columnconfigure(1, weight=1, uniform="logcol")
-        lf.rowconfigure(0, weight=1)
+        logs_sec = _section_frame(w, with_sep=True)
+        _reg("always", logs_sec, fill="both", expand=True, padx=0, pady=0)
+
+        self._log_outer = tk.Frame(logs_sec, bg=_BG)
+        self._log_outer.pack(fill="both", expand=True, padx=6, pady=(2, 0))
+        self._log_outer.columnconfigure(0, weight=1, uniform="logcol")
+        self._log_outer.columnconfigure(1, weight=1, uniform="logcol")
+        self._log_outer.rowconfigure(0, weight=1)
 
         # Process panel
-        pf = tk.Frame(lf, bg=_BG)
-        pf.grid(row=0, column=0, sticky="nsew", padx=(0, 1))
-        pf.columnconfigure(0, weight=1)
-        pf.rowconfigure(1, weight=1)
-        tk.Label(pf, text="PROCESS", bg=_BG, fg=_DIM,
+        self._process_panel = tk.Frame(self._log_outer, bg=_BG)
+        self._process_panel.columnconfigure(0, weight=1)
+        self._process_panel.rowconfigure(1, weight=1)
+        tk.Label(self._process_panel, text="PROCESS", bg=_BG, fg=_DIM,
                  font=("Consolas", 7, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
         self._log_box = tk.Text(
-            pf, bg="#080b18", fg=_FG,
+            self._process_panel, bg="#080b18", fg=_FG,
             font=("Consolas", 7), wrap="word",
             state="disabled", relief="flat", borderwidth=0,
         )
-        psb = tk.Scrollbar(pf, orient="vertical",
+        psb = tk.Scrollbar(self._process_panel, orient="vertical",
                            command=self._log_box.yview,
                            bg=_BG, troughcolor=_SURFACE)
         self._log_box.configure(yscrollcommand=psb.set)
         self._log_box.grid(row=1, column=0, sticky="nsew")
         psb.grid(row=1, column=1, sticky="ns")
 
-        # Vertical separator
-        tk.Frame(lf, bg=_SEP, width=1).grid(row=0, column=0, sticky="nse", pady=4)
+        # Vertical separator (between panels)
+        self._log_sep = tk.Frame(self._log_outer, bg=_SEP, width=1)
 
         # Relic panel
-        rf = tk.Frame(lf, bg=_BG)
-        rf.grid(row=0, column=1, sticky="nsew", padx=(1, 0))
-        rf.columnconfigure(0, weight=1)
-        rf.rowconfigure(1, weight=1)
-        tk.Label(rf, text="RELICS", bg=_BG, fg=_DIM,
+        self._relic_panel = tk.Frame(self._log_outer, bg=_BG)
+        self._relic_panel.columnconfigure(0, weight=1)
+        self._relic_panel.rowconfigure(1, weight=1)
+        tk.Label(self._relic_panel, text="RELICS", bg=_BG, fg=_DIM,
                  font=("Consolas", 7, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
         self._relic_log_box = tk.Text(
-            rf, bg="#080b18", fg=_FG,
+            self._relic_panel, bg="#080b18", fg=_FG,
             font=("Consolas", 7), wrap="word",
             state="disabled", relief="flat", borderwidth=0,
         )
-        rsb = tk.Scrollbar(rf, orient="vertical",
+        rsb = tk.Scrollbar(self._relic_panel, orient="vertical",
                            command=self._relic_log_box.yview,
                            bg=_BG, troughcolor=_SURFACE)
         self._relic_log_box.configure(yscrollcommand=rsb.set)
         self._relic_log_box.grid(row=1, column=0, sticky="nsew")
         rsb.grid(row=1, column=1, sticky="ns")
 
-        # ── Resize grip — bottom-right corner ───────────────────────── #
-        grip = tk.Label(w, text="⤡", bg=_GRIP_C, fg=_DIM,
-                        font=("Consolas", 10), cursor="size_nw_se",
-                        padx=2, pady=1)
-        grip.pack(side="right", anchor="se", padx=2, pady=2)
-        grip.bind("<ButtonPress-1>",  self._on_resize_start)
-        grip.bind("<B1-Motion>",      self._on_resize_move)
+        # Initial pack of all sections + log layout
+        self._repack_sections()
+
+    # ── Section visibility ─────────────────────────────────────────── #
+
+    def _repack_sections(self) -> None:
+        """Unpack all managed sections then re-pack visible ones in order."""
+        if not self._win:
+            return
+        for _key, frame, _kwargs in self._managed_sections:
+            frame.pack_forget()
+        for key, frame, kwargs in self._managed_sections:
+            if key == "always" or self._section_visible.get(key, True):
+                frame.pack(**kwargs)
+        self._update_log_layout()
+
+    def _update_log_layout(self) -> None:
+        """Adjust log panel grid spanning based on which logs are visible."""
+        if not self._log_outer:
+            return
+        show_proc  = self._section_visible.get("process_log", True)
+        show_relic = self._section_visible.get("relic_log",   True)
+
+        # Forget all then re-grid based on visibility
+        self._process_panel.grid_forget()
+        self._relic_panel.grid_forget()
+        self._log_sep.grid_forget()
+
+        if show_proc and show_relic:
+            self._process_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 1))
+            self._log_sep.grid(row=0, column=0, sticky="nse", pady=4)
+            self._relic_panel.grid(row=0, column=1, sticky="nsew", padx=(1, 0))
+        elif show_proc:
+            self._process_panel.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        elif show_relic:
+            self._relic_panel.grid(row=0, column=0, columnspan=2, sticky="nsew")
+
+    def apply_settings(self, settings: dict) -> None:
+        """Live-apply overlay element settings from a dict.
+
+        Keys: mouse_lock, show_stats, show_rolls, show_overflow,
+              show_process_log, show_relic_log
+        """
+        mouse_lock = settings.get("mouse_lock", self._mouse_lock_enabled)
+        if mouse_lock != self._mouse_lock_enabled:
+            self._mouse_lock_enabled = mouse_lock
+            if not mouse_lock:
+                self._release_cursor_clip()
+
+        changed = False
+        for key in self._section_visible:
+            new_val = settings.get(f"show_{key}", self._section_visible[key])
+            if new_val != self._section_visible[key]:
+                self._section_visible[key] = new_val
+                changed = True
+
+        if changed and self._win:
+            self._root.after(0, self._repack_sections)
+
+        if self._mouse_lock_enabled:
+            self._clip_cursor_to_overlay()
+
+    # ── Mouse lock (ClipCursor) ────────────────────────────────────── #
+
+    def _clip_cursor_to_overlay(self) -> None:
+        """Confine the Windows cursor to the overlay window bounds."""
+        if not self._mouse_lock_enabled or not self._win:
+            return
+        try:
+            x = self._win.winfo_rootx()
+            y = self._win.winfo_rooty()
+            ww = self._win.winfo_width()
+            wh = self._win.winfo_height()
+            rect = ctypes.wintypes.RECT(x, y, x + ww, y + wh)
+            ctypes.windll.user32.ClipCursor(ctypes.byref(rect))
+        except Exception:
+            pass
+
+    def _release_cursor_clip(self) -> None:
+        """Release any active ClipCursor restriction."""
+        try:
+            ctypes.windll.user32.ClipCursor(None)
+        except Exception:
+            pass
 
     # ── Drag-to-move ───────────────────────────────────────────────── #
 
@@ -408,25 +560,19 @@ class BotOverlay:
         x = event.x_root - self._drag_x
         y = event.y_root - self._drag_y
         self._win.geometry(f"+{x}+{y}")
+        self._clip_cursor_to_overlay()
 
-    # ── Drag-to-resize ─────────────────────────────────────────────── #
+    # ── Resize via W/H sliders ─────────────────────────────────────── #
 
-    def _on_resize_start(self, event) -> None:
-        self._resize_start_x = event.x_root
-        self._resize_start_y = event.y_root
-        self._resize_start_w = self._win.winfo_width()
-        self._resize_start_h = self._win.winfo_height()
-
-    def _on_resize_move(self, event) -> None:
-        if not self._win:
+    def _on_resize_scale(self, _val=None) -> None:
+        if not self._win or not self._w_var or not self._h_var:
             return
-        dx = event.x_root - self._resize_start_x
-        dy = event.y_root - self._resize_start_y
-        new_w = max(_MIN_W, self._resize_start_w + dx)
-        new_h = max(_MIN_H, self._resize_start_h + dy)
+        new_w = self._w_var.get()
+        new_h = self._h_var.get()
         x = self._win.winfo_x()
         y = self._win.winfo_y()
         self._win.geometry(f"{new_w}x{new_h}+{x}+{y}")
+        self._clip_cursor_to_overlay()
 
     # ── Show / hide / destroy ──────────────────────────────────────── #
 
@@ -437,13 +583,16 @@ class BotOverlay:
     def show(self) -> None:
         if self._win and not getattr(self, "_suppressed", False):
             self._win.deiconify()
+            self._clip_cursor_to_overlay()
 
     def hide(self) -> None:
         if self._win:
             self._win.withdraw()
+            self._release_cursor_clip()
 
     def destroy(self) -> None:
         self._watching = False
+        self._release_cursor_clip()
         if self._win:
             self._win.destroy()
             self._win = None
@@ -496,7 +645,7 @@ class BotOverlay:
         self._relic_log_box.configure(state="disabled")
 
     def set_overflow_hits(self, count: int) -> None:
-        """Show/update the previous-batch overflow hit counter.  Must be called from main thread."""
+        """Show/update the previous-batch overflow hit counter. Must be called from main thread."""
         if not self._win:
             return
         if count > 0:
@@ -514,6 +663,8 @@ class BotOverlay:
                 for child in self._overflow_hits_frame.winfo_children():
                     child.configure(bg=_BG)
 
+    # ── Callback wiring ─────────────────────────────────────────────── #
+
     def set_reset_iter_callback(self, cb) -> None:
         self._reset_iter_cb = cb
 
@@ -524,6 +675,10 @@ class BotOverlay:
     def set_force_stop_callback(self, cb) -> None:
         """Immediate stop: interrupts the bot right now (second click)."""
         self._force_stop_cb = cb
+
+    def set_close_game_callback(self, cb) -> None:
+        """Optional: called after a force stop if the user asks to close the game."""
+        self._close_game_cb = cb
 
     def set_stop_pending(self, pending: bool) -> None:
         """Sync the abort button state (e.g. when stop was triggered externally)."""
@@ -556,15 +711,27 @@ class BotOverlay:
                 icon="warning",
                 parent=self._win,
             )
-            if confirmed and self._force_stop_cb:
-                self._force_stop_cb()
+            if confirmed:
+                close_game = (
+                    self._close_game_cb is not None
+                    and tk_messagebox.askyesno(
+                        "Close Game?",
+                        "Close the game instance as well?",
+                        parent=self._win,
+                    )
+                )
+                if self._force_stop_cb:
+                    self._force_stop_cb()
+                # Run _close_game in a thread — it polls until the process exits
+                # and must not block the main tkinter thread.
+                if close_game:
+                    import threading as _threading
+                    _threading.Thread(
+                        target=self._close_game_cb, daemon=True,
+                        name="manual-close-game").start()
 
 
 # ── Widget helpers ────────────────────────────────────────────────── #
-
-def _hline(parent: tk.Widget) -> None:
-    tk.Frame(parent, bg=_SEP, height=1).pack(fill="x", padx=8, pady=2)
-
 
 def _stat(parent: tk.Frame, label: str,
           var: tk.StringVar, color: str) -> None:

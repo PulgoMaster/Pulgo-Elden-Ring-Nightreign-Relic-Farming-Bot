@@ -8,7 +8,9 @@ All notable changes to this project are documented here.
 
 ### Fixed
 - **Screenshots missing from HIT folders** — v1.4.2's RAM optimisation placed `img_bytes = None` in the `finally` block, which ran before the screenshot-save check. Screenshots were silently never written. Bytes are now cleared after the save section so all HIT/MATCH images are correctly written to disk.
-- **Journal screen causing Phase 3 infinite loop** — Phase 2 now performs a post-navigation screen check: OCR confirms "Relic Rites" is visible before proceeding. If a look-alike menu (e.g. the Journal, which has an identical tab layout) is detected, the attempt retries rather than entering Phase 3's 80-second loop on the wrong screen.
+- **Phase 2 Journal false-positive causing repeated ESC loops** — a post-navigation OCR check for the "Relic Rites" title text was unreliable with the game's stylised font, causing the bot to repeatedly ESC out of a correctly-reached Relic Rites screen. The check has been removed. Phase 3's own Sell-tab detection and 80-second timeout correctly guard against wrong-screen scenarios.
+- **Phase 1 buying ~3× slower** — expanding the `check_condition` crop to full-screen (for the murk validation) made every OCR call in the buy loop 3× slower. The crop is now restored to the original fast region (`top 30%, left 65%`) which covers the Sell label and centre-screen dialogs correctly without the performance penalty.
+- **Phase 4 input transition too slow** — Phase 4's between-input gap is now explicitly set to 0.25 s, matching the expected relic navigation cadence.
 - **Zombie process preventing game relaunch** — if the game crashes and leaves its process alive with no window (Windows access-violation crash), the launch-wait loop now force-kills the process after 180 s and lets the relaunch path run cleanly.
 - **Murk counter scanning the wrong screen region** — `read_murk()` had an ROI that covered the top-right of the screen, completely missing the shop murk counter (which is top-left). The function now uses a normalised `MURK_SHOP_REGION = (0, 0, 0.45, 0.18)` pinned to the top-left corner where the counter always appears. Resolution-independent.
 
@@ -21,6 +23,8 @@ All notable changes to this project are documented here.
   2. Fewer bought, spend divisible → stop condition fired early; bot resumes Phase 1 for the remaining batches automatically.
   3. Amount indivisible → unexpected purchase pattern; restore save and skip iteration.
   4. Overspent → murk after below expected floor; restore save and skip iteration.
+- **Overlay redesigned** — resize grip replaced with W/H sliders inside the overlay; individual sections (Stats, Rolls, Overflow Hits, Process Log, Relic Log) are independently toggleable; "Close game?" prompt added to force-stop flow.
+- **Overlay Elements settings** — new sub-section in Batch Mode Settings with per-element visibility toggles and optional mouse-lock (confines cursor to overlay bounds while visible). All settings are saved with the profile.
 
 ---
 
