@@ -1373,7 +1373,8 @@ class RelicBotApp(tk.Tk):
         try:
             result = subprocess.run(
                 ["tasklist", "/fi", f"imagename eq {exe_name}"],
-                capture_output=True, text=True
+                capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
             return exe_name.lower() in result.stdout.lower()
         except Exception:
@@ -1394,7 +1395,8 @@ class RelicBotApp(tk.Tk):
                 time.sleep(_buf)
             return True
         self._log(f"Closing game ({exe_name})…")
-        subprocess.run(["taskkill", "/f", "/im", exe_name], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", exe_name], capture_output=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
         for _ in range(120):  # wait up to 60 s
             time.sleep(0.5)
             if not self.bot_running:
@@ -1636,7 +1638,8 @@ class RelicBotApp(tk.Tk):
                 if _consecutive >= 2:
                     self._log("[Watchdog] Game confirmed hung — force-closing…")
                     exe_full = os.path.basename(self.game_exe_var.get().strip())
-                    subprocess.run(["taskkill", "/F", "/IM", exe_full], capture_output=True)
+                    subprocess.run(["taskkill", "/F", "/IM", exe_full], capture_output=True,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
                     self._game_hung = True
                     _consecutive = 0
             else:
