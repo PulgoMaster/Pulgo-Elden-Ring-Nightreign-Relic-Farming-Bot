@@ -3387,12 +3387,34 @@ class RelicBotApp(tk.Tk):
                         if self._global_murk_expected is None:
                             self._global_murk_expected = murk_val
                         elif murk_val != self._global_murk_expected:
+                            # One retry to rule out OCR noise before aborting.
                             self._log(
-                                f"  ERROR: Murk is {murk_val:,} but expected "
-                                f"{self._global_murk_expected:,} — save restore may have "
-                                "failed. Aborting batch.")
-                            self.bot_running = False
-                            return relic_results
+                                f"  Murk mismatch ({murk_val:,} ≠ {self._global_murk_expected:,})"
+                                " — re-reading to confirm…")
+                            time.sleep(0.5)
+                            try:
+                                _recheck_img = screen_capture.capture(region)
+                                _recheck_val, _ = relic_analyzer.read_murk(
+                                    _recheck_img, region=self._murk_region)
+                            except Exception:
+                                _recheck_val = murk_val   # treat read failure as same result
+                            if _recheck_val == self._global_murk_expected:
+                                self._log("  Re-read matched — OCR noise, continuing.")
+                                murk_val  = _recheck_val
+                                _p3_count = murk_val // murk_cost
+                            else:
+                                self._log(
+                                    f"  Re-read also mismatched ({_recheck_val:,}). "
+                                    "Save restore may have failed — restoring and restarting.")
+                                try:
+                                    _sp = self.save_path_var.get()
+                                    save_manager.restore(
+                                        _sp,
+                                        os.path.join(self.backup_path_var.get(),
+                                                     os.path.basename(_sp)))
+                                except Exception as _gme:
+                                    self._log(f"  Save restore failed: {_gme}")
+                                return relic_results
                         if self._overlay:
                             ov = self._overlay
                             mv, pc = murk_val, _p3_count
