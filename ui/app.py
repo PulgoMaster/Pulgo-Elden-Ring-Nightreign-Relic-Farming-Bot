@@ -387,6 +387,73 @@ def _available_ram_mb() -> float:
         return 9999.0   # if the call fails, don't block
 
 
+# ── Process helpers (Windows only, no subprocess) ─────────────────────────── #
+#
+# tasklist.exe and taskkill.exe are blocked/intercepted by some security
+# software (and by EasyAntiCheat during game runs), causing subprocess.run()
+# to hang indefinitely even with CREATE_NO_WINDOW.  These helpers use
+# EnumProcesses + OpenProcess + QueryFullProcessImageNameW / TerminateProcess
+# via ctypes — direct kernel32/psapi calls that bypass subprocess scanning.
+
+def _pids_for_exe(exe_name: str) -> list:
+    """Return a list of PIDs whose image name matches exe_name (case-insensitive)."""
+    exe_lower = exe_name.lower()
+    results = []
+    try:
+        _k32   = ctypes.windll.kernel32
+        _psapi = ctypes.windll.psapi
+        count  = 512
+        while True:
+            pids      = (ctypes.c_ulong * count)()
+            cb_needed = ctypes.c_ulong(0)
+            _psapi.EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(cb_needed))
+            n = cb_needed.value // ctypes.sizeof(ctypes.c_ulong)
+            if n < count:
+                break
+            count *= 2
+        for pid in list(pids)[:n]:
+            if pid == 0:
+                continue
+            h = _k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                continue
+            buf = ctypes.create_unicode_buffer(260)
+            sz  = ctypes.c_ulong(260)
+            if _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(sz)):
+                if os.path.basename(buf.value).lower() == exe_lower:
+                    results.append(pid)
+            _k32.CloseHandle(h)
+    except Exception:
+        pass
+    return results
+
+
+def _kill_exe(exe_name: str) -> None:
+    """Terminate all processes whose image name matches exe_name."""
+    _k32 = ctypes.windll.kernel32
+    for pid in _pids_for_exe(exe_name):
+        h = _k32.OpenProcess(1, False, pid)   # PROCESS_TERMINATE
+        if h:
+            _k32.TerminateProcess(h, 1)
+            _k32.CloseHandle(h)
+
+
+def _boost_game_priority(exe_name: str) -> bool:
+    """Raise the game process to HIGH priority class.
+    Returns True if at least one process was boosted successfully."""
+    _HIGH_PRIORITY_CLASS = 0x00000080
+    _PROCESS_SET_INFORMATION = 0x0200
+    _k32 = ctypes.windll.kernel32
+    boosted = False
+    for pid in _pids_for_exe(exe_name):
+        h = _k32.OpenProcess(_PROCESS_SET_INFORMATION, False, pid)
+        if h:
+            if _k32.SetPriorityClass(h, _HIGH_PRIORITY_CLASS):
+                boosted = True
+            _k32.CloseHandle(h)
+    return boosted
+
+
 class RelicBotApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -416,6 +483,9 @@ class RelicBotApp(tk.Tk):
         self._hotkey_str = "Key.f9"       # pynput key string
         self._hotkey_display = "F9"        # human-readable label
         self._global_kb_listener = None    # persistent pynput Listener
+        # Overlay visibility toggle hotkey
+        self._ov_hotkey_str     = "Key.f7"
+        self._ov_hotkey_display = "F7"
 
         # Bot state
         self.bot_thread: threading.Thread | None = None
@@ -431,6 +501,14 @@ class RelicBotApp(tk.Tk):
         # recorded by the adaptive load wait. Used to scale Phase 0 shop wait.
         self._last_load_elapsed: float = 45.0
 
+        # Adaptive input-gap scaling — tracks game load-time as a proxy for
+        # overall system performance. As the system slows under prolonged use,
+        # load times grow and _perf_gap_mult rises proportionally, widening
+        # all input gaps so dialogs have more time to open.
+        self._first_load_elapsed: float = 0.0   # baseline (first successful load)
+        self._load_history: list = []            # sliding window — last 5 load times
+        self._perf_gap_mult: float = 1.0         # current multiplier (1.0 = baseline)
+
         # Backup/startup ready event
         self._ready_event = threading.Event()
 
@@ -438,7 +516,6 @@ class RelicBotApp(tk.Tk):
         self._overlay = None
         self._overlay_enabled_var    = tk.BooleanVar(value=True)
         # Overlay element visibility / behaviour
-        self._ov_mouse_lock_var      = tk.BooleanVar(value=False)
         self._ov_show_stats_var      = tk.BooleanVar(value=True)
         self._ov_show_rolls_var      = tk.BooleanVar(value=True)
         self._ov_show_overflow_var   = tk.BooleanVar(value=True)
@@ -450,6 +527,11 @@ class RelicBotApp(tk.Tk):
         self._async_enabled_var     = tk.BooleanVar(value=False)
         self._stop_after_batch      = False   # graceful stop flag
         self._game_hung             = False   # set True by watchdog when game freezes
+        self._low_perf_mode_var     = tk.BooleanVar(value=False)
+        self._mouse_blocker_hook   = None   # WH_MOUSE_LL hook handle
+        self._mouse_blocker_cb     = None   # keep-alive for hook callback (prevent GC)
+        self._mouse_blocker_thread = None   # daemon thread running hook message pump
+        self._mouse_blocker_tid    = 0      # thread ID for PostThreadMessage to stop hook
         # Per-run counters (reset each start)
         self._ov_hits_33 = 0
         self._ov_hits_23 = 0
@@ -559,17 +641,10 @@ class RelicBotApp(tk.Tk):
         ttk.Entry(save_frame, textvariable=self.game_exe_var, width=52).grid(row=2, column=1, **pad)
         ttk.Button(save_frame, text="Browse", command=self._browse_game_exe).grid(row=2, column=2, **pad)
 
-        ttk.Label(save_frame, text="Confirm key:").grid(row=4, column=0, sticky="w", **pad)
-        self.confirm_key_var = tk.StringVar(value="f")
-        _ck_entry = ttk.Entry(save_frame, textvariable=self.confirm_key_var, width=5)
-        _ck_entry.grid(row=4, column=1, sticky="w", **pad)
-        _Tooltip(_ck_entry, "The key used to confirm/interact in-game.\nSpammed automatically during the load wait to skip title screens and navigate menus.")
-
-        ttk.Label(save_frame, text="Close buffer (s):").grid(row=5, column=0, sticky="w", **pad)
-        self.game_close_buffer_var = tk.StringVar(value="4")
-        _gcb_entry = ttk.Entry(save_frame, textvariable=self.game_close_buffer_var, width=7)
-        _gcb_entry.grid(row=5, column=1, sticky="w", **pad)
-        _Tooltip(_gcb_entry, "Extra seconds to wait after the game process fully closes before\nrestoring the save or relaunching. Increase on slow machines or if\nEasyAntiCheat causes issues on restart.")
+        ttk.Label(
+            save_frame,
+            text="\u26a0  The bot requires default in-game keybinds — F must be your confirm/interact key.",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Choose Relic Type + Color Filter ────────────────────────── #
         type_color_frame = ttk.LabelFrame(inner, text="Choose Relic Type")
@@ -651,6 +726,16 @@ class RelicBotApp(tk.Tk):
             seq_frame, text="Manual Key Recording ▼",
             command=self._toggle_manual_setup)
         self._manual_toggle_btn.grid(row=1, column=0, sticky="w", **pad)
+        _Tooltip(self._manual_toggle_btn,
+                 "\u26a0  Advanced users only.\n\n"
+                 "This section lets you re-record or replace the input sequences\n"
+                 "the bot replays during each iteration.\n\n"
+                 "DO NOT modify any recordings unless you fully understand what\n"
+                 "each phase does and why the inputs are timed the way they are.\n"
+                 "An incorrect recording will cause the bot to navigate wrong menus,\n"
+                 "buy wrong items, skip relics, or break the iteration entirely.\n\n"
+                 "Most users should NEVER need to open this section.\n"
+                 "The default auto-loaded sequences work for standard setups.")
 
         # Collapsible recording frame (hidden by default)
         self._manual_setup_frame = ttk.Frame(seq_frame)
@@ -734,11 +819,6 @@ class RelicBotApp(tk.Tk):
         self.batch_limit_var = tk.StringVar(value="20")
         ttk.Entry(self.batch_frame, textvariable=self.batch_limit_var, width=7).grid(row=0, column=3, **pad)
 
-        ttk.Label(self.batch_frame, text="Analysis delay (s):").grid(row=1, column=0, sticky="w", **pad)
-        self.batch_delay_var = tk.StringVar(value="3.0")
-        _bd_entry = ttk.Entry(self.batch_frame, textvariable=self.batch_delay_var, width=7)
-        _bd_entry.grid(row=1, column=1, **pad)
-        _Tooltip(_bd_entry, "Wait time after inputs before taking the relic screenshot.\nIncrease if relics haven't fully loaded when captured.")
 
         ttk.Label(self.batch_frame, text="Output folder:").grid(row=2, column=0, sticky="w", **pad)
         self.batch_output_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "batch_output"))
@@ -751,11 +831,24 @@ class RelicBotApp(tk.Tk):
             self.batch_frame, text="Show HUD overlay while bot is running",
             variable=self._overlay_enabled_var,
         )
-        ov_chk.grid(row=3, column=0, columnspan=5, sticky="w", **pad)
+        ov_chk.grid(row=3, column=0, columnspan=3, sticky="w", **pad)
         _Tooltip(ov_chk,
                  "Displays a translucent HUD in the bottom-left of your screen with live stats and log.\n"
                  "Requires the game to run in Borderless or Fullscreen.\n"
                  "Clicking the HUD does NOT steal focus from the game window.")
+        ttk.Label(self.batch_frame, text="Toggle Hotkey:").grid(row=3, column=3, sticky="e", **pad)
+        self._ov_hotkey_btn = ttk.Button(
+            self.batch_frame,
+            text=f"Rec: {self._ov_hotkey_display}",
+            command=self._set_ov_hotkey_dialog,
+            width=10,
+        )
+        self._ov_hotkey_btn.grid(row=3, column=4, sticky="w", **pad)
+        _Tooltip(self._ov_hotkey_btn,
+                 f"Press this key (default: F7) to toggle the overlay on/off without\n"
+                 "interrupting the game or the bot.\n"
+                 "Stats continue updating in the background while the overlay is hidden.\n\n"
+                 "Click to record a different key.")
 
         # Brute Force Analysis toggle
         bf_chk = ttk.Checkbutton(
@@ -827,17 +920,8 @@ class RelicBotApp(tk.Tk):
             self._ov_elem_widgets.append(chk)
             return chk
 
-        _ov_chk(ov_elem_lf, "Lock mouse to overlay (cursor stays inside while overlay is visible)",
-                self._ov_mouse_lock_var, 0, 0,
-                "Calls Windows ClipCursor to keep your mouse inside the overlay window.\n"
-                "Prevents accidental game inputs when reaching for the overlay.\n\n"
-                "Note: the game still receives raw mouse input for camera movement;\n"
-                "this only prevents the cursor from visually leaving the overlay.\n\n"
-                "Drag the header to reposition the overlay while locked.\n"
-                "Use the W/H sliders on the overlay itself to resize.")
-
         _ov_chk(ov_elem_lf, "Show Stats  (Murk, Relics, Bought, etc.)",
-                self._ov_show_stats_var, 1, 0)
+                self._ov_show_stats_var, 0, 0)
         _ov_chk(ov_elem_lf, "Track Rolls  (God Roll / Good / Duds counters + Best Batches)",
                 self._ov_show_rolls_var, 1, 1)
         _ov_chk(ov_elem_lf, "Show Overflow Worker Hits",
@@ -855,6 +939,25 @@ class RelicBotApp(tk.Tk):
         # Gray out element widgets when overlay is disabled
         self._overlay_enabled_var.trace_add("write", self._on_overlay_enable_toggle)
         self._on_overlay_enable_toggle()
+
+        # Low Performance Mode
+        lpm_chk = ttk.Checkbutton(
+            self.batch_frame,
+            text="🐢 Low Performance Mode",
+            variable=self._low_perf_mode_var,
+            command=self._on_lpm_toggle,
+        )
+        lpm_chk.grid(row=7, column=0, columnspan=5, sticky="w", **pad)
+        _Tooltip(lpm_chk,
+                 "Applies conservative timing for slower systems or after extended runs\n"
+                 "where the system has destabilised under load.\n\n"
+                 "When enabled:\n"
+                 "  • Phase 1 buy gap raised to 0.50 s base (dialog has more time to open)\n"
+                 "  • Phase 4 initial settle raised to 2.0 s (Sell screen fully stabilises)\n"
+                 "  • Brute Force Analysis disabled (reduces CPU / RAM pressure)\n\n"
+                 "Input gaps already scale automatically with observed game load time\n"
+                 "(see [Adaptive] log entries). This mode raises the baseline floor\n"
+                 "so the adaptive scaling starts from a safer starting point.")
 
         # ── Bot Control ─────────────────────────────────────────────── #
         ctrl_frame = ttk.LabelFrame(inner, text="Bot Control")
@@ -938,52 +1041,102 @@ class RelicBotApp(tk.Tk):
                 "Setup",
                 "Plays once — navigates from Roundtable Hold to the Relic Rites buy menu.",
                 (
-                    "Phase 0 — Setup\n"
+                    "Phase 0 — Setup  (played once per iteration)\n"
                     "Navigates from Roundtable Hold to the Relic Rites merchant buy screen.\n\n"
-                    "Default sequence assumes:\n"
-                    "  • You own the DLC (Nightreign)\n"
-                    "  • All shops in Roundtable Hold are unlocked\n\n"
-                    "⚠  If you don't have the DLC or not all shops are unlocked,\n"
-                    "    RE-RECORD this phase to match your own menu layout."
+                    "Inputs (default recording):\n"
+                    "  • M         — opens the pause / world-map menu\n"
+                    "  • DOWN ×6   — scrolls through menu options to the merchant / shop entry\n"
+                    "  • F         — confirms and opens the shop\n"
+                    "  (bot pauses here — OCR waits up to 30 s for 'Small Jar Bazaar' text)\n"
+                    "  • UP ×1     — moves up to the Relic Rites item in the shop list\n"
+                    "  • RIGHT ×2  — selects the correct relic type column\n\n"
+                    "Why the timing matters:\n"
+                    "  Each DOWN press must land after the previous menu animation completes.\n"
+                    "  If a press fires too early it registers in the wrong layer and the bot\n"
+                    "  ends up in a different menu (e.g. Collector Signboard, Change Garb).\n"
+                    "  The bot adds adaptive extra delay after each key to compensate for\n"
+                    "  slower systems or late-batch degradation.\n\n"
+                    "\u26a0  If you don't have the DLC or not all shops are unlocked,\n"
+                    "    RE-RECORD this phase to match your exact menu layout.\n"
+                    "    Count the DOWN presses carefully — one too many or too few\n"
+                    "    will land on the wrong menu option every iteration."
                 ),
                 False,
             ),
             (
                 "Buy Loop",
-                "Repeats — buys one relic. Stops on 'Insufficient murk' popup.",
+                "Repeats — buys one batch of 10 relics. Stops on 'Insufficient murk' popup.",
                 (
-                    "Phase 1 — Buy Loop\n"
-                    "Presses confirm to purchase relics one by one.\n"
-                    "Stops automatically when the game shows the 'Insufficient murk' message.\n\n"
+                    "Phase 1 — Buy Loop  (repeated until murk runs out)\n"
+                    "Purchases one batch of 10 relics. The bot replays this once per batch.\n\n"
+                    "Inputs (default recording):\n"
+                    "  • F      — opens the purchase quantity dialog\n"
+                    "  • DOWN   — selects ×10 (maximum quantity)\n"
+                    "  • F      — confirms the purchase\n"
+                    "  • F      — closes the purchase-complete / confirmation dialog\n\n"
+                    "Why the timing matters:\n"
+                    "  The gap between F (opens dialog) and DOWN is critical.\n"
+                    "  The purchase dialog needs time to fully appear before DOWN fires.\n"
+                    "  If DOWN fires too early — while the dialog is still animating —\n"
+                    "  it falls through to the shop navigation layer and moves the cursor\n"
+                    "  to a random shop item instead. The bot then cycles through wrong\n"
+                    "  items for the rest of the iteration (the desync bug).\n"
+                    "  The bot preserves the original recorded timing (~500 ms F-to-DOWN)\n"
+                    "  and adds adaptive extra delay on stressed systems.\n\n"
                     "Works for all setups — no re-recording needed."
                 ),
                 True,
             ),
             (
                 "Relic Rites Nav",
-                "Plays once — opens the Relic Rites review screen (Esc → Map → down → F).",
+                "Plays once — opens the Relic Rites review screen (Esc → Map → down × 3 → F).",
                 (
-                    "Phase 2 — Relic Rites Nav\n"
-                    "After buying, opens the Relic Rites review screen via the pause menu.\n"
-                    "Sequence: Esc → Map tab → scroll down to Relic Rites → F to confirm.\n\n"
-                    "⚠  If you don't have all shops unlocked, the menu layout may differ.\n"
-                    "    RE-RECORD this phase if navigation fails to land on the sell screen."
+                    "Phase 2 — Relic Rites Nav  (played once after buying)\n"
+                    "After buying relics, closes the shop and opens the Relic Rites\n"
+                    "review / sell screen.\n\n"
+                    "Inputs (default recording):\n"
+                    "  • ESC      — closes the shop, returns to the game\n"
+                    "  (bot waits 2 s for the menu close animation to fully complete)\n"
+                    "  • M        — opens the pause menu\n"
+                    "  • DOWN ×3  — scrolls to the Relic Rites entry in the menu\n"
+                    "  • F        — opens the Relic Rites screen\n\n"
+                    "Why the timing matters:\n"
+                    "  The 2 s pause after ESC is important. If M fires while the close\n"
+                    "  animation is still playing, the keypress may be swallowed or\n"
+                    "  land in the wrong menu layer. Similarly, DOWN presses must wait\n"
+                    "  for each menu step to settle before the next fires.\n\n"
+                    "\u26a0  If your menu has a different item order (e.g. different number of\n"
+                    "    options between ESC and Relic Rites), RE-RECORD this phase.\n"
+                    "    Test with '▶ Test' and watch that it lands on the Relic Rites screen."
                 ),
                 False,
             ),
             (
                 "Navigate to Sell",
-                "Automatic — OCR detects which character tab is active, then presses F2 exactly N times.",
+                "Automatic — OCR detects the active character tab, then presses F2 exactly N times.",
                 (
-                    "Phase 3 — Navigate to Sell  (no recording needed)\n"
-                    "Runs automatically whenever Phase 2 is configured.\n\n"
+                    "Phase 3 — Navigate to Sell  (fully automatic, no recording needed)\n"
+                    "After the Relic Rites screen opens, navigates to the Sell tab.\n\n"
                     "How it works:\n"
-                    "  1. Takes a screenshot and identifies the active character tab via OCR.\n"
-                    "  2. Presses F2 the exact number of times needed to reach Sell\n"
-                    "     (Wylder=10, Guardian=9 … Undertaker=1, Sell=0).\n"
-                    "  3. Verifies the Sell page is open.  If not, runs a safety F2 loop\n"
-                    "     (up to 15 extra presses) to recover automatically.\n\n"
-                    "No recording required — this phase adapts to any starting tab."
+                    "  1. Takes a screenshot and identifies the active character tab via OCR\n"
+                    "     (reads the tab bar: Wylder, Guardian, Duchess … Undertaker, Sell).\n"
+                    "  2. Calculates how many F2 presses are needed to reach Sell:\n"
+                    "     Wylder = 10 presses, Guardian = 9, … Undertaker = 1, Sell = 0.\n"
+                    "  3. Presses F2 the exact number of times.\n"
+                    "  4. Verifies the Sell page is open via OCR. If not, runs a safety\n"
+                    "     F2 recovery loop (up to 15 extra presses) to self-correct.\n\n"
+                    "Why F2:\n"
+                    "  F2 is the default 'next tab' key in Elden Ring Nightreign.\n"
+                    "  The bot assumes default keybinds. If you've rebound F2, this\n"
+                    "  phase will fail to navigate to the correct tab.\n\n"
+                    "Change Garb recovery:\n"
+                    "  Phase 2 (ESC → M → DOWN×3 → F) can land on 'Change Garb'\n"
+                    "  if one DOWN input is dropped during the menu animation.\n"
+                    "  Change Garb is one position above Relic Rites in the menu.\n"
+                    "  Phase 3 detects 'Change Garb' text immediately at startup\n"
+                    "  and triggers ESC recovery → Phase 0 → Phase 2 before\n"
+                    "  entering the sell scan, saving the bought relics.\n\n"
+                    "No recording required — adapts automatically to any starting tab."
                 ),
                 False,
             ),
@@ -991,9 +1144,20 @@ class RelicBotApp(tk.Tk):
                 "Review Step",
                 "Repeats — advances to the next relic. Stops after reviewing all purchased relics.",
                 (
-                    "Phase 4 — Review Step\n"
-                    "Presses the right arrow to move from one relic to the next.\n"
-                    "Stops automatically after reviewing all relics (count = murk spent ÷ relic cost).\n\n"
+                    "Phase 4 — Review Step  (repeated once per relic)\n"
+                    "Advances through the relic list on the Sell screen to capture each\n"
+                    "relic's name and passives via OCR.\n\n"
+                    "Inputs (default recording):\n"
+                    "  • RIGHT arrow — moves to the next relic in the list\n\n"
+                    "How many times:\n"
+                    "  The bot repeats this (murk spent ÷ relic cost) times — one press\n"
+                    "  per relic. Relics are pre-loaded on the Sell screen so no wait is\n"
+                    "  needed between advances; the list is already fully rendered.\n\n"
+                    "Why the initial settle matters:\n"
+                    "  Before the first press, the bot waits for the Sell screen to finish\n"
+                    "  its opening animation (default 1 s, scaled up on degraded systems).\n"
+                    "  Without this wait, the first RIGHT press can be swallowed, causing\n"
+                    "  the bot to capture relic 1 twice and miss relic N.\n\n"
                     "Works for all setups — no re-recording needed."
                 ),
                 True,
@@ -1026,6 +1190,75 @@ class RelicBotApp(tk.Tk):
                 ttk.Label(tab, text="Settle (s):").grid(row=2, column=0, sticky="w", **pad)
                 ttk.Entry(tab, textvariable=self.phase_settle_vars[phase_idx],
                           width=6).grid(row=2, column=1, **pad)
+
+        # ── Auto-only phases: Load Skip and ESC Recovery ─────────────── #
+        # These phases are handled automatically by the bot and cannot be
+        # re-recorded, but are shown here so advanced users understand what
+        # the bot is doing during those stages.
+
+        _auto_tabs = [
+            (
+                "Load Skip (−0.5)",
+                "Automatic — spams F during game load to skip title screens.",
+                (
+                    "Phase \u22120.5 — Load Skip  (fully automatic, no recording needed)\n"
+                    "After each game launch, spams the confirm key (F) to skip title screens\n"
+                    "and get into the game world as quickly as possible.\n\n"
+                    "How it works:\n"
+                    "  1. Bot waits up to 150 s for the game process to appear and its\n"
+                    "     window to gain focus (using ctypes — no subprocess).\n"
+                    "  2. Once the window is detected, F is spammed at 0.15 s intervals\n"
+                    "     in 9 s bursts to advance through loading and title screens.\n"
+                    "  3. After each burst, the bot checks whether the game is loaded enough\n"
+                    "     to start Phase 0 navigation. If not, it spams another 9 s burst.\n"
+                    "  4. If the game doesn't load within the maximum wait, the iteration\n"
+                    "     is aborted and the bot retries from scratch.\n\n"
+                    "Why F is hardcoded:\n"
+                    "  F is the default confirm / interact key in Elden Ring Nightreign.\n"
+                    "  Phase 0, Phase 1, and Phase 2 also all rely on F as the confirm key.\n"
+                    "  The entire bot assumes default keybinds — if you've rebound confirm\n"
+                    "  to a different key, the bot will not work correctly.\n\n"
+                    "This phase is not re-recordable. It is hardcoded to work with default\n"
+                    "Elden Ring Nightreign keybindings."
+                ),
+            ),
+            (
+                "ESC Recovery",
+                "Automatic — presses ESC to return to the game screen when navigation goes wrong.",
+                (
+                    "ESC Recovery  (fully automatic, built into Phase 0 and Phase 2)\n"
+                    "When the bot detects it has navigated to the wrong menu or screen,\n"
+                    "it presses ESC to return to the main game world, then re-runs the\n"
+                    "appropriate phase from scratch.\n\n"
+                    "When it triggers:\n"
+                    "  • Phase 0: the highlighted shop item does not match the expected\n"
+                    "    relic type after navigation (bot landed on wrong item or menu).\n"
+                    "  • Phase 2: the Relic Rites screen did not open after navigation\n"
+                    "    (bot ended up in the wrong menu, e.g. Change Garb).\n"
+                    "  • Either phase exceeds its maximum retry attempts.\n\n"
+                    "How it works:\n"
+                    "  1. Presses ESC to close the current menu / return to game world.\n"
+                    "  2. Waits 0.5 s for the menu-close animation to complete.\n"
+                    "  3. Runs a full OCR check to confirm the main game screen is visible.\n"
+                    "  4. Re-runs Phase 0 (or Phase 2) from the beginning.\n"
+                    "  5. If recovery fails after the maximum attempt count, the iteration\n"
+                    "     is aborted and the batch resets for the next iteration.\n\n"
+                    "This phase is not re-recordable — ESC is a single fixed keypress\n"
+                    "used universally across all menus in the game."
+                ),
+            ),
+        ]
+        for auto_title, auto_hint, auto_tooltip in _auto_tabs:
+            tab = ttk.Frame(nb)
+            nb.add(tab, text=auto_title)
+            hint_lbl = ttk.Label(tab, text=auto_hint, foreground=theme.TEXT_MUTED)
+            hint_lbl.grid(row=0, column=0, sticky="w", padx=6, pady=2)
+            _Tooltip(hint_lbl, auto_tooltip)
+            ttk.Label(
+                tab,
+                text="This phase is handled automatically by the bot and cannot be re-recorded.",
+                foreground=theme.TEXT_MUTED,
+            ).grid(row=1, column=0, padx=6, pady=(0, 4), sticky="w")
 
     def _toggle_manual_setup(self):
         if self._manual_setup_expanded:
@@ -1086,15 +1319,21 @@ class RelicBotApp(tk.Tk):
                 self._log(f"WARNING: Could not load Phase 0 for '{rtype}': {e}")
 
     def _log_screen_resolution(self):
-        """Log detected screen resolution so the user can verify the crop is correct."""
-        from bot.screen_capture import get_screen_size
-        w, h = get_screen_size()
-        self._log(
-            f"Screen resolution detected: {w}×{h}. "
-            f"Relic panel crop: left={int(w*0.45)}px, top={int(h*0.65)}px "
-            f"→ {w - int(w*0.45)}×{h - int(h*0.65)}px region. "
-            f"Run in borderless or fullscreen for best results."
-        )
+        """Log detected screen resolution in a background thread to avoid blocking mainloop."""
+        def _query():
+            try:
+                from bot.screen_capture import get_screen_size
+                w, h = get_screen_size()
+                msg = (
+                    f"Screen resolution detected: {w}×{h}. "
+                    f"Relic panel crop: left={int(w*0.45)}px, top={int(h*0.65)}px "
+                    f"→ {w - int(w*0.45)}×{h - int(h*0.65)}px region. "
+                    f"Run in borderless or fullscreen for best results."
+                )
+            except Exception as e:
+                msg = f"Screen resolution check failed: {e}"
+            self.after(0, lambda: self._log(msg))
+        threading.Thread(target=_query, daemon=True).start()
 
     # ------------------------------------------------------------------ #
     #  SAVE FILE HELPERS
@@ -1126,7 +1365,6 @@ class RelicBotApp(tk.Tk):
 
     def _get_ov_settings(self) -> dict:
         return {
-            "mouse_lock":       self._ov_mouse_lock_var.get(),
             "show_stats":       self._ov_show_stats_var.get(),
             "show_rolls":       self._ov_show_rolls_var.get(),
             "show_overflow":    self._ov_show_overflow_var.get(),
@@ -1138,6 +1376,18 @@ class RelicBotApp(tk.Tk):
         """Push overlay element settings to the live overlay (if running)."""
         if self._overlay:
             self._overlay.apply_settings(self._get_ov_settings())
+
+    def _on_lpm_toggle(self) -> None:
+        """Apply or remove Low Performance Mode preset."""
+        if self._low_perf_mode_var.get():
+            self._parallel_enabled_var.set(False)
+            self._on_parallel_toggle()
+            self._log(
+                "[Low Performance Mode] ON — Phase 1 gap base 0.50 s, "
+                "Phase 4 initial settle 2.0 s, Brute Force disabled."
+            )
+        else:
+            self._log("[Low Performance Mode] OFF — standard timing.")
 
     def _on_parallel_toggle(self):
         """Enable/disable the workers spinbox based on the Brute Force checkbox."""
@@ -1194,11 +1444,8 @@ class RelicBotApp(tk.Tk):
             "save_path": self.save_path_var.get(),
             "backup_folder": self.backup_path_var.get(),
             "game_executable": self.game_exe_var.get(),
-            "game_close_buffer": self.game_close_buffer_var.get(),
-            "confirm_key": self.confirm_key_var.get(),
             "batch_limit_type": self.batch_limit_type.get(),
             "batch_limit": self.batch_limit_var.get(),
-            "batch_delay": self.batch_delay_var.get(),
             "batch_output": self.batch_output_var.get(),
             "phase_events": self.phase_events,
             "phase1_stop_text": self.phase_stop_text_vars[1].get(),
@@ -1213,13 +1460,15 @@ class RelicBotApp(tk.Tk):
             "parallel_enabled": self._parallel_enabled_var.get(),
             "parallel_workers": self._parallel_workers_var.get(),
             "async_enabled": self._async_enabled_var.get(),
+            "low_perf_mode": self._low_perf_mode_var.get(),
             "overlay_enabled":      self._overlay_enabled_var.get(),
-            "ov_mouse_lock":        self._ov_mouse_lock_var.get(),
             "ov_show_stats":        self._ov_show_stats_var.get(),
             "ov_show_rolls":        self._ov_show_rolls_var.get(),
             "ov_show_overflow":     self._ov_show_overflow_var.get(),
             "ov_show_process_log":  self._ov_show_proc_log_var.get(),
             "ov_show_relic_log":    self._ov_show_relic_log_var.get(),
+            "ov_hotkey_str":        self._ov_hotkey_str,
+            "ov_hotkey_display":    self._ov_hotkey_display,
         }
 
     def _dict_to_profile(self, data: dict):
@@ -1228,11 +1477,8 @@ class RelicBotApp(tk.Tk):
         self.save_path_var.set(data.get("save_path", ""))
         self.backup_path_var.set(data.get("backup_folder", _default_backup))
         self.game_exe_var.set(data.get("game_executable", ""))
-        self.game_close_buffer_var.set(str(data.get("game_close_buffer", "4")))
-        self.confirm_key_var.set(data.get("confirm_key", "e"))
         self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
         self.batch_limit_var.set(str(data.get("batch_limit", "20")))
-        self.batch_delay_var.set(str(data.get("batch_delay", "3.0")))
         self.batch_output_var.set(data.get("batch_output", _default_output))
         # Load phase events (support old single-sequence profiles via "input_sequence")
         if "phase_events" in data:
@@ -1251,11 +1497,18 @@ class RelicBotApp(tk.Tk):
         self._parallel_enabled_var.set(data.get("parallel_enabled", False))
         self._parallel_workers_var.set(data.get("parallel_workers", 2))
         self._async_enabled_var.set(data.get("async_enabled", False))
+        self._low_perf_mode_var.set(data.get("low_perf_mode", False))
         self._on_parallel_toggle()
         if "hotkey_str" in data:
             self._hotkey_str = data["hotkey_str"]
             self._hotkey_display = data.get("hotkey_display", self._hotkey_str.replace("Key.", "").upper())
             self._hotkey_btn.config(text=f"Rec Hotkey: {self._hotkey_display}")
+            self._start_global_hotkey_listener()
+        if "ov_hotkey_str" in data:
+            self._ov_hotkey_str     = data["ov_hotkey_str"]
+            self._ov_hotkey_display = data.get("ov_hotkey_display",
+                                               self._ov_hotkey_str.replace("Key.", "").upper())
+            self._ov_hotkey_btn.config(text=f"Rec: {self._ov_hotkey_display}")
             self._start_global_hotkey_listener()
         if "blocked_curses" in data:
             self._curse_clear()
@@ -1279,7 +1532,6 @@ class RelicBotApp(tk.Tk):
             self.relic_builder.set_state(data["criteria"])
         # Overlay settings
         self._overlay_enabled_var.set(data.get("overlay_enabled", True))
-        self._ov_mouse_lock_var.set(data.get("ov_mouse_lock", False))
         self._ov_show_stats_var.set(data.get("ov_show_stats", True))
         self._ov_show_rolls_var.set(data.get("ov_show_rolls", True))
         self._ov_show_overflow_var.set(data.get("ov_show_overflow", True))
@@ -1370,15 +1622,7 @@ class RelicBotApp(tk.Tk):
     # ------------------------------------------------------------------ #
 
     def _is_game_running(self, exe_name: str) -> bool:
-        try:
-            result = subprocess.run(
-                ["tasklist", "/fi", f"imagename eq {exe_name}"],
-                capture_output=True, text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            return exe_name.lower() in result.stdout.lower()
-        except Exception:
-            return False
+        return len(_pids_for_exe(exe_name)) > 0
 
     def _close_game(self) -> bool:
         exe_path = self.game_exe_var.get().strip()
@@ -1387,28 +1631,17 @@ class RelicBotApp(tk.Tk):
         exe_name = os.path.basename(exe_path)
         if not self._is_game_running(exe_name):
             self._log("Game already not running — applying close buffer before relaunch…")
-            try:
-                _buf = float(self.game_close_buffer_var.get())
-            except Exception:
-                _buf = 4.0
-            if _buf > 0:
-                time.sleep(_buf)
+            time.sleep(4.0)
             return True
         self._log(f"Closing game ({exe_name})…")
-        subprocess.run(["taskkill", "/f", "/im", exe_name], capture_output=True,
-                       creationflags=subprocess.CREATE_NO_WINDOW)
+        _kill_exe(exe_name)
         for _ in range(120):  # wait up to 60 s
             time.sleep(0.5)
             if not self.bot_running:
                 return False
             if not self._is_game_running(exe_name):
                 self._log("Game closed — waiting for cleanup…")
-                try:
-                    _buf = float(self.game_close_buffer_var.get())
-                except Exception:
-                    _buf = 4.0
-                if _buf > 0:
-                    time.sleep(_buf)
+                time.sleep(4.0)
                 return True
         self._log("WARNING: Game did not close within 60s.")
         return False
@@ -1576,6 +1809,9 @@ class RelicBotApp(tk.Tk):
                     self._log(
                         f"[Phase -0.5] Equipment menu detected — in-game confirmed "
                         f"({_elapsed:.1f} s after window focus).")
+                    _exe_bn = os.path.basename(self.game_exe_var.get().strip())
+                    if _exe_bn and _boost_game_priority(_exe_bn):
+                        self._log("[Phase -0.5] Game process boosted to HIGH priority.")
                     time.sleep(0.2)
                     self.player.tap("Key.esc")
                     time.sleep(2.5)   # wait for menu to fully close before Phase 0
@@ -1641,8 +1877,7 @@ class RelicBotApp(tk.Tk):
                 if _consecutive >= 2:
                     self._log("[Watchdog] Game confirmed hung — force-closing…")
                     exe_full = os.path.basename(self.game_exe_var.get().strip())
-                    subprocess.run(["taskkill", "/F", "/IM", exe_full], capture_output=True,
-                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                    _kill_exe(exe_full)
                     self._game_hung = True
                     _consecutive = 0
             else:
@@ -1745,7 +1980,8 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
 
-        hotkey = self._hotkey_str
+        hotkey    = self._hotkey_str
+        ov_hotkey = self._ov_hotkey_str
 
         def _on_press(key):
             try:
@@ -1754,6 +1990,8 @@ class RelicBotApp(tk.Tk):
                 k = str(key)
             if k == hotkey:
                 self.after(0, self._hotkey_pressed)
+            elif k == ov_hotkey and self._overlay and getattr(self._overlay, "_win", None):
+                self.after(0, self._overlay.toggle_user_visibility)
 
         self._global_kb_listener = _kb.Listener(on_press=_on_press, daemon=True)
         self._global_kb_listener.start()
@@ -1812,6 +2050,46 @@ class RelicBotApp(tk.Tk):
 
         listener = _kb.Listener(on_press=_capture, daemon=True)
         temp_listener[0] = listener
+        listener.start()
+        dlg.protocol("WM_DELETE_WINDOW", lambda: (listener.stop(), dlg.destroy()))
+
+    def _set_ov_hotkey_dialog(self):
+        """Open a key-capture dialog to set the overlay toggle hotkey."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Set Overlay Toggle Hotkey")
+        dlg.geometry("290x115")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.transient(self)
+
+        tk.Label(dlg, text="Press any key to use as the\noverlay visibility toggle:").pack(pady=8)
+        lbl = tk.Label(dlg, text="Waiting for key…", font=("", 11, "bold"))
+        lbl.pack()
+
+        done = [False]
+
+        def _capture(key):
+            if done[0]:
+                return False
+            done[0] = True
+            try:
+                k = key.char if (hasattr(key, "char") and key.char) else str(key)
+            except Exception:
+                k = str(key)
+            display = k.replace("Key.", "").upper() if k.startswith("Key.") else k.upper()
+            self._ov_hotkey_str     = k
+            self._ov_hotkey_display = display
+
+            def _finish():
+                lbl.config(text=f"Set to: {display}")
+                self._ov_hotkey_btn.config(text=f"Rec: {display}")
+                self._start_global_hotkey_listener()
+                dlg.after(700, dlg.destroy)
+
+            self.after(0, _finish)
+            return False
+
+        listener = _kb.Listener(on_press=_capture, daemon=True)
         listener.start()
         dlg.protocol("WM_DELETE_WINDOW", lambda: (listener.stop(), dlg.destroy()))
 
@@ -1906,6 +2184,10 @@ class RelicBotApp(tk.Tk):
         self._async_cancelled_iters = set()
         self._iter_contributions    = {}
         self._reset_iter_requested  = False
+        # Reset adaptive performance state — fresh baseline for each new batch run
+        self._first_load_elapsed = 0.0
+        self._load_history       = []
+        self._perf_gap_mult      = 1.0
         # Tell the player which exe to watch so inputs are blocked if game loses focus
         self.player.game_exe = os.path.basename(self.game_exe_var.get().strip())
         self.start_btn.config(state="disabled")
@@ -1956,7 +2238,6 @@ class RelicBotApp(tk.Tk):
         criteria_summary = self.relic_builder.get_criteria_summary()
         criteria["allowed_colors"] = self._get_allowed_colors()
         region = self._get_region()
-        delay = float(self.batch_delay_var.get())
         limit_type = self.batch_limit_type.get()
         limit_value = float(self.batch_limit_var.get())
         mode_desc = "loops" if limit_type == "loops" else "hours"
@@ -2293,7 +2574,7 @@ class RelicBotApp(tk.Tk):
                 self.after(0, self._reset_controls)
                 return
             self._set_status(f"Iteration {iteration}: launching game…", "orange")
-            confirm_key = self.confirm_key_var.get().strip() or "e"
+            confirm_key = "f"
             exe_name    = os.path.basename(self.game_exe_var.get().strip())
 
             # Wait for the game window to appear before starting the load timer.
@@ -2394,6 +2675,28 @@ class RelicBotApp(tk.Tk):
                 # Only update on success — don't let a timed-out attempt (0.0)
                 # clobber the last known good value and starve the Phase 0 window.
                 self._last_load_elapsed = _load_elapsed
+                # Adaptive gap scaling: track load time as a system-health proxy.
+                # As the system slows over a long run, load times grow and the
+                # multiplier rises so all input gaps widen proportionally.
+                if self._first_load_elapsed == 0.0:
+                    self._first_load_elapsed = _load_elapsed
+                self._load_history.append(_load_elapsed)
+                if len(self._load_history) > 5:
+                    self._load_history.pop(0)
+                if self._first_load_elapsed > 0 and len(self._load_history) >= 2:
+                    _recent = self._load_history[-min(3, len(self._load_history)):]
+                    _new_mult = max(1.0, min(2.5,
+                        (sum(_recent) / len(_recent)) / self._first_load_elapsed))
+                    if abs(_new_mult - self._perf_gap_mult) >= 0.05:
+                        self._perf_gap_mult = _new_mult
+                        self._log(
+                            f"  [Adaptive] System factor updated: {_new_mult:.2f}× "
+                            f"(recent avg {sum(_recent)/len(_recent):.1f} s vs "
+                            f"baseline {self._first_load_elapsed:.1f} s) — "
+                            f"input gaps scaled accordingly."
+                        )
+                    else:
+                        self._perf_gap_mult = _new_mult
             if not _in_game_ok:
                 _iter_restart_count += 1
                 self._log(
@@ -2420,11 +2723,13 @@ class RelicBotApp(tk.Tk):
 
             # ── Async mode: capture only, then push task to background worker ── #
             if _async_mode:
+                self.after(0, self._show_mouse_blocker)
                 captures = self._run_iteration_phases(
-                    label, criteria, region, delay,
+                    label, criteria, region,
                     iter_dir=iter_dir, hit_min=hit_min,
                     live_log_path=live_log_path,
                     capture_only=True, iteration=iteration)
+                self.after(0, self._hide_mouse_blocker)
 
                 if captures is None:
                     # Fatal capture error — shut down workers and abort
@@ -2557,10 +2862,12 @@ class RelicBotApp(tk.Tk):
                 continue   # skip normal post-processing
 
             # ── Normal mode: run phases + post-process inline ─────────── #
+            self.after(0, self._show_mouse_blocker)
             relic_results = self._run_iteration_phases(
-                label, criteria, region, delay,
+                label, criteria, region,
                 iter_dir=iter_dir, hit_min=hit_min,
                 live_log_path=live_log_path, iteration=iteration)
+            self.after(0, self._hide_mouse_blocker)
 
             if relic_results is None:
                 # Fatal error inside phases — abort
@@ -2668,6 +2975,9 @@ class RelicBotApp(tk.Tk):
             # hit_min is 2 normally, but 3 when the user requires ALL passives to match —
             # in that case a 2/3 near-miss is not a HIT and won't get a folder rename.
             num_matched = len(matched_passives)
+            # Pairing matches (↔) are labelled HIT at most — never GOD ROLL
+            if num_matched > 2 and any("\u2194" in str(p) for p in matched_passives):
+                num_matched = 2
             if num_matched == 0 and all_near_misses:
                 num_matched = max(
                     nm.get("matching_passive_count", len(nm.get("matching_passives", [])))
@@ -3169,6 +3479,9 @@ class RelicBotApp(tk.Tk):
 
         iter_g3, iter_g2, _ = self._count_relic_tiers(relic_results, hit_min)
         num_matched = len(matched_passives)
+        # Pairing matches (↔) are labelled HIT at most — never GOD ROLL
+        if num_matched > 2 and any("\u2194" in str(p) for p in matched_passives):
+            num_matched = 2
         if num_matched == 0 and all_near_misses:
             num_matched = max(
                 nm.get("matching_passive_count",
@@ -3297,7 +3610,7 @@ class RelicBotApp(tk.Tk):
     # ------------------------------------------------------------------ #
 
     def _run_iteration_phases(self, label: str, criteria: dict,
-                              region, delay: float,
+                              region,
                               iter_dir: str = "", hit_min: int = 2,
                               live_log_path: str = "",
                               capture_only: bool = False,
@@ -3323,6 +3636,31 @@ class RelicBotApp(tk.Tk):
         _P2_FAILSAFE = 30           # max navigation steps before giving up on sell page
         _P4_FAILSAFE = 200          # internal only — never shown in UI
         p4_settle = float(self.phase_settle_vars[4].get() or "0")
+
+        # ── Adaptive timing ───────────────────────────────────────────── #
+        # _perf_gap_mult rises above 1.0 as game load times grow (system
+        # degrading under sustained use). All input gaps are multiplied by
+        # this factor so dialogs and menus have proportionally more time.
+        _lpm = self._low_perf_mode_var.get()
+        # Phase 1: use play() with original human-recorded within-sequence timing
+        # (~504 ms F-to-DOWN as recorded). extra_delay adds a small buffer after
+        # each key_release on top of the natural gap so dialogs have more room to
+        # open under load. LPM adds a flat 100 ms floor even at baseline.
+        _p1_extra_delay  = round(
+            (0.10 if _lpm else 0.0) + 0.05 * max(0.0, self._perf_gap_mult - 1.0), 3)
+        # Phase 0/2: play_split already uses original recorded timing; extra_delay
+        # adds proportional buffer after each key so menus that open slowly don't
+        # swallow the next input. Scales with perf_mult (floor 0.10 s).
+        _p02_extra_delay = round(max(0.10, 0.10 * self._perf_gap_mult), 3)
+        # Phase 4 advance gap: relics are pre-loaded so no adaptive scaling
+        # needed for the advance itself. LPM uses a slightly larger gap as
+        # a safety margin.
+        _p4_advance_gap  = 0.20 if _lpm else 0.10
+        # Initial settle before Phase 4 loop — lets the Sell screen finish
+        # animating after Phase 3 navigation. Scaled by the perf multiplier
+        # so a degraded system gets proportionally more time.
+        _p4_init_settle  = (2.0 if _lpm else 1.0) * max(1.0, self._perf_gap_mult)
+        _p4_init_settle  = min(_p4_init_settle, 4.0)  # cap at 4 s
         murk_cost = 1800 if self.relic_type_var.get() == "night" else 600
         _p3_count    = None   # set by murk read below; None = use failsafe
         _actual_bought = None   # set after Phase 1 via murk re-read; used for Phase 4 count
@@ -3393,12 +3731,14 @@ class RelicBotApp(tk.Tk):
                 # play_split: fire M + down×6 + F (8 keys), poll for "Small Jar
                 # Bazaar" text (up to 30 s) to confirm shop loaded, then fire the
                 # remaining shop-nav inputs.
-                # extra_delay=0.1 adds 100 ms after each key release so down arrows
+                # extra_delay adds buffer after each key release so down arrows
                 # don't fire during the menu-open animation and get eaten.
-                # Applies to both normal and deep-of-night Phase 0 recordings.
+                # Scales with _p02_extra_delay so slower/degraded systems get
+                # proportionally more room. Applies to both Phase 0 recordings.
                 _p0_sent, _p0_sent_keys = self.player.play_split(
                     self.phase_events[0], split_after_n_keys=8,
-                    wait_fn=_p0_shop_wait, bypass_focus=True, extra_delay=0.1)
+                    wait_fn=_p0_shop_wait, bypass_focus=True,
+                    extra_delay=_p02_extra_delay)
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
 
@@ -3566,7 +3906,7 @@ class RelicBotApp(tk.Tk):
                     for buy_i in range(buy_count):
                         if not self.bot_running or self._reset_iter_requested:
                             return relic_results
-                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.50)
+                        self.player.play(self.phase_events[1], extra_delay=_p1_extra_delay)
                         if p1_settle > 0:
                             time.sleep(p1_settle)
                         if not self.bot_running or self._reset_iter_requested:
@@ -3583,6 +3923,11 @@ class RelicBotApp(tk.Tk):
                             try:
                                 img = screen_capture.capture(region)
                                 stopped = relic_analyzer.check_condition(img, p1_stop)
+                                if stopped:
+                                    # Double-check — dialog animation may produce false positive
+                                    time.sleep(0.5)
+                                    img2 = screen_capture.capture(region)
+                                    stopped = relic_analyzer.check_condition(img2, p1_stop)
                             except Exception as e:
                                 self._log(f"WARNING: buy condition check failed: {e}")
                                 stopped = False
@@ -3596,7 +3941,7 @@ class RelicBotApp(tk.Tk):
                     for buy_i in range(_P1_FAILSAFE):
                         if not self.bot_running or self._reset_iter_requested:
                             return relic_results
-                        self.player.play_fast(self.phase_events[1], hold=0.05, gap=0.50)
+                        self.player.play(self.phase_events[1], extra_delay=_p1_extra_delay)
                         if p1_settle > 0:
                             time.sleep(p1_settle)
                         if not self.bot_running or self._reset_iter_requested:
@@ -3606,6 +3951,11 @@ class RelicBotApp(tk.Tk):
                             try:
                                 img = screen_capture.capture(region)
                                 stopped = relic_analyzer.check_condition(img, p1_stop)
+                                if stopped:
+                                    # Double-check — dialog animation may produce false positive
+                                    time.sleep(0.5)
+                                    img2 = screen_capture.capture(region)
+                                    stopped = relic_analyzer.check_condition(img2, p1_stop)
                             except Exception as e:
                                 self._log(f"WARNING: buy condition check failed: {e}")
                                 stopped = False
@@ -3644,12 +3994,85 @@ class RelicBotApp(tk.Tk):
                                 f"all {_actual_bought} relic(s) bought as expected.")
 
                         elif _murk_after_val > _expected_remainder and _spent % murk_cost == 0:
-                            # Case 2: bought fewer than planned (stop condition fired early); accept and proceed
+                            # Case 2: stop condition fired early — retry buying remaining relics
                             _actual_bought = _spent // murk_cost
+                            _c2_remaining  = _p3_count - _actual_bought
                             self._log(
                                 f"  Post-buy murk: {_murk_after_val:,} — "
                                 f"only {_actual_bought} relic(s) bought (stop condition fired early). "
-                                f"Proceeding with {_actual_bought} relic(s).")
+                                f"Retrying for {_c2_remaining} remaining relic(s).")
+
+                            if (_c2_remaining > 0 and self.phase_events[0]
+                                    and self.bot_running and not self._reset_iter_requested):
+                                # Re-enter shop via Phase 0 (reuse _p0_shop_wait — it resets _shop_found[0])
+                                if _p0_exe:
+                                    self._focus_game_window(_p0_exe, timeout=3.0)
+                                if self.bot_running and not self._reset_iter_requested:
+                                    self._log("  [Case 2 retry] Re-entering shop via Phase 0…")
+                                    self.player.play_split(
+                                        self.phase_events[0], split_after_n_keys=8,
+                                        wait_fn=_p0_shop_wait, bypass_focus=True,
+                                        extra_delay=_p02_extra_delay)
+
+                                if (_shop_found[0] and self.bot_running
+                                        and not self._reset_iter_requested):
+                                    _c2_batches = math.ceil(_c2_remaining / 10)
+                                    self._log(
+                                        f"  [Case 2 retry] Shop confirmed — buying "
+                                        f"{_c2_remaining} relic(s) in ≤{_c2_batches + 2} batch(es).")
+                                    _c2_stopped = False
+                                    for _c2_i in range(_c2_batches + 2):
+                                        if not self.bot_running or self._reset_iter_requested:
+                                            break
+                                        self.player.play(
+                                            self.phase_events[1],
+                                            extra_delay=_p1_extra_delay)
+                                        if p1_settle > 0:
+                                            time.sleep(p1_settle)
+                                        if not self.bot_running or self._reset_iter_requested:
+                                            break
+                                        if p1_stop:
+                                            try:
+                                                _c2_img = screen_capture.capture(region)
+                                                _c2_stopped = relic_analyzer.check_condition(
+                                                    _c2_img, p1_stop)
+                                                if _c2_stopped:
+                                                    time.sleep(0.5)
+                                                    _c2_img2 = screen_capture.capture(region)
+                                                    _c2_stopped = relic_analyzer.check_condition(
+                                                        _c2_img2, p1_stop)
+                                            except Exception:
+                                                _c2_stopped = False
+                                            if _c2_stopped:
+                                                break
+
+                                    # Re-read murk and compute total bought from original murk
+                                    if self.bot_running and not self._reset_iter_requested:
+                                        try:
+                                            self.after(0, self._flash_capture)
+                                            _c2_murk_img = screen_capture.capture(region)
+                                            _c2_murk_val, _ = relic_analyzer.read_murk(
+                                                _c2_murk_img, region=self._murk_region)
+                                            if _c2_murk_val is not None and _c2_murk_val >= 0:
+                                                _c2_total_spent = murk_val - _c2_murk_val
+                                                if _c2_total_spent % murk_cost == 0:
+                                                    _actual_bought = _c2_total_spent // murk_cost
+                                                    self._log(
+                                                        f"  [Case 2 retry] Final murk: "
+                                                        f"{_c2_murk_val:,} — "
+                                                        f"total {_actual_bought} relic(s) bought.")
+                                                else:
+                                                    self._log(
+                                                        f"  [Case 2 retry] Post-retry murk "
+                                                        f"{_c2_murk_val:,} not divisible — "
+                                                        "using pre-retry count.")
+                                        except Exception as _c2e:
+                                            self._log(
+                                                f"  [Case 2 retry] Murk re-read failed: {_c2e}")
+                                else:
+                                    self._log(
+                                        "  [Case 2 retry] Shop not confirmed — "
+                                        f"proceeding with {_actual_bought} relic(s).")
 
                         elif _murk_after_val > _expected_remainder:
                             # Case 3: spent amount not divisible → unexpected purchase
@@ -3717,7 +4140,8 @@ class RelicBotApp(tk.Tk):
                         return relic_results
                     self.player.play_split(
                         self.phase_events[0], split_after_n_keys=8,
-                        wait_fn=_p0_shop_wait, bypass_focus=True, extra_delay=0.1)
+                        wait_fn=_p0_shop_wait, bypass_focus=True,
+                        extra_delay=_p02_extra_delay)
                     if not self.bot_running or self._reset_iter_requested:
                         return relic_results
                 time.sleep(1.5)   # inter-phase buffer before Phase 2
@@ -3737,7 +4161,7 @@ class RelicBotApp(tk.Tk):
             # then fire M + down×3 + F to open Relic Rites.
             _p2_sent, _p2_sent_keys = self.player.play_split(
                 self.phase_events[2], split_after_n_keys=1, mid_pause=2.0,
-                extra_delay=0.1)
+                extra_delay=_p02_extra_delay)
             if not self.bot_running or self._reset_iter_requested:
                 return relic_results
 
@@ -3767,6 +4191,76 @@ class RelicBotApp(tk.Tk):
                 return relic_results
             if _p0_exe:
                 self._focus_game_window(_p0_exe, timeout=2.0)
+
+            # ── Change Garb pre-flight check ──────────────────────────── #
+            # Phase 2 (ESC → M → DOWN×3 → F) can land on Change Garb
+            # instead of Relic Rites if one DOWN input is dropped during
+            # the menu animation. Change Garb is one DOWN short of Relic
+            # Rites in the menu list:
+            #   Expeditions → Character Selection → Change Garb → Relic Rites
+            # Detecting this early avoids wasting the full 80 s scan timeout.
+            # Recovery: ESC → Phase 0 (back to shop) → Phase 2 (re-navigate).
+            # Relics already bought are preserved — the iteration can continue.
+            _p3_cg_recovered = False
+            for _p3_cg_attempt in range(2):  # original + 1 recovery attempt
+                try:
+                    _cg_img = screen_capture.capture(region)
+                    _in_change_garb = relic_analyzer.check_condition(
+                        _cg_img, "change garb")
+                except Exception:
+                    _in_change_garb = False
+
+                if not _in_change_garb:
+                    break   # correct screen — proceed to sell scan
+
+                if _p3_cg_attempt == 0:
+                    self._log(
+                        "  Phase 3: 'Change Garb' menu detected — Phase 2 landed "
+                        "one DOWN input short of Relic Rites. "
+                        "ESC recovery → re-navigating…")
+                    _p3_cg_recovered = True
+                else:
+                    # Second pre-flight also wrong — abort now, no 80 s wait
+                    self._log(
+                        "  Phase 3: 'Change Garb' detected again after recovery "
+                        "— aborting iteration.")
+                    self._esc_to_game_screen(region)
+                    return relic_results
+
+                # ESC out of Change Garb → game world → Phase 0 → Phase 2
+                self._esc_to_game_screen(region)
+                if not self.bot_running or self._reset_iter_requested:
+                    return relic_results
+                if self.phase_events[0]:
+                    if _p0_exe:
+                        self._focus_game_window(_p0_exe, timeout=3.0)
+                    if not self.bot_running or self._reset_iter_requested:
+                        return relic_results
+                    self.player.play_split(
+                        self.phase_events[0], split_after_n_keys=8,
+                        wait_fn=_p0_shop_wait, bypass_focus=True,
+                        extra_delay=_p02_extra_delay)
+                    if not self.bot_running or self._reset_iter_requested:
+                        return relic_results
+                time.sleep(1.5)
+                if not self.bot_running or self._reset_iter_requested:
+                    return relic_results
+                if _p0_exe:
+                    self._focus_game_window(_p0_exe, timeout=2.0)
+                self.player.play_split(
+                    self.phase_events[2], split_after_n_keys=1, mid_pause=2.0,
+                    extra_delay=_p02_extra_delay)
+                if not self.bot_running or self._reset_iter_requested:
+                    return relic_results
+                time.sleep(1.5)
+                if not self.bot_running or self._reset_iter_requested:
+                    return relic_results
+                if _p0_exe:
+                    self._focus_game_window(_p0_exe, timeout=2.0)
+
+            if _p3_cg_recovered:
+                self._log("  Phase 3: Change Garb recovery complete — continuing to sell scan.")
+
             self._set_status(f"{label}: navigating to sell page…", "green")
 
             _p3_sell_reached = False
@@ -3834,6 +4328,15 @@ class RelicBotApp(tk.Tk):
             if _p0_exe:
                 self._focus_game_window(_p0_exe, timeout=2.0)
 
+            # Initial settle — lets the Sell screen fully stabilise after
+            # Phase 3's F2 navigation before the first advance input fires.
+            # Without this, the RIGHT arrow at step 1 can be swallowed by a
+            # still-animating menu transition, causing relic 1 to be captured
+            # twice. Scaled by _perf_gap_mult so slower systems wait longer.
+            time.sleep(_p4_init_settle)
+            if not self.bot_running or self._reset_iter_requested:
+                return relic_results if not capture_only else []
+
             # ── Capture-only mode (async analysis) ──────────────────── #
             if capture_only:
                 captures = []
@@ -3843,7 +4346,7 @@ class RelicBotApp(tk.Tk):
                     if not self.bot_running:
                         return captures
                     if step_i > 0:
-                        self.player.play_fast(self.phase_events[4], gap=0.25)
+                        self.player.play_fast(self.phase_events[4], gap=_p4_advance_gap)
                         if p4_settle > 0:
                             time.sleep(p4_settle)
                         if not self.bot_running:
@@ -3932,7 +4435,7 @@ class RelicBotApp(tk.Tk):
                     return relic_results
 
                 if step_i > 0:
-                    self.player.play_fast(self.phase_events[4], gap=0.25)
+                    self.player.play_fast(self.phase_events[4], gap=_p4_advance_gap)
                     if p4_settle > 0:
                         time.sleep(p4_settle)
                     if not self.bot_running:
@@ -3994,6 +4497,19 @@ class RelicBotApp(tk.Tk):
 
                 self._log_result(result)
                 time.sleep(0.05)   # let the main thread render the log line
+
+                # Sanity-check: skip results where OCR read a static UI element
+                # ("Select/Unselect All" button is always visible at the bottom of
+                # the Sell screen panel and can occasionally be captured instead of
+                # a relic name if the screen layout shifted during capture).
+                _r0 = result.get("relics_found", [{}])
+                _r0 = _r0[0] if _r0 else {}
+                _rname_raw = (_r0.get("name", "") if isinstance(_r0, dict) else str(_r0)).lower()
+                if "select" in _rname_raw and "unselect" in _rname_raw:
+                    self._log(
+                        f"  WARNING: relic {step_i + 1} OCR read UI element "
+                        f"('{_r0.get('name', '')}') — skipping slot.")
+                    continue
 
                 # Save screenshot if match or near-miss; discard otherwise
                 saved_fname = ""
@@ -4088,7 +4604,7 @@ class RelicBotApp(tk.Tk):
             return relic_results   # nothing to capture without Phase 4
 
         self._set_status(f"{label}: waiting for relic screen…", "green")
-        time.sleep(delay)
+        time.sleep(3.0)
         if not self.bot_running:
             return relic_results
 
@@ -4194,7 +4710,11 @@ class RelicBotApp(tk.Tk):
         """Return (g3_count, g2_count, dud_count) for individual relics in this iteration."""
         g3 = g2 = dud = 0
         for r in relic_results:
-            n = len(r.get("matched_passives", []))
+            _mp = r.get("matched_passives", [])
+            n = len(_mp)
+            # Pairing matches (↔) are labelled HIT at most — never GOD ROLL
+            if n > 2 and any("\u2194" in str(p) for p in _mp):
+                n = 2
             if n == 0 and r.get("near_misses"):
                 n = max(
                     nm.get("matching_passive_count",
@@ -4240,12 +4760,6 @@ class RelicBotApp(tk.Tk):
             messagebox.showwarning("No Game Executable",
                 "Set the game executable path so the bot can close the game.")
             return False
-        try:
-            float(self.game_close_buffer_var.get())
-        except ValueError:
-            messagebox.showwarning("Invalid Close Buffer", "Close buffer must be a number.")
-            return False
-
         if not self.batch_output_var.get():
             messagebox.showwarning("No Output Folder", "Choose an output folder for batch results.")
             return False
@@ -4262,11 +4776,6 @@ class RelicBotApp(tk.Tk):
                 return False
         except ValueError:
             messagebox.showwarning("Invalid Limit", "Batch limit must be a positive number.")
-            return False
-        try:
-            float(self.batch_delay_var.get())
-        except ValueError:
-            messagebox.showwarning("Invalid Delay", "Analysis delay must be a number.")
             return False
         return True
 
@@ -4346,12 +4855,74 @@ class RelicBotApp(tk.Tk):
                     return True
         return False
 
+    def _show_mouse_blocker(self):
+        """Install a low-level mouse hook (WH_MOUSE_LL) that swallows mouse button
+        click events during menu-navigation phases (Phase 0 – 4).  Mouse movement
+        is unaffected.  The hook intercepts at the OS message-pump level, so it
+        blocks clicks before any application (including the game) sees them.
+        Runs on a dedicated daemon thread with its own GetMessage loop."""
+        if self._mouse_blocker_thread and self._mouse_blocker_thread.is_alive():
+            return  # already active
+        try:
+            import ctypes.wintypes as _wt
+            import threading as _thr
+
+            _WH_MOUSE_LL = 14
+            # Mouse button messages to swallow (down + up for left/right/middle/X)
+            _BLOCK_MSGS = {0x0201, 0x0202, 0x0204, 0x0205,
+                           0x0207, 0x0208, 0x020B, 0x020C}
+            _HookProc = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_int, _wt.WPARAM, _wt.LPARAM)
+
+            def _hook_fn(nCode, wParam, lParam):
+                if nCode >= 0 and wParam in _BLOCK_MSGS:
+                    return 1   # swallow — game never sees this click
+                return ctypes.windll.user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+            cb = _HookProc(_hook_fn)
+            _tid_holder = [0]
+            _ready = _thr.Event()
+
+            def _pump():
+                _tid_holder[0] = ctypes.windll.kernel32.GetCurrentThreadId()
+                hook = ctypes.windll.user32.SetWindowsHookExW(
+                    _WH_MOUSE_LL, cb, None, 0)
+                self._mouse_blocker_hook = hook
+                _ready.set()
+                msg = _wt.MSG()
+                while ctypes.windll.user32.GetMessageW(
+                        ctypes.byref(msg), None, 0, 0) > 0:
+                    pass
+                if hook:
+                    ctypes.windll.user32.UnhookWindowsHookEx(hook)
+                    self._mouse_blocker_hook = None
+
+            t = _thr.Thread(target=_pump, daemon=True, name="MouseBlockHook")
+            t.start()
+            _ready.wait(timeout=1.0)
+            self._mouse_blocker_cb     = cb          # prevent GC while hook is live
+            self._mouse_blocker_thread = t
+            self._mouse_blocker_tid    = _tid_holder[0]
+        except Exception:
+            pass   # blocker is protective, not critical — never abort the bot
+
+    def _hide_mouse_blocker(self):
+        """Uninstall the low-level mouse hook (called after menu phases complete)."""
+        tid = self._mouse_blocker_tid
+        self._mouse_blocker_tid    = 0
+        self._mouse_blocker_thread = None
+        self._mouse_blocker_cb     = None
+        if tid:
+            # WM_QUIT (0x0012) causes GetMessage to return 0, ending the pump loop
+            ctypes.windll.user32.PostThreadMessageW(tid, 0x0012, 0, 0)
+
     def _reset_controls(self):
         self.start_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
         self.bot_running = False
         self._batch_log_path = ""        # stop mirroring to process log
         self._batch_relic_log_path = ""  # stop mirroring to relic log
+        self._hide_mouse_blocker()
         if self._overlay:
             self._overlay.destroy()
             self._overlay = None

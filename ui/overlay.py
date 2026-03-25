@@ -13,7 +13,6 @@ Use the W / H sliders at the bottom to resize it.
 import tkinter as tk
 from tkinter import messagebox as tk_messagebox
 import ctypes
-import ctypes.wintypes
 import threading
 
 # ── Windows API: prevent the overlay from ever stealing focus ─────── #
@@ -167,12 +166,8 @@ class BotOverlay:
         self._drag_x = 0
         self._drag_y = 0
 
-        # Mouse-lock (ClipCursor) state
-        self._mouse_lock_enabled = False
-
-        # Resize slider vars (created during build)
-        self._w_var: tk.IntVar | None = None
-        self._h_var: tk.IntVar | None = None
+        # User-initiated hide (hotkey toggle) — while True, game_watch auto-show is suppressed
+        self._user_hidden = False
 
         # Section visibility
         self._section_visible: dict[str, bool] = {
@@ -205,7 +200,6 @@ class BotOverlay:
         self._async_mode = async_mode
 
         if settings:
-            self._mouse_lock_enabled = settings.get("mouse_lock", False)
             for key in self._section_visible:
                 # profile keys use the same names
                 self._section_visible[key] = settings.get(f"show_{key}", True)
@@ -386,34 +380,6 @@ class BotOverlay:
         self._abort_btn.pack(side="left")
         self._abort_btn.bind("<Button-1>", self._on_abort_click)
 
-        # ── Resize row — W / H sliders ───────────────────────────────── #
-        resize_sec = _section_frame(w, with_sep=True)
-        _reg("always", resize_sec, fill="x")
-
-        ctrl_row = tk.Frame(resize_sec, bg=_BG)
-        ctrl_row.pack(fill="x", padx=10, pady=(0, 4))
-
-        self._w_var = tk.IntVar(value=_DEF_W)
-        self._h_var = tk.IntVar(value=_DEF_H)
-
-        tk.Label(ctrl_row, text="W", bg=_BG, fg=_DIM,
-                 font=("Consolas", 7)).pack(side="left")
-        tk.Scale(
-            ctrl_row, from_=_MIN_W, to=_MAX_W, orient="horizontal",
-            variable=self._w_var, command=self._on_resize_scale,
-            bg=_BG, fg=_FG, troughcolor=_SURFACE,
-            highlightthickness=0, sliderlength=12, bd=0, showvalue=0,
-        ).pack(side="left", fill="x", expand=True, padx=(2, 8))
-
-        tk.Label(ctrl_row, text="H", bg=_BG, fg=_DIM,
-                 font=("Consolas", 7)).pack(side="left")
-        tk.Scale(
-            ctrl_row, from_=_MIN_H, to=_MAX_H, orient="horizontal",
-            variable=self._h_var, command=self._on_resize_scale,
-            bg=_BG, fg=_FG, troughcolor=_SURFACE,
-            highlightthickness=0, sliderlength=12, bd=0, showvalue=0,
-        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
-
         # ── Log panels — Process (left) | Relics (right) ────────────── #
         logs_sec = _section_frame(w, with_sep=True)
         _reg("always", logs_sec, fill="both", expand=True, padx=0, pady=0)
@@ -503,15 +469,9 @@ class BotOverlay:
     def apply_settings(self, settings: dict) -> None:
         """Live-apply overlay element settings from a dict.
 
-        Keys: mouse_lock, show_stats, show_rolls, show_overflow,
+        Keys: show_stats, show_rolls, show_overflow,
               show_process_log, show_relic_log
         """
-        mouse_lock = settings.get("mouse_lock", self._mouse_lock_enabled)
-        if mouse_lock != self._mouse_lock_enabled:
-            self._mouse_lock_enabled = mouse_lock
-            if not mouse_lock:
-                self._release_cursor_clip()
-
         changed = False
         for key in self._section_visible:
             new_val = settings.get(f"show_{key}", self._section_visible[key])
@@ -521,32 +481,6 @@ class BotOverlay:
 
         if changed and self._win:
             self._root.after(0, self._repack_sections)
-
-        if self._mouse_lock_enabled:
-            self._clip_cursor_to_overlay()
-
-    # ── Mouse lock (ClipCursor) ────────────────────────────────────── #
-
-    def _clip_cursor_to_overlay(self) -> None:
-        """Confine the Windows cursor to the overlay window bounds."""
-        if not self._mouse_lock_enabled or not self._win:
-            return
-        try:
-            x = self._win.winfo_rootx()
-            y = self._win.winfo_rooty()
-            ww = self._win.winfo_width()
-            wh = self._win.winfo_height()
-            rect = ctypes.wintypes.RECT(x, y, x + ww, y + wh)
-            ctypes.windll.user32.ClipCursor(ctypes.byref(rect))
-        except Exception:
-            pass
-
-    def _release_cursor_clip(self) -> None:
-        """Release any active ClipCursor restriction."""
-        try:
-            ctypes.windll.user32.ClipCursor(None)
-        except Exception:
-            pass
 
     # ── Drag-to-move ───────────────────────────────────────────────── #
 
@@ -560,19 +494,6 @@ class BotOverlay:
         x = event.x_root - self._drag_x
         y = event.y_root - self._drag_y
         self._win.geometry(f"+{x}+{y}")
-        self._clip_cursor_to_overlay()
-
-    # ── Resize via W/H sliders ─────────────────────────────────────── #
-
-    def _on_resize_scale(self, _val=None) -> None:
-        if not self._win or not self._w_var or not self._h_var:
-            return
-        new_w = self._w_var.get()
-        new_h = self._h_var.get()
-        x = self._win.winfo_x()
-        y = self._win.winfo_y()
-        self._win.geometry(f"{new_w}x{new_h}+{x}+{y}")
-        self._clip_cursor_to_overlay()
 
     # ── Show / hide / destroy ──────────────────────────────────────── #
 
@@ -581,18 +502,28 @@ class BotOverlay:
         self._suppressed = suppressed
 
     def show(self) -> None:
-        if self._win and not getattr(self, "_suppressed", False):
+        """Auto-show (game watch). Suppressed when the user has manually hidden the overlay."""
+        if self._win and not getattr(self, "_suppressed", False) and not self._user_hidden:
             self._win.deiconify()
-            self._clip_cursor_to_overlay()
 
     def hide(self) -> None:
+        """Auto-hide (game watch — game lost focus)."""
         if self._win:
             self._win.withdraw()
-            self._release_cursor_clip()
+
+    def toggle_user_visibility(self) -> None:
+        """Hotkey-triggered toggle. Flips user_hidden and immediately shows/hides.
+        Stats continue updating in the background regardless of visibility."""
+        if not self._win:
+            return
+        self._user_hidden = not self._user_hidden
+        if self._user_hidden:
+            self._win.withdraw()
+        else:
+            self._win.deiconify()
 
     def destroy(self) -> None:
         self._watching = False
-        self._release_cursor_clip()
         if self._win:
             self._win.destroy()
             self._win = None

@@ -12,6 +12,7 @@ next to the executable so the bot can read and write files correctly.
 import sys
 import pathlib
 import shutil
+import os
 
 
 def _bootstrap_frozen() -> None:
@@ -43,7 +44,6 @@ def _bootstrap_frozen() -> None:
 
 if getattr(sys, "frozen", False):
     _bootstrap_frozen()
-
 
 from ui.app import RelicBotApp
 

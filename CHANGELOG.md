@@ -4,19 +4,38 @@ All notable changes to this project are documented here.
 
 ---
 
-## [1.4.5] – 2026-03-24
+## [1.4.5] – 2026-03-25
+
+### Added
+- **Adaptive input-gap scaling** — the bot tracks game load time each iteration as a proxy for overall system health. As load times grow over a long run (system slowing under sustained use), a `_perf_gap_mult` multiplier rises proportionally (capped at 2.5×). Phase 0, Phase 1, and Phase 2 input gaps all scale by this factor automatically. A `[Adaptive]` log line is emitted when the multiplier changes by ≥ 5%. Resets to 1.0 at the start of each new batch.
+- **Low Performance Mode** — new checkbutton in Batch Mode Settings. When enabled: Phase 1 gap base raised from 0.35 s to 0.50 s; Phase 4 initial settle raised from 1.0 s to 2.0 s; Brute Force Analysis automatically disabled. Saved with the profile.
+- **Game process priority boost** — immediately after Phase -0.5 confirms the game is in-game, the bot calls `SetPriorityClass(HIGH_PRIORITY_CLASS)` on the game process. This reduces input-drop frequency on loaded systems by ensuring the game gets more CPU time relative to background tasks.
+- **WH_MOUSE_LL mouse blocker** — a low-level Windows mouse hook (`SetWindowsHookExW`, `WH_MOUSE_LL`) swallows all mouse button events at the OS message-pump level while menu navigation phases are active. Runs on a dedicated daemon thread with its own `GetMessageW` pump; torn down via `PostThreadMessageW(WM_QUIT)` when no longer needed. Supersedes the previous transparent-overlay approach, which had no effect on games receiving raw input.
+- **Change Garb pre-flight check** — Phase 3 now checks for the Change Garb screen at startup before entering the 80-second Sell scan loop. If detected: immediately ESCs out, re-runs Phase 0 → Phase 2 to navigate back to Relic Rites. Since relics are already bought at this point the current iteration is saved, not aborted. Reduces a previously ~80 s loss to ~15 s recovery.
+- **Manual Key Recording safeguards** — the Manual Key Recording button now shows a warning tooltip (advanced users only). Each phase tab shows an expanded tooltip describing what that phase does and what to record. Phase -0.5 (Load Skip) and ESC Recovery tabs added as read-only reference panels.
 
 ### Fixed
-- **Phase 2 Journal false-positive causing repeated ESC loops** — a post-navigation OCR check for the "Relic Rites" title text was unreliable with the game's stylised font, causing the bot to repeatedly ESC out of a correctly-reached Relic Rites screen. The check has been removed. Phase 3's own Sell-tab detection and 80-second timeout correctly guard against wrong-screen scenarios.
-- **Phase 1 buying ~3× slower** — expanding the `check_condition` crop to full-screen made every OCR call in the buy loop 3× slower. The crop is now restored to the original fast region (`top 30%, left 65%`).
-- **Phase 4 input transition too slow** — Phase 4's between-input gap is now explicitly set to 0.25 s.
-- **Phase -0.5 looping on hung/crashed game** — the watchdog would set `_game_hung` but Phase -0.5 never checked it, continuing to OCR-poll a dead window until the hard timeout. Phase -0.5 now exits immediately when `_game_hung` is detected.
-- **Phase -0.5 load wait too short on slow hardware** — hard timeout raised from 90 s to 150 s. Observed load times of ~84 s on lower-end machines left almost no margin; 150 s prevents spurious timeouts.
-- **Smart resume (Case 2) buying 0 additional relics** — the Phase 1 resume loop re-played the buy sequence into a changed game UI state, always purchasing 0 additional relics. The resume loop has been removed. Case 2 (stop condition fired early, divisible spend) now accepts the partial buy count and proceeds directly to Phase 2.
+- **Phase 1 buy desync under sustained load** — the buy sequence used a fixed 0.20 s F-to-DOWN gap. Under sustained load (late in long batches), the purchase dialog takes longer to open, causing DOWN to land in the shop navigation layer instead. Phase 1 now uses `play()` (preserves the original ~504 ms recorded timing) with an additional adaptive delay that scales with `_perf_gap_mult`. Eliminates cursor position drift and the cascading desync that followed.
+- **Phase 4 first relic captured twice** — the RIGHT arrow at step 1 of Phase 4 was being swallowed by a still-animating Sell screen transition, causing relic 1 to be photographed twice and counted as two distinct relics. An initial settle (1.0 s normal / 2.0 s LPM, both scaled by `_perf_gap_mult`) is now applied before the Phase 4 loop starts.
+- **Change Garb menu entered instead of Relic Rites (~22% of iterations)** — Phase 2 (ESC → M → DOWN×3 → F) could drop one DOWN press under load, landing on Change Garb (one step above Relic Rites) instead. Change Garb shares the same F2 tab layout as Relic Rites, so the bot's 80-second sell scan would run to timeout before recovering. Fixed by the Change Garb pre-flight check (see above) and adaptive Phase 2 timing.
+- **Stop condition false positives** — the "Insufficient murk" stop condition was firing on dialog-close animations. The check now double-confirms: if the first read returns true, waits 0.5 s and re-checks before accepting the stop.
+- **GOD ROLL mislabelling for pairing matches** — relics found via the Passive Pool pairing mode were sometimes labelled GOD ROLL when they should be HIT. Pairing matches (passives containing the `↔` separator) are now capped at HIT tier regardless of how many pairing entries are in the matched list.
+- **Phase 4 OCR reading static UI element** — the "Select/Unselect All" button is always visible at the bottom of the Sell screen panel. If OCR captured it (layout shift or partial screen state during settle), the result was logged as a relic entry. These results are now detected by name and silently skipped with a warning log line.
+- **Phase 2 Journal false-positive causing repeated ESC loops** — unreliable OCR check for "Relic Rites" title text caused repeated ESC-outs from a correctly-reached screen. Check removed; Phase 3's Sell-tab detection handles wrong-screen recovery.
+- **Phase -0.5 looping on hung/crashed game** — the watchdog set `_game_hung` but Phase -0.5 never checked it. Phase -0.5 now exits immediately when `_game_hung` is detected.
+- **Phase -0.5 load wait too short on slow hardware** — hard timeout raised from 90 s to 150 s.
+- **Case 2 retry (stop condition fired early)** — when the stop condition fires before all planned relics are bought and the spend is divisible, the bot now automatically re-enters the shop (Phase 0 → Phase 1) and buys the remaining relics, then re-reads murk to compute the true total. The retry respects the stop condition and all bot-running guards. If the shop cannot be confirmed on re-entry the bot falls back to the pre-retry count.
+- **Bot self-terminating mid-Phase 1** — the overlay's cursor-lock (`ClipCursor`) fought the game's own cursor lock at 60 fps, flickering the cursor and accidentally triggering Force Stop → Close Game. Mouse lock removed entirely.
+- **Game not launching from bot background thread** — replaced `os.startfile()` with `subprocess.Popen(explorer.exe)` for reliable Steam URL handling from frozen PyInstaller threads.
+- **Tasklist console windows appearing** — all `tasklist`/`taskkill` subprocess calls replaced with direct Windows ctypes API (`EnumProcesses` / `TerminateProcess`), eliminating both console-window flicker and a hang on machines where subprocess creation from the EXE is delayed by security software.
+- **Bot window white/unresponsive on launch** — `mss.mss()` called on the main thread during startup caused a permanent hang on machines where security software scans `gdi32.dll` on first use. The call is now deferred to a background thread.
 
 ### Changed
-- **Overlay redesigned** — resize grip replaced with W/H sliders inside the overlay; individual sections (Stats, Rolls, Overflow Hits, Process Log, Relic Log) are independently toggleable; "Close game?" prompt added to force-stop flow.
-- **Overlay Elements settings** — new sub-section in Batch Mode Settings with per-element visibility toggles and optional mouse-lock (confines cursor to overlay bounds while visible). All settings are saved with the profile.
+- **Phase 0 and Phase 2 timing adaptive** — `extra_delay` for both phases now scales with `_perf_gap_mult` (minimum 0.10 s) instead of a fixed 0.10 s.
+- **Phase 4 relic review gap** — reduced from 0.25 s to 0.15 s (0.20 s in Low Performance Mode). No adaptive scaling applied here since relics are already loaded in memory.
+- **UI cleanup** — removed three settings that were either dead code or unsafe to change: Analysis Delay (hardcoded to 3.0 s), Close Buffer (hardcoded to 4.0 s), and Confirm Key (bot requires default F key throughout; replaced with a notice label).
+- **Overlay redesigned** — W/H resize sliders removed; overlay visibility is now toggled via a configurable hotkey (default F7, rebindable via a button in Batch Mode Settings). Stats continue updating while the overlay is hidden. The hotkey toggle does not steal game focus. Individual sections (Stats, Rolls, Overflow Hits, Process Log, Relic Log) are independently toggleable; "Close game?" prompt added to force-stop flow.
+- **Overlay Elements settings** — new sub-section in Batch Mode Settings with per-element visibility toggles. All settings are saved with the profile.
 
 ---
 
