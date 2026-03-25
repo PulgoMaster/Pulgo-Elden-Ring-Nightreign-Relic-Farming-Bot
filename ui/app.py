@@ -1512,14 +1512,14 @@ class RelicBotApp(tk.Tk):
           5. If found: press ESC once to exit the menu, wait 2.5 s, return.
           6. If not found: repeat from step 1.
 
-        Hard timeout: 90 s. Returns (True, elapsed_seconds) on success,
+        Hard timeout: 150 s. Returns (True, elapsed_seconds) on success,
         (False, 0.0) on timeout.
         """
         _F_BURST    = 9.0    # seconds of F spam per cycle
         _F_INTERVAL = 0.15   # gap between F presses (seconds)
         _PRE_ESC    = 1.0    # settle after F burst before pressing ESC
         _POST_ESC   = 1.0    # settle after ESC before OCR check
-        _MAX_WAIT   = 90.0   # hard timeout (seconds)
+        _MAX_WAIT   = 150.0  # hard timeout (seconds)
 
         _start = time.time()
         _cycle = 0
@@ -1532,11 +1532,14 @@ class RelicBotApp(tk.Tk):
         while True:
             if not self.bot_running:
                 return False, 0.0
+            if self._game_hung:
+                self._log("[Phase -0.5] Game hung — aborting load wait.")
+                return False, 0.0
 
             _elapsed = time.time() - _start
             if _elapsed >= _MAX_WAIT:
                 self._log(
-                    "[Phase -0.5] Could not confirm in-game state within 90 s — aborting.")
+                    "[Phase -0.5] Could not confirm in-game state within 150 s — aborting.")
                 return False, 0.0
 
             _cycle += 1
@@ -3635,47 +3638,12 @@ class RelicBotApp(tk.Tk):
                                 f"all {_actual_bought} relic(s) bought as expected.")
 
                         elif _murk_after_val > _expected_remainder and _spent % murk_cost == 0:
-                            # Case 2: bought fewer than planned; murk divisible → resume
-                            _actual_bought   = _spent // murk_cost
-                            _can_buy_more    = _murk_after_val // murk_cost
-                            _resume_batches  = min(
-                                math.ceil(_can_buy_more / 10), _MAX_BUY_BATCHES)
+                            # Case 2: bought fewer than planned (stop condition fired early); accept and proceed
+                            _actual_bought = _spent // murk_cost
                             self._log(
-                                f"  Post-buy murk: {_murk_after_val:,} — only "
-                                f"{_actual_bought} relic(s) bought so far. "
-                                f"Resuming Phase 1 for {_resume_batches} more batch(es)…")
-                            for _r_i in range(_resume_batches):
-                                if not self.bot_running or self._reset_iter_requested:
-                                    return relic_results
-                                self.player.play_fast(
-                                    self.phase_events[1], hold=0.05, gap=0.50)
-                                if p1_settle > 0:
-                                    time.sleep(p1_settle)
-                                if not self.bot_running or self._reset_iter_requested:
-                                    return relic_results
-                                if p1_stop:
-                                    self.after(0, self._flash_capture)
-                                    try:
-                                        _r_img = screen_capture.capture(region)
-                                        if relic_analyzer.check_condition(_r_img, p1_stop):
-                                            self._log(
-                                                f"  Resume stop condition met after "
-                                                f"{_r_i + 1} batch(es).")
-                                            break
-                                    except Exception:
-                                        pass
-                            # Re-read murk after resume to get final actual count
-                            try:
-                                _resume_img = screen_capture.capture(region)
-                                _resume_val, _ = relic_analyzer.read_murk(
-                                    _resume_img, region=self._murk_region)
-                                if _resume_val is not None and _resume_val >= 0:
-                                    _actual_bought = (murk_val - _resume_val) // murk_cost
-                                    self._log(
-                                        f"  After resume: {_murk_after_val:,} → {_resume_val:,} murk "
-                                        f"— {_actual_bought} relic(s) total.")
-                            except Exception:
-                                pass
+                                f"  Post-buy murk: {_murk_after_val:,} — "
+                                f"only {_actual_bought} relic(s) bought (stop condition fired early). "
+                                f"Proceeding with {_actual_bought} relic(s).")
 
                         elif _murk_after_val > _expected_remainder:
                             # Case 3: spent amount not divisible → unexpected purchase

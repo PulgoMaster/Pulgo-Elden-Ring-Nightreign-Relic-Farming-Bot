@@ -10,6 +10,9 @@ All notable changes to this project are documented here.
 - **Phase 2 Journal false-positive causing repeated ESC loops** — a post-navigation OCR check for the "Relic Rites" title text was unreliable with the game's stylised font, causing the bot to repeatedly ESC out of a correctly-reached Relic Rites screen. The check has been removed. Phase 3's own Sell-tab detection and 80-second timeout correctly guard against wrong-screen scenarios.
 - **Phase 1 buying ~3× slower** — expanding the `check_condition` crop to full-screen made every OCR call in the buy loop 3× slower. The crop is now restored to the original fast region (`top 30%, left 65%`).
 - **Phase 4 input transition too slow** — Phase 4's between-input gap is now explicitly set to 0.25 s.
+- **Phase -0.5 looping on hung/crashed game** — the watchdog would set `_game_hung` but Phase -0.5 never checked it, continuing to OCR-poll a dead window until the hard timeout. Phase -0.5 now exits immediately when `_game_hung` is detected.
+- **Phase -0.5 load wait too short on slow hardware** — hard timeout raised from 90 s to 150 s. Observed load times of ~84 s on lower-end machines left almost no margin; 150 s prevents spurious timeouts.
+- **Smart resume (Case 2) buying 0 additional relics** — the Phase 1 resume loop re-played the buy sequence into a changed game UI state, always purchasing 0 additional relics. The resume loop has been removed. Case 2 (stop condition fired early, divisible spend) now accepts the partial buy count and proceeds directly to Phase 2.
 
 ### Changed
 - **Overlay redesigned** — resize grip replaced with W/H sliders inside the overlay; individual sections (Stats, Rolls, Overflow Hits, Process Log, Relic Log) are independently toggleable; "Close game?" prompt added to force-stop flow.
