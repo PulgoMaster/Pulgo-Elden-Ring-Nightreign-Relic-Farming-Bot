@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.4.8] – 2026-03-26
+
+### Added
+- **Matches log panel** — "View Matches" button in the overlay toggles the two log panels into a single full-width scrollable view showing every matched relic with batch #, relic #, tier (2/3 or 3/3), passives, and curses. Clicking "Back to Logs" returns to the normal split log view. All matches are also written to `matches_log.txt` in the batch run folder for persistent review.
+- **Analyzed counter** — new overlay stat (next to Stored) showing total relics analyzed in the current batch across all iterations.
+
+### Fixed
+- **Stored counter** — was incorrectly displaying total relics analyzed; now correctly shows the number of relics currently pending in the async priority queue backlog.
+
+---
+
+## [1.4.7] – 2026-03-26
+
+### Added
+- **Curse detection** — relics with curse passives are now correctly identified during OCR analysis. Previously `analyze()` only matched against `ALL_PASSIVES_SORTED` (which excludes curses), so `matched_relic_curses` was always empty and `_is_curse_blocked()` never fired. All 4 confirmed false positives from the test run (HIT 014, HIT 024, HIT 030, HIT 039) were curse-carrying relics that should have been excluded. Fixed by adding a second-pass match against `ALL_CURSES` when the first-pass passive match returns None.
+- **Build Advisor tab** (Relic Builder → Tab 2) — enter a build description (free text or weapon/spell/skill dropdown) to get ranked passive recommendations. Imports selected passives directly into the Exact Relic tab. Max exact target slots raised 10 → 20.
+- **Real pool weight odds** — passive probability estimates now use per-passive `chanceWeight` values mined from game data (`AttachEffectTableParam`). `normal_prob()` and `deep_prob()` helpers in `database/pool_weights.py`. Build Advisor and overlay odds display both use these values.
+
+---
+
 ## [1.4.5] – 2026-03-25
 
 ### Added

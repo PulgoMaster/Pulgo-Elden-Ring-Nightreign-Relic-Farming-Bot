@@ -157,10 +157,14 @@ class BotOverlay:
         self._sv: dict[str, tk.StringVar] = {}
         self._reset_iter_btn: tk.Label | None  = None
         self._abort_btn:      tk.Label | None  = None
+        self._view_matches_btn: tk.Label | None = None
         self._log_box:        tk.Text  | None  = None   # process log
         self._relic_log_box:  tk.Text  | None  = None   # relic analysis log
+        self._matches_log_box: tk.Text | None  = None   # matches-only log
+        self._matches_panel:  tk.Frame | None  = None
         self._overflow_hits_frame: tk.Frame | None = None
         self._stop_pending   = False
+        self._matches_view   = False
 
         # Drag-to-move state
         self._drag_x = 0
@@ -259,7 +263,8 @@ class BotOverlay:
         _stat(r1, "Est. After", sv("est_murk_after", "—"), _GOLD)
         _stat(r1, "Relics",     sv("to_buy"),              _CYAN)
         _stat(r1, "Bought",     sv("bought"),              _CYAN)
-        _stat(r1, "Stored",     sv("stored", "0"),         _FG)
+        _stat(r1, "Stored",     sv("stored",   "0"),         _FG)
+        _stat(r1, "Analyzed",   sv("analyzed", "0"),         _FG)
 
         r2 = tk.Frame(stats_sec, bg=_BG)
         r2.pack(fill="x", padx=10, pady=2)
@@ -380,6 +385,15 @@ class BotOverlay:
         self._abort_btn.pack(side="left")
         self._abort_btn.bind("<Button-1>", self._on_abort_click)
 
+        self._view_matches_btn = tk.Label(
+            bf, text="★ View Matches",
+            bg="#0d2a0d", fg="#00ff88",
+            font=("Consolas", 10, "bold"),
+            padx=14, pady=5, cursor="hand2", relief="flat",
+        )
+        self._view_matches_btn.pack(side="left", padx=(6, 0))
+        self._view_matches_btn.bind("<Button-1>", lambda _: self._toggle_matches_view())
+
         # ── Log panels — Process (left) | Relics (right) ────────────── #
         logs_sec = _section_frame(w, with_sep=True)
         _reg("always", logs_sec, fill="both", expand=True, padx=0, pady=0)
@@ -429,6 +443,24 @@ class BotOverlay:
         self._relic_log_box.grid(row=1, column=0, sticky="nsew")
         rsb.grid(row=1, column=1, sticky="ns")
 
+        # Matches panel — full-width, replaces both log panels in matches view
+        self._matches_panel = tk.Frame(self._log_outer, bg=_BG)
+        self._matches_panel.columnconfigure(0, weight=1)
+        self._matches_panel.rowconfigure(1, weight=1)
+        tk.Label(self._matches_panel, text="MATCHED RELICS", bg=_BG, fg=_GREEN,
+                 font=("Consolas", 7, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        self._matches_log_box = tk.Text(
+            self._matches_panel, bg="#080b18", fg=_FG,
+            font=("Consolas", 7), wrap="word",
+            state="disabled", relief="flat", borderwidth=0,
+        )
+        msb = tk.Scrollbar(self._matches_panel, orient="vertical",
+                           command=self._matches_log_box.yview,
+                           bg=_BG, troughcolor=_SURFACE)
+        self._matches_log_box.configure(yscrollcommand=msb.set)
+        self._matches_log_box.grid(row=1, column=0, sticky="nsew")
+        msb.grid(row=1, column=1, sticky="ns")
+
         # Initial pack of all sections + log layout
         self._repack_sections()
 
@@ -449,13 +481,22 @@ class BotOverlay:
         """Adjust log panel grid spanning based on which logs are visible."""
         if not self._log_outer:
             return
-        show_proc  = self._section_visible.get("process_log", True)
-        show_relic = self._section_visible.get("relic_log",   True)
 
-        # Forget all then re-grid based on visibility
+        # Forget all panels first
         self._process_panel.grid_forget()
         self._relic_panel.grid_forget()
         self._log_sep.grid_forget()
+        if self._matches_panel:
+            self._matches_panel.grid_forget()
+
+        if self._matches_view:
+            # Matches view: full-width matches panel only
+            if self._matches_panel:
+                self._matches_panel.grid(row=0, column=0, columnspan=2, sticky="nsew")
+            return
+
+        show_proc  = self._section_visible.get("process_log", True)
+        show_relic = self._section_visible.get("relic_log",   True)
 
         if show_proc and show_relic:
             self._process_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 1))
@@ -465,6 +506,20 @@ class BotOverlay:
             self._process_panel.grid(row=0, column=0, columnspan=2, sticky="nsew")
         elif show_relic:
             self._relic_panel.grid(row=0, column=0, columnspan=2, sticky="nsew")
+
+    def _toggle_matches_view(self) -> None:
+        """Switch between normal log view and the full-width matched-relics view."""
+        if not self._win:
+            return
+        self._matches_view = not self._matches_view
+        if self._view_matches_btn:
+            if self._matches_view:
+                self._view_matches_btn.configure(text="◀ Back to Logs",
+                                                 bg="#2a1a00", fg=_GOLD)
+            else:
+                self._view_matches_btn.configure(text="★ View Matches",
+                                                 bg="#0d2a0d", fg=_GREEN)
+        self._update_log_layout()
 
     def apply_settings(self, settings: dict) -> None:
         """Live-apply overlay element settings from a dict.
@@ -574,6 +629,15 @@ class BotOverlay:
         self._relic_log_box.insert("end", line.rstrip() + "\n")
         self._relic_log_box.see("end")
         self._relic_log_box.configure(state="disabled")
+
+    def append_matches_log(self, text: str) -> None:
+        """Append a formatted match entry to the matches log panel. Main thread only."""
+        if not self._win or not self._matches_log_box:
+            return
+        self._matches_log_box.configure(state="normal")
+        self._matches_log_box.insert("end", text)
+        self._matches_log_box.see("end")
+        self._matches_log_box.configure(state="disabled")
 
     def set_overflow_hits(self, count: int) -> None:
         """Show/update the previous-batch overflow hit counter. Must be called from main thread."""

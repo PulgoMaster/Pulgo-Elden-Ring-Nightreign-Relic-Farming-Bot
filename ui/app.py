@@ -545,6 +545,7 @@ class RelicBotApp(tk.Tk):
         self._best_hits_iter = None  # {"iteration": n, "count": x}
         # Total relics finalized this run (duds + 2/3 + 3/3 combined; reset each START)
         self._ov_total_relics = 0
+        self._async_relic_q: queue.PriorityQueue | None = None
         # Iterations cancelled mid-run (workers skip counter updates for these)
         self._async_cancelled_iters: set = set()
         # Per-iteration counter contributions for async rollback:
@@ -2015,7 +2016,7 @@ class RelicBotApp(tk.Tk):
                 return f"Batch #{info['iteration']:03d}  —  {info['count']} {suffix}"
             self._overlay.update(
                 at_33=self._ov_at_33, at_23=self._ov_at_23, at_duds=self._ov_at_duds,
-                stored=self._ov_total_relics,
+                stored=0, analyzed=self._ov_total_relics,
                 best_33=_fmt_best(self._best_33_iter, "★★★"),
                 best_hits=_fmt_best(self._best_hits_iter, "hits"),
             )
@@ -2278,6 +2279,7 @@ class RelicBotApp(tk.Tk):
         self._best_33_iter          = None
         self._best_hits_iter        = None
         self._ov_total_relics       = 0
+        self._async_relic_q         = None
         self._async_cancelled_iters = set()
         self._iter_contributions    = {}
         self._reset_iter_requested  = False
@@ -2355,6 +2357,7 @@ class RelicBotApp(tk.Tk):
         run_dir = os.path.join(base_output, f"batch_run_{run_stamp}")
         live_log_path = os.path.join(run_dir, "live_log.txt")
         batch_log_path = os.path.join(run_dir, "run_log.txt")
+        matches_log_path = os.path.join(run_dir, "matches_log.txt")
         _run_dir_created = [False]
 
         def _ensure_run_dir():
@@ -2377,7 +2380,48 @@ class RelicBotApp(tk.Tk):
                     self._batch_relic_log_path = live_log_path
                 except Exception:
                     pass
+                # matches_log.txt: matched relics summary only
+                try:
+                    with open(matches_log_path, "w", encoding="utf-8") as _f:
+                        _f.write(f"Matched Relics Log — {run_stamp}\n")
+                        _f.write("=" * 60 + "\n\n")
+                except Exception:
+                    pass
                 self._log(f"Batch output folder: {run_dir}")
+
+        def _write_match_entry(iteration: int, relic_num: int, tier: str,
+                               result: dict) -> None:
+            """Append a formatted match entry to matches_log.txt and the overlay panel."""
+            relics = result.get("relics_found", [])
+            r0 = relics[0] if relics else {}
+            rname    = r0.get("name", "Unknown") if isinstance(r0, dict) else "Unknown"
+            passives = r0.get("passives", []) if isinstance(r0, dict) else []
+            curses   = r0.get("curses",   []) if isinstance(r0, dict) else []
+
+            sep  = "─" * 40
+            lines = [
+                sep,
+                f"  {tier}  |  Batch #{iteration:03d}  ·  Relic {relic_num}",
+                f"  Relic : {rname}",
+            ]
+            if passives:
+                for p in passives:
+                    lines.append(f"  + {p}")
+            if curses:
+                for c in curses:
+                    lines.append(f"  ✗ {c}  (curse)")
+            lines.append("")
+
+            text = "\n".join(lines) + "\n"
+            try:
+                with open(matches_log_path, "a", encoding="utf-8") as _f:
+                    _f.write(text)
+            except Exception:
+                pass
+            if self._overlay:
+                ov = self._overlay
+                self.after(0, lambda t=text: ov.append_matches_log(t)
+                           if ov._win else None)
 
         try:
             save_manager.backup(save_path, backup_path)
@@ -2410,7 +2454,7 @@ class RelicBotApp(tk.Tk):
         _ASYNC_TASK_TIMEOUT  = 90      # seconds per relic before requeueing
 
         if _async_mode:
-            _async_relic_q = queue.PriorityQueue()
+            _async_relic_q = self._async_relic_q = queue.PriorityQueue()
             _async_workers = (max(1, min(8, self._parallel_workers_var.get()))
                               if self._parallel_enabled_var.get() else 1)
 
@@ -3123,12 +3167,13 @@ class RelicBotApp(tk.Tk):
                 h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
                 at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
                 tot  = self._ov_total_relics
+                q_sto = self._async_relic_q.qsize() if self._async_relic_q else 0
                 b33  = _fmt_best(self._best_33_iter,   "★★★")
                 bhit = _fmt_best(self._best_hits_iter, "hits")
                 self.after(0, lambda: ov.update(
                     hits_33=h33, hits_23=h23, duds=dds,
                     at_33=at33, at_23=at23, at_duds=atd,
-                    stored=tot, best_33=b33, best_hits=bhit,
+                    stored=q_sto, analyzed=tot, best_33=b33, best_hits=bhit,
                 ) if ov._win else None)
 
             # Persist stats after every iteration
@@ -3520,15 +3565,18 @@ class RelicBotApp(tk.Tk):
                 ov = self._overlay
                 at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
                 tot = self._ov_total_relics
-                self.after(0, lambda at33=at33, at23=at23, atd=atd, tot=tot:
-                           ov.update(at_33=at33, at_23=at23, at_duds=atd, stored=tot)
+                q_sto = self._async_relic_q.qsize() if self._async_relic_q else 0
+                self.after(0, lambda at33=at33, at23=at23, atd=atd, tot=tot, q_sto=q_sto:
+                           ov.update(at_33=at33, at_23=at23, at_duds=atd, stored=q_sto, analyzed=tot)
                            if ov._win else None)
             if r_g3 > 0:
                 self._log(
                     f"★★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 3/3")
+                _write_match_entry(iteration, step_i + 1, "★★★ GOD ROLL (3/3)", result)
             elif r_g2 > 0:
                 self._log(
                     f"★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 2/3")
+                _write_match_entry(iteration, step_i + 1, "★★  HIT (2/3)", result)
 
         with lock:
             istate = iter_state.get(iteration)
@@ -3616,12 +3664,13 @@ class RelicBotApp(tk.Tk):
             h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
             at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
             tot  = self._ov_total_relics
+            q_sto = self._async_relic_q.qsize() if self._async_relic_q else 0
             b33  = _fmt_best(self._best_33_iter,   "★★★")
             bhit = _fmt_best(self._best_hits_iter, "hits")
             self.after(0, lambda: ov.update(
                 hits_33=h33, hits_23=h23, duds=dds,
                 at_33=at33, at_23=at23, at_duds=atd,
-                stored=tot, best_33=b33, best_hits=bhit,
+                stored=q_sto, analyzed=tot, best_33=b33, best_hits=bhit,
             ) if ov._win else None)
 
     def _finalize_async_iter_state(self, iteration: int, iter_state: dict,
@@ -3717,11 +3766,12 @@ class RelicBotApp(tk.Tk):
                 ov   = self._overlay
                 at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
                 tot  = self._ov_total_relics
+                q_sto = self._async_relic_q.qsize() if self._async_relic_q else 0
                 b33  = _fmt_best(self._best_33_iter,   "★★★")
                 bhit = _fmt_best(self._best_hits_iter, "hits")
                 self.after(0, lambda: ov.update(
                     at_33=at33, at_23=at23, at_duds=atd,
-                    stored=tot, best_33=b33, best_hits=bhit,
+                    stored=q_sto, analyzed=tot, best_33=b33, best_hits=bhit,
                 ) if ov._win else None)
 
             self._save_stats()
@@ -4863,9 +4913,11 @@ class RelicBotApp(tk.Tk):
                 if r_g3 > 0:
                     self._log(
                         f"★★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 3/3")
+                    _write_match_entry(iteration, step_i + 1, "★★★ GOD ROLL (3/3)", result)
                 elif r_g2 > 0:
                     self._log(
                         f"★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 2/3")
+                    _write_match_entry(iteration, step_i + 1, "★★  HIT (2/3)", result)
                 # Track per-iteration contributions for rollback on reset
                 if iteration:
                     with self._iter_contrib_lock:
@@ -4885,7 +4937,8 @@ class RelicBotApp(tk.Tk):
                     self.after(0, lambda h33=h33, h23=h23, dds=dds,
                                at33=at33, at23=at23, atd=atd, tot=tot:
                                ov.update(hits_33=h33, hits_23=h23, duds=dds,
-                                         at_33=at33, at_23=at23, at_duds=atd, stored=tot)
+                                         at_33=at33, at_23=at23, at_duds=atd,
+                                         stored=0, analyzed=tot)
                                if ov._win else None)
 
             for _t in _worker_threads:
