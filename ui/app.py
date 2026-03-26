@@ -1809,7 +1809,7 @@ class RelicBotApp(tk.Tk):
         is proportional to actual UI transition time rather than a fixed timer.
 
         Works regardless of how many menus deep the bot is stuck in (1–3 ESCs
-        typically needed). Times out after 30 s.
+        typically needed). Times out after 45 s.
 
         Returns True on success, False on timeout.
         """
@@ -1817,7 +1817,7 @@ class RelicBotApp(tk.Tk):
         if _exe:
             self._focus_game_window(_exe, timeout=3.0)
         self._log("[Recovery] ESC recovery — pressing ESC until Equipment menu appears…")
-        deadline = time.time() + 30
+        deadline = time.time() + 45
         while time.time() < deadline:
             if not self.bot_running:
                 return False
@@ -1833,7 +1833,7 @@ class RelicBotApp(tk.Tk):
                     return True
             except Exception as _re:
                 self._log(f"[Recovery] OCR error: {_re}")
-        self._log("[Recovery] Could not find Equipment menu within 30 s — aborting.")
+        self._log("[Recovery] Could not find Equipment menu within 45 s — aborting.")
         return False
 
     def _confirm_in_game(self, region, exe_name: str) -> tuple:
@@ -2975,22 +2975,23 @@ class RelicBotApp(tk.Tk):
                         }
                 for _si, _img, _pp in captures:
                     _async_relic_q.put(((iteration, _si), {
-                        "iteration":      iteration,
-                        "step_i":         _si,
-                        "img_bytes":      _img,
-                        "pending_path":   _pp,
-                        "iter_dir":       iter_dir,
-                        "criteria":       criteria,
-                        "hit_min":        hit_min,
-                        "live_log_path":  live_log_path,
-                        "run_dir":        run_dir,
+                        "iteration":        iteration,
+                        "step_i":           _si,
+                        "img_bytes":        _img,
+                        "pending_path":     _pp,
+                        "iter_dir":         iter_dir,
+                        "criteria":         criteria,
+                        "hit_min":          hit_min,
+                        "live_log_path":    live_log_path,
+                        "matches_log_path": matches_log_path,
+                        "run_dir":          run_dir,
                         "criteria_summary": criteria_summary,
-                        "mode_desc":      mode_desc,
-                        "limit_value":    limit_value,
-                        "save_filename":  save_filename,
-                        "batch_id":       batch_id,
-                        "_run_log_path":  batch_log_path,
-                        "_retries":       0,
+                        "mode_desc":        mode_desc,
+                        "limit_value":      limit_value,
+                        "save_filename":    save_filename,
+                        "batch_id":         batch_id,
+                        "_run_log_path":    batch_log_path,
+                        "_retries":         0,
                     }))
 
                 _prev_save_dir = iter_dir
@@ -3432,6 +3433,43 @@ class RelicBotApp(tk.Tk):
     #  ASYNC PER-RELIC ANALYSIS
     # ------------------------------------------------------------------ #
 
+    def _write_match_log(self, matches_log_path: str, iteration: int,
+                         relic_num: int, tier: str, result: dict) -> None:
+        """Write a match entry to matches_log.txt and push it to the overlay.
+
+        Called from async worker threads — uses only self.after() for UI
+        updates so it is safe to call from any thread.
+        """
+        relics = result.get("relics_found", [])
+        r0 = relics[0] if relics else {}
+        rname    = r0.get("name", "Unknown") if isinstance(r0, dict) else "Unknown"
+        passives = r0.get("passives", []) if isinstance(r0, dict) else []
+        curses   = r0.get("curses",   []) if isinstance(r0, dict) else []
+
+        sep   = "─" * 40
+        lines = [
+            sep,
+            f"  {tier}  |  Batch #{iteration:03d}  ·  Relic {relic_num}",
+            f"  Relic : {rname}",
+        ]
+        for p in passives:
+            lines.append(f"  + {p}")
+        for c in curses:
+            lines.append(f"  ✗ {c}  (curse)")
+        lines.append("")
+
+        text = "\n".join(lines) + "\n"
+        if matches_log_path:
+            try:
+                with open(matches_log_path, "a", encoding="utf-8") as _f:
+                    _f.write(text)
+            except Exception:
+                pass
+        if self._overlay:
+            ov = self._overlay
+            self.after(0, lambda t=text: ov.append_matches_log(t)
+                       if ov._win else None)
+
     def _analyze_relic_task(self, task: dict, iter_state: dict,
                             lock: threading.Lock, dir_map: dict,
                             results: list) -> None:
@@ -3572,11 +3610,15 @@ class RelicBotApp(tk.Tk):
             if r_g3 > 0:
                 self._log(
                     f"★★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 3/3")
-                _write_match_entry(iteration, step_i + 1, "★★★ GOD ROLL (3/3)", result)
+                self._write_match_log(
+                    task.get("matches_log_path", ""),
+                    iteration, step_i + 1, "★★★ GOD ROLL (3/3)", result)
             elif r_g2 > 0:
                 self._log(
                     f"★★ Match Found!  Iter {iteration} · Relic {step_i + 1} — 2/3")
-                _write_match_entry(iteration, step_i + 1, "★★  HIT (2/3)", result)
+                self._write_match_log(
+                    task.get("matches_log_path", ""),
+                    iteration, step_i + 1, "★★  HIT (2/3)", result)
 
         with lock:
             istate = iter_state.get(iteration)
@@ -4362,7 +4404,30 @@ class RelicBotApp(tk.Tk):
                                         wait_fn=_p0_shop_wait, bypass_focus=True,
                                         extra_delay=_p02_extra_delay)
 
+                                _c2_item_ok = False
                                 if (_shop_found[0] and self.bot_running
+                                        and not self._reset_iter_requested):
+                                    # Verify cursor is on the correct shop item before buying
+                                    _c2_item_ok = True
+                                    try:
+                                        _c2_vi_img = screen_capture.capture(region)
+                                        _c2_item_ok, _c2_vi_reason = relic_analyzer.verify_shop_item(
+                                            _c2_vi_img, self.relic_type_var.get())
+                                        if _c2_item_ok:
+                                            self._log(
+                                                f"  [Case 2 retry] Shop item verified — {_c2_vi_reason}.")
+                                        else:
+                                            self._log(
+                                                f"  [Case 2 retry] Shop item verification FAILED "
+                                                f"({_c2_vi_reason}) — skipping buy retry, "
+                                                f"proceeding with {_actual_bought} relic(s).")
+                                    except Exception as _c2ve:
+                                        self._log(
+                                            f"  [Case 2 retry] Shop item check error: {_c2ve}"
+                                            f" — skipping buy retry, proceeding with {_actual_bought} relic(s).")
+                                        _c2_item_ok = False
+
+                                if (_shop_found[0] and _c2_item_ok and self.bot_running
                                         and not self._reset_iter_requested):
                                     _c2_batches = math.ceil(_c2_remaining / 10)
                                     self._log(
