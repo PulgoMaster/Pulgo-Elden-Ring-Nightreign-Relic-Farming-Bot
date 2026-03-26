@@ -805,10 +805,89 @@ class RelicBotApp(tk.Tk):
         self._blocked_curses_lb.pack(side="left", fill="both", expand=True)
         cb_sb.pack(side="right", fill="y")
         self._blocked_curses_list: list[str] = []
+        self._excluded_passives_list: list[str] = []
+        self._save_exclusion_matches_var = tk.BooleanVar(value=False)
+
+        # ── Excluded Passives ─────────────────────────────────────── #
+        excl_frame = ttk.LabelFrame(
+            inner,
+            text="Excluded Passives  (relics with these passives are rejected, unless explicitly requested)")
+        excl_frame.grid(row=5, column=0, sticky="ew", **pad)
+
+        ttk.Label(
+            excl_frame,
+            text=(
+                "Add passives to exclude. A relic that meets your match criteria but also carries "
+                "an excluded passive will NOT be counted as a hit. "
+                "Exception: if an excluded passive is also explicitly added to your Pool, "
+                "Pairings, or Build targets, it takes precedence and the exclusion is ignored "
+                "for that passive."
+            ),
+            foreground=theme.TEXT_MUTED, wraplength=700, justify="left",
+        ).pack(anchor="w", padx=6, pady=(4, 2))
+
+        excl_content = ttk.Frame(excl_frame)
+        excl_content.pack(fill="both", expand=False, padx=6, pady=(0, 4))
+        excl_content.columnconfigure(0, weight=3)
+        excl_content.columnconfigure(2, weight=2)
+
+        # Left: all passives searchable
+        excl_left = ttk.LabelFrame(excl_content, text="Passives")
+        excl_left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+
+        from bot.passives import ALL_PASSIVES_SORTED as _ALL_PASSIVES_SORTED
+        self._excl_search_var = tk.StringVar()
+        self._excl_search_var.trace_add("write", self._excl_filter_list)
+        _excl_entry = ttk.Entry(excl_left, textvariable=self._excl_search_var)
+        _excl_entry.pack(fill="x", padx=4, pady=(4, 2))
+        _Tooltip(_excl_entry, "Search passives to exclude. Relics containing an excluded passive will not count as hits.")
+
+        excl_src_body = ttk.Frame(excl_left)
+        excl_src_body.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self._excl_src_lb = tk.Listbox(excl_src_body, height=5, selectmode="browse",
+                                       exportselection=False, activestyle="none")
+        _sl(self._excl_src_lb)
+        excl_src_sb = ttk.Scrollbar(excl_src_body, orient="vertical", command=self._excl_src_lb.yview)
+        self._excl_src_lb.configure(yscrollcommand=excl_src_sb.set)
+        self._excl_src_lb.pack(side="left", fill="both", expand=True)
+        excl_src_sb.pack(side="right", fill="y")
+        self._excl_all_passives = list(_ALL_PASSIVES_SORTED)
+        for _p in self._excl_all_passives:
+            self._excl_src_lb.insert("end", _p)
+
+        # Centre: buttons
+        excl_mid = ttk.Frame(excl_content)
+        excl_mid.grid(row=0, column=1, padx=6)
+        ttk.Button(excl_mid, text="Exclude →",  command=self._excl_add,    width=12).pack(pady=4)
+        ttk.Button(excl_mid, text="← Remove",   command=self._excl_remove, width=12).pack(pady=4)
+        ttk.Button(excl_mid, text="Clear All",   command=self._excl_clear,  width=12).pack(pady=8)
+        self._excl_dormant_btn = ttk.Button(
+            excl_mid, text="+ All Dormant Powers", command=self._excl_toggle_dormant, width=16)
+        self._excl_dormant_btn.pack(pady=4)
+
+        # Right: excluded passives list
+        excl_right = ttk.LabelFrame(excl_content, text="Excluded Passives")
+        excl_right.grid(row=0, column=2, sticky="nsew")
+        excl_body = ttk.Frame(excl_right)
+        excl_body.pack(fill="both", expand=True, padx=4, pady=4)
+        self._excluded_lb = tk.Listbox(excl_body, height=5, selectmode="browse",
+                                       exportselection=False, activestyle="none")
+        _sl(self._excluded_lb)
+        excl_sb = ttk.Scrollbar(excl_body, orient="vertical", command=self._excluded_lb.yview)
+        self._excluded_lb.configure(yscrollcommand=excl_sb.set)
+        self._excluded_lb.pack(side="left", fill="both", expand=True)
+        excl_sb.pack(side="right", fill="y")
+
+        # Opt-in: save excluded matches
+        ttk.Checkbutton(
+            excl_frame,
+            text='Save "matched but excluded" relics to a separate folder (screenshot + summary)',
+            variable=self._save_exclusion_matches_var,
+        ).pack(anchor="w", padx=6, pady=(0, 6))
 
         # ── Batch Mode Settings ─────────────────────────────────────── #
         self.batch_frame = ttk.LabelFrame(inner, text="Batch Mode Settings")
-        self.batch_frame.grid(row=5, column=0, sticky="ew", **pad)
+        self.batch_frame.grid(row=6, column=0, sticky="ew", **pad)
 
         ttk.Label(self.batch_frame, text="Run for:").grid(row=0, column=0, sticky="w", **pad)
         self.batch_limit_type = tk.StringVar(value="loops")
@@ -1455,6 +1534,8 @@ class RelicBotApp(tk.Tk):
             "hotkey_str": self._hotkey_str,
             "hotkey_display": self._hotkey_display,
             "blocked_curses": list(self._blocked_curses_list),
+            "excluded_passives":      list(self._excluded_passives_list),
+            "save_exclusion_matches": self._save_exclusion_matches_var.get(),
             "allowed_colors": self._get_allowed_colors(),
             "criteria": self.relic_builder.get_state(),
             "parallel_enabled": self._parallel_enabled_var.get(),
@@ -1521,6 +1602,13 @@ class RelicBotApp(tk.Tk):
             for item in items:
                 self._blocked_curses_list.append(item)
                 self._blocked_curses_lb.insert("end", item)
+        if "excluded_passives" in data:
+            self._excl_clear()
+            for item in data["excluded_passives"]:
+                if item and item not in self._excluded_passives_list:
+                    self._excluded_passives_list.append(item)
+                    self._excluded_lb.insert("end", item)
+        self._save_exclusion_matches_var.set(data.get("save_exclusion_matches", False))
         if "allowed_colors" in data:
             saved = data["allowed_colors"]
             for color, var in self._color_vars.items():
@@ -2944,16 +3032,29 @@ class RelicBotApp(tk.Tk):
                 break
 
             # Merge all relic results for this iteration into one summary result
-            blocked_curses = self._get_blocked_curses()
+            blocked_curses     = self._get_blocked_curses()
+            excluded_passives  = self._get_excluded_passives()
+            explicitly_included = self._get_explicitly_included_passives()
+
+            _excl_match_results = [
+                (i + 1, r) for i, r in enumerate(relic_results)
+                if r.get("match")
+                and not self._is_curse_blocked(r, blocked_curses)
+                and self._is_passive_excluded(r, excluded_passives, explicitly_included)
+            ]
             any_match = any(
-                r.get("match") and not self._is_curse_blocked(r, blocked_curses)
+                r.get("match")
+                and not self._is_curse_blocked(r, blocked_curses)
+                and not self._is_passive_excluded(r, excluded_passives, explicitly_included)
                 for r in relic_results
             )
             all_relics = [rf for r in relic_results for rf in r.get("relics_found", [])]
             all_near_misses = [nm for r in relic_results for nm in r.get("near_misses", [])]
             matched_result = next(
                 (r for r in relic_results
-                 if r.get("match") and not self._is_curse_blocked(r, blocked_curses)),
+                 if r.get("match")
+                 and not self._is_curse_blocked(r, blocked_curses)
+                 and not self._is_passive_excluded(r, excluded_passives, explicitly_included)),
                 None
             )
             matched_relic = matched_result.get("matched_relic") if matched_result else None
@@ -3064,6 +3165,92 @@ class RelicBotApp(tk.Tk):
                     self._log(f"Folder renamed to: {tier_name}")
                 except Exception as e:
                     self._log(f"WARNING: could not rename folder: {e}")
+
+            # ── All Hits folder ───────────────────────────────────────── #
+            if num_matched >= hit_min:
+                try:
+                    _all_hits_dir = os.path.join(run_dir, "All Hits")
+                    os.makedirs(_all_hits_dir, exist_ok=True)
+                    _hits_summary_path = os.path.join(_all_hits_dir, "hits_summary.txt")
+                    for _ah_idx, _ah_rr in enumerate(relic_results):
+                        _ah_fname = _ah_rr.get("_screenshot_file", "")
+                        if not (_ah_fname and "MATCH" in _ah_fname):
+                            continue
+                        _ah_src = os.path.join(iter_dir, _ah_fname)
+                        if not os.path.exists(_ah_src):
+                            continue
+                        _ah_rf = (_ah_rr.get("relics_found") or [{}])[0]
+                        _ah_passives = _ah_rf.get("passives", []) if isinstance(_ah_rf, dict) else []
+                        _ah_curses   = _ah_rf.get("curses",   []) if isinstance(_ah_rf, dict) else []
+                        _ah_dst = os.path.join(_all_hits_dir, f"iter_{iteration:03d}_relic_{_ah_idx + 1:03d}.jpg")
+                        shutil.copy2(_ah_src, _ah_dst)
+                        _write_header = not os.path.exists(_hits_summary_path)
+                        with open(_hits_summary_path, "a", encoding="utf-8") as _hf:
+                            if _write_header:
+                                _hf.write("Matches Found\n")
+                                _hf.write("=" * 40 + "\n\n")
+                            _hf.write(f"Iter {iteration:03d}  Relic #{_ah_idx + 1:03d}\n")
+                            _hf.write("  Passives:\n")
+                            for _p in _ah_passives:
+                                _hf.write(f"    {_p}\n")
+                            if not _ah_passives:
+                                _hf.write("    (none)\n")
+                            _hf.write("  Curses:\n")
+                            for _c in _ah_curses:
+                                _hf.write(f"    {_c}\n")
+                            if not _ah_curses:
+                                _hf.write("    (none)\n")
+                            _hf.write("\n")
+                except Exception as _ahe:
+                    self._log(f"WARNING: could not write to All Hits folder: {_ahe}")
+
+            # ── Match with Exclusion folder (opt-in) ──────────────────── #
+            if _excl_match_results and self._save_exclusion_matches_var.get():
+                try:
+                    _mex_dir = os.path.join(run_dir, "Match with Exclusion")
+                    os.makedirs(_mex_dir, exist_ok=True)
+                    _mex_summary_path = os.path.join(_mex_dir, "exclusion_summary.txt")
+                    for _mex_rnum, _mex_rr in _excl_match_results:
+                        _mex_fname = _mex_rr.get("_screenshot_file", "")
+                        _mex_rf = (_mex_rr.get("relics_found") or [{}])[0]
+                        _mex_passives = _mex_rf.get("passives", []) if isinstance(_mex_rf, dict) else []
+                        _mex_curses   = _mex_rf.get("curses",   []) if isinstance(_mex_rf, dict) else []
+                        _mex_excl_names = set(self._get_excluded_passive_names(
+                            _mex_rr, excluded_passives, explicitly_included))
+                        if _mex_fname:
+                            _mex_src = os.path.join(iter_dir, _mex_fname)
+                            if os.path.exists(_mex_src):
+                                _mex_dst = os.path.join(
+                                    _mex_dir, f"iter_{iteration:03d}_relic_{_mex_rnum:03d}.jpg")
+                                shutil.copy2(_mex_src, _mex_dst)
+                        _write_header = not os.path.exists(_mex_summary_path)
+                        with open(_mex_summary_path, "a", encoding="utf-8") as _ef:
+                            if _write_header:
+                                _ef.write("Matched with excluded passive\n")
+                                _ef.write("=" * 40 + "\n\n")
+                            _ef.write(f"Iter {iteration:03d}  Relic #{_mex_rnum:03d}\n")
+                            _ef.write("  Passives:\n")
+                            for _p in _mex_passives:
+                                _marker = "  [EXCLUDED]" if _p in _mex_excl_names else ""
+                                _ef.write(f"    {_p}{_marker}\n")
+                            if not _mex_passives:
+                                _ef.write("    (none)\n")
+                            _ef.write("  Curses:\n")
+                            for _c in _mex_curses:
+                                _ef.write(f"    {_c}\n")
+                            if not _mex_curses:
+                                _ef.write("    (none)\n")
+                            _ef.write("\n")
+                    if _excl_match_results:
+                        self._log(
+                            f"  {len(_excl_match_results)} relic(s) matched criteria but had "
+                            f"excluded passive(s) — saved to 'Match with Exclusion' folder.")
+                except Exception as _mexe:
+                    self._log(f"WARNING: could not write to Match with Exclusion folder: {_mexe}")
+            elif _excl_match_results:
+                self._log(
+                    f"  {len(_excl_match_results)} relic(s) matched criteria but had "
+                    f"excluded passive(s) (opt-in folder disabled).")
 
             # Deferred save copy — set AFTER any rename so the path is always valid
             _prev_save_dir = iter_dir
@@ -3453,9 +3640,20 @@ class RelicBotApp(tk.Tk):
             save_filename    = istate["save_filename"]
             is_current_batch = istate.get("batch_id") == self._current_batch_id
 
-        blocked_curses = self._get_blocked_curses()
+        blocked_curses      = self._get_blocked_curses()
+        excluded_passives   = self._get_excluded_passives()
+        explicitly_included = self._get_explicitly_included_passives()
+
+        _excl_match_results = [
+            (i + 1, r) for i, r in enumerate(relic_results)
+            if r.get("match")
+            and not self._is_curse_blocked(r, blocked_curses)
+            and self._is_passive_excluded(r, excluded_passives, explicitly_included)
+        ]
         any_match = any(
-            r.get("match") and not self._is_curse_blocked(r, blocked_curses)
+            r.get("match")
+            and not self._is_curse_blocked(r, blocked_curses)
+            and not self._is_passive_excluded(r, excluded_passives, explicitly_included)
             for r in relic_results
         )
         all_relics = [rf for r in relic_results
@@ -3464,7 +3662,9 @@ class RelicBotApp(tk.Tk):
                            for nm in r.get("near_misses", [])]
         matched_result = next(
             (r for r in relic_results
-             if r.get("match") and not self._is_curse_blocked(r, blocked_curses)),
+             if r.get("match")
+             and not self._is_curse_blocked(r, blocked_curses)
+             and not self._is_passive_excluded(r, excluded_passives, explicitly_included)),
             None
         )
         matched_relic    = matched_result.get("matched_relic") if matched_result else None
@@ -3576,6 +3776,95 @@ class RelicBotApp(tk.Tk):
             except OSError as e:
                 if is_current_batch:
                     self._log(f"WARNING: could not rename folder: {e}")
+
+        # ── All Hits folder ───────────────────────────────────────────── #
+        if num_matched >= hit_min:
+            try:
+                _all_hits_dir = os.path.join(run_dir, "All Hits")
+                os.makedirs(_all_hits_dir, exist_ok=True)
+                _hits_summary_path = os.path.join(_all_hits_dir, "hits_summary.txt")
+                for _ah_idx, _ah_rr in enumerate(relic_results):
+                    _ah_fname = _ah_rr.get("_screenshot_file", "")
+                    if not (_ah_fname and "MATCH" in _ah_fname):
+                        continue
+                    _ah_src = os.path.join(final_iter_dir, _ah_fname)
+                    if not os.path.exists(_ah_src):
+                        continue
+                    _ah_rf = (_ah_rr.get("relics_found") or [{}])[0]
+                    _ah_passives = _ah_rf.get("passives", []) if isinstance(_ah_rf, dict) else []
+                    _ah_curses   = _ah_rf.get("curses",   []) if isinstance(_ah_rf, dict) else []
+                    _ah_dst = os.path.join(
+                        _all_hits_dir, f"iter_{iteration:03d}_relic_{_ah_idx + 1:03d}.jpg")
+                    shutil.copy2(_ah_src, _ah_dst)
+                    _write_header = not os.path.exists(_hits_summary_path)
+                    with open(_hits_summary_path, "a", encoding="utf-8") as _hf:
+                        if _write_header:
+                            _hf.write("Matches Found\n")
+                            _hf.write("=" * 40 + "\n\n")
+                        _hf.write(f"Iter {iteration:03d}  Relic #{_ah_idx + 1:03d}\n")
+                        _hf.write("  Passives:\n")
+                        for _p in _ah_passives:
+                            _hf.write(f"    {_p}\n")
+                        if not _ah_passives:
+                            _hf.write("    (none)\n")
+                        _hf.write("  Curses:\n")
+                        for _c in _ah_curses:
+                            _hf.write(f"    {_c}\n")
+                        if not _ah_curses:
+                            _hf.write("    (none)\n")
+                        _hf.write("\n")
+            except Exception as _ahe:
+                if is_current_batch:
+                    self._log(f"WARNING: could not write to All Hits folder: {_ahe}")
+
+        # ── Match with Exclusion folder (opt-in) ──────────────────────── #
+        if _excl_match_results and self._save_exclusion_matches_var.get():
+            try:
+                _mex_dir = os.path.join(run_dir, "Match with Exclusion")
+                os.makedirs(_mex_dir, exist_ok=True)
+                _mex_summary_path = os.path.join(_mex_dir, "exclusion_summary.txt")
+                for _mex_rnum, _mex_rr in _excl_match_results:
+                    _mex_fname = _mex_rr.get("_screenshot_file", "")
+                    _mex_rf = (_mex_rr.get("relics_found") or [{}])[0]
+                    _mex_passives = _mex_rf.get("passives", []) if isinstance(_mex_rf, dict) else []
+                    _mex_curses   = _mex_rf.get("curses",   []) if isinstance(_mex_rf, dict) else []
+                    _mex_excl_names = set(self._get_excluded_passive_names(
+                        _mex_rr, excluded_passives, explicitly_included))
+                    if _mex_fname:
+                        _mex_src = os.path.join(final_iter_dir, _mex_fname)
+                        if os.path.exists(_mex_src):
+                            _mex_dst = os.path.join(
+                                _mex_dir, f"iter_{iteration:03d}_relic_{_mex_rnum:03d}.jpg")
+                            shutil.copy2(_mex_src, _mex_dst)
+                    _write_header = not os.path.exists(_mex_summary_path)
+                    with open(_mex_summary_path, "a", encoding="utf-8") as _ef:
+                        if _write_header:
+                            _ef.write("Matched with excluded passive\n")
+                            _ef.write("=" * 40 + "\n\n")
+                        _ef.write(f"Iter {iteration:03d}  Relic #{_mex_rnum:03d}\n")
+                        _ef.write("  Passives:\n")
+                        for _p in _mex_passives:
+                            _marker = "  [EXCLUDED]" if _p in _mex_excl_names else ""
+                            _ef.write(f"    {_p}{_marker}\n")
+                        if not _mex_passives:
+                            _ef.write("    (none)\n")
+                        _ef.write("  Curses:\n")
+                        for _c in _mex_curses:
+                            _ef.write(f"    {_c}\n")
+                        if not _mex_curses:
+                            _ef.write("    (none)\n")
+                        _ef.write("\n")
+                if is_current_batch and _excl_match_results:
+                    self._log(
+                        f"  {len(_excl_match_results)} relic(s) matched criteria but had "
+                        f"excluded passive(s) — saved to 'Match with Exclusion' folder.")
+            except Exception as _mexe:
+                if is_current_batch:
+                    self._log(f"WARNING: could not write to Match with Exclusion folder: {_mexe}")
+        elif _excl_match_results and is_current_batch:
+            self._log(
+                f"  {len(_excl_match_results)} relic(s) matched criteria but had "
+                f"excluded passive(s) (opt-in folder disabled).")
 
         with lock:
             dir_map[iteration] = final_iter_dir
@@ -4854,6 +5143,112 @@ class RelicBotApp(tk.Tk):
                 if blocked_curse in curse or curse in blocked_curse:
                     return True
         return False
+
+    # ── Excluded passives helpers ──────────────────────────────────── #
+
+    def _excl_filter_list(self, *_):
+        q = self._excl_search_var.get().strip().lower()
+        self._excl_src_lb.delete(0, "end")
+        for p in self._excl_all_passives:
+            if not q or q in p.lower():
+                self._excl_src_lb.insert("end", p)
+
+    def _excl_add(self):
+        sel = self._excl_src_lb.curselection()
+        if sel:
+            item = self._excl_src_lb.get(sel[0])
+            if item not in self._excluded_passives_list:
+                self._excluded_passives_list.append(item)
+                self._excluded_lb.insert("end", item)
+
+    def _excl_remove(self):
+        sel = self._excluded_lb.curselection()
+        if sel:
+            idx = sel[0]
+            self._excluded_passives_list.pop(idx)
+            self._excluded_lb.delete(idx)
+
+    def _excl_clear(self):
+        self._excluded_passives_list.clear()
+        self._excluded_lb.delete(0, "end")
+
+    def _excl_toggle_dormant(self):
+        """Add or remove all Dormant Powers from the exclusion list."""
+        from bot.passives import CATEGORIES as _CATS
+        dormant = _CATS.get("Dormant Powers", [])
+        already_all = all(d in self._excluded_passives_list for d in dormant if d)
+        if already_all:
+            # Remove all dormant powers from list
+            to_remove = set(dormant)
+            keep = [(p) for p in self._excluded_passives_list if p not in to_remove]
+            self._excluded_passives_list.clear()
+            self._excluded_lb.delete(0, "end")
+            for p in keep:
+                self._excluded_passives_list.append(p)
+                self._excluded_lb.insert("end", p)
+            self._excl_dormant_btn.config(text="+ All Dormant Powers")
+        else:
+            for d in dormant:
+                if d and d not in self._excluded_passives_list:
+                    self._excluded_passives_list.append(d)
+                    self._excluded_lb.insert("end", d)
+            self._excl_dormant_btn.config(text="− All Dormant Powers")
+
+    def _get_excluded_passives(self) -> set:
+        return set(self._excluded_passives_list)
+
+    def _get_explicitly_included_passives(self) -> set:
+        """All passives the user explicitly added to Pool, Pairings, or Build targets."""
+        try:
+            criteria = self.relic_builder.get_criteria_dict()
+        except Exception:
+            return set()
+        included: set = set()
+
+        def _from_exact(d):
+            for t in d.get("targets", []):
+                included.update(p for p in t.get("passives", []) if p)
+
+        def _from_pool(d):
+            for e in d.get("entries", []):
+                included.update(e.get("accepted", []))
+            for pair in d.get("pairings", []):
+                included.update(pair.get("left", []))
+                included.update(pair.get("right", []))
+
+        mode = criteria.get("mode", "")
+        if mode == "exact":
+            _from_exact(criteria)
+        elif mode == "pool":
+            _from_pool(criteria)
+        elif mode == "combine":
+            _from_exact(criteria.get("exact", {}))
+            _from_pool(criteria.get("pool", {}))
+        return included
+
+    def _is_passive_excluded(self, relic_result: dict,
+                              excluded: set, explicitly_included: set) -> bool:
+        """Return True if the relic carries an excluded passive not overridden by explicit inclusion."""
+        if not excluded:
+            return False
+        relics = relic_result.get("relics_found", [])
+        relic = relics[0] if relics else {}
+        if not isinstance(relic, dict):
+            return False
+        for p in relic.get("passives", []):
+            if p in excluded and p not in explicitly_included:
+                return True
+        return False
+
+    def _get_excluded_passive_names(self, relic_result: dict,
+                                    excluded: set, explicitly_included: set) -> list:
+        """Return list of excluded passives present on relic (for summary labelling)."""
+        relics = relic_result.get("relics_found", [])
+        relic = relics[0] if relics else {}
+        if not isinstance(relic, dict):
+            return []
+        return [p for p in relic.get("passives", [])
+                if p in excluded and p not in explicitly_included]
 
     def _show_mouse_blocker(self):
         """Install a low-level mouse hook (WH_MOUSE_LL) that swallows mouse button

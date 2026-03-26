@@ -18,6 +18,7 @@ from ui import theme, relic_images
 from bot.passives import (
     ALL_PASSIVES_SORTED, CATEGORIES, UI_CATEGORIES,
     COMPAT_GROUPS, get_compat_violations,
+    estimate_passive_prob,
 )
 
 
@@ -293,6 +294,21 @@ class _ExactRelicTab(ttk.Frame):
         )
         self._compat_lbl.pack(anchor="w", padx=8, pady=(4, 0))
 
+        # ── Odds display ──────────────────────────────────────────────────── #
+        odds_frame = ttk.LabelFrame(right, text="Odds  (estimated)")
+        odds_frame.pack(fill="x", padx=6, pady=(2, 6))
+
+        self._odds_var = tk.StringVar(value="Select passives above to see odds.")
+        ttk.Label(
+            odds_frame, textvariable=self._odds_var,
+            foreground="#90c890", wraplength=620, justify="left",
+        ).pack(anchor="w", padx=6, pady=(4, 2))
+        ttk.Label(
+            odds_frame,
+            text="Estimates only — actual odds depend on game pool weights. Do not treat as exact.",
+            foreground=theme.TEXT_MUTED,
+        ).pack(anchor="w", padx=6, pady=(0, 4))
+
         # Populate initial state
         self._refresh_list()
         self._target_lb.selection_set(0)
@@ -331,6 +347,7 @@ class _ExactRelicTab(ttk.Frame):
         self._threshold_var.set(t["threshold"])
         self._update_exclusions()
         self._check_compat()
+        self._update_odds()
         self._refresh_list()
         self._target_lb.selection_clear(0, "end")
         self._target_lb.selection_set(self._active)
@@ -361,6 +378,7 @@ class _ExactRelicTab(ttk.Frame):
         #    user changed one slot to something that conflicts with another).
         self._clear_newly_excluded()
         self._check_compat()
+        self._update_odds()
         self._save_current()
         self._refresh_list()
         self._target_lb.selection_set(self._active)
@@ -416,6 +434,65 @@ class _ExactRelicTab(ttk.Frame):
             self._compat_var.set("⚠  " + "   |   ".join(msgs))
         else:
             self._compat_var.set("")
+
+    def _update_odds(self):
+        """Recompute and display odds for the currently active target."""
+        slots = [s.get() for s in self._slots]
+        filled = [(i, p) for i, p in enumerate(slots) if p]
+
+        if not filled:
+            self._odds_var.set("Select passives above to see odds.")
+            return
+
+        violations = get_compat_violations(slots)
+        if violations:
+            self._odds_var.set("Cannot calculate — incompatible passives selected.")
+            return
+
+        lines = []
+        probs = []
+        for i, p in filled:
+            prob = estimate_passive_prob(p)
+            if prob is not None:
+                n = int(round(1.0 / prob))
+                lines.append(f"  Slot {i + 1}: {p[:45]}{'…' if len(p) > 45 else ''}  →  ~1 in {n:,} relics")
+                probs.append(prob)
+            else:
+                lines.append(f"  Slot {i + 1}: {p[:45]}{'…' if len(p) > 45 else ''}  →  odds unknown")
+
+        if len(probs) == len(filled):
+            combined = 1.0
+            for p in probs:
+                combined *= p
+            n_combined = int(round(1.0 / combined))
+            thresh = self._threshold_var.get()
+            n_filled = len(filled)
+            if thresh < n_filled:
+                lines.append(f"\n  Combined (all {n_filled} match): ~1 in {n_combined:,} relics")
+                # P(≥thresh of n_filled) — exact computation for small n
+                if n_filled == 3 and thresh == 2:
+                    p0, p1, p2 = probs
+                    p_exactly_2 = (p0 * p1 * (1 - p2)
+                                   + p0 * (1 - p1) * p2
+                                   + (1 - p0) * p1 * p2)
+                    approx = combined + p_exactly_2
+                    n_any = int(round(1.0 / max(approx, 1e-12)))
+                    lines.append(f"  Combined (≥{thresh} of {n_filled} match): ~1 in {n_any:,} relics")
+                    n_combined = n_any
+            else:
+                lines.append(f"\n  Combined (all match): ~1 in {n_combined:,} relics")
+
+            # Expected iterations and time estimate (~45 sec per relic cycle)
+            secs = n_combined * 45
+            if secs < 3600:
+                time_str = f"~{secs // 60} min"
+            elif secs < 86400:
+                time_str = f"~{secs / 3600:.1f} hrs"
+            else:
+                time_str = f"~{secs / 86400:.1f} days"
+            lines.append(f"  Expected: ~{n_combined:,} relics  |  {time_str} @ ~45 sec/relic")
+
+        self._odds_var.set("\n".join(lines))
 
     def has_compat_errors(self) -> bool:
         """Return True if any defined target has incompatible passive combinations."""
@@ -789,10 +866,26 @@ class _PassivePoolTab(ttk.Frame):
         foot.pack(fill="x", padx=8, pady=6)
         ttk.Label(foot, text="Match when relic has at least").pack(side="left")
         self._threshold = tk.IntVar(value=2)
-        self._spin = ttk.Spinbox(foot, from_=1, to=3, textvariable=self._threshold, width=4)
+        self._spin = ttk.Spinbox(foot, from_=1, to=3, textvariable=self._threshold, width=4,
+                                  command=self._on_threshold_change)
         self._spin.pack(side="left", padx=4)
         self._count_lbl = tk.StringVar(value="of 0 passives in pool")
         ttk.Label(foot, textvariable=self._count_lbl).pack(side="left")
+
+        # ── Odds display ───────────────────────────────────────────────────── #
+        odds_frame = ttk.LabelFrame(self, text="Odds  (estimated)")
+        odds_frame.pack(fill="x", padx=8, pady=(0, 6))
+
+        self._odds_var = tk.StringVar(value="Add passives to your pool to see odds.")
+        ttk.Label(
+            odds_frame, textvariable=self._odds_var,
+            foreground="#90c890", wraplength=680, justify="left",
+        ).pack(anchor="w", padx=6, pady=(4, 2))
+        ttk.Label(
+            odds_frame,
+            text="Estimates only — actual odds depend on game pool weights. Do not treat as exact.",
+            foreground=theme.TEXT_MUTED,
+        ).pack(anchor="w", padx=6, pady=(0, 4))
 
     # ── category filter ─────────────────────────────────────────────────── #
 
@@ -802,6 +895,68 @@ class _PassivePoolTab(ttk.Frame):
         self._left_lb._all = items
         self._left_lb._refresh(items)
         self._left_lb.clear_search()
+
+    def _on_threshold_change(self):
+        self._update_odds()
+
+    def _update_odds(self):
+        """Recompute and display odds for the current pool + threshold."""
+        all_passives = [p for e in self._entries for p in e["accepted"]]
+        n_pool = len(self._entries) + len(self._pairings)
+        thresh = self._threshold.get()
+
+        if n_pool == 0:
+            self._odds_var.set("Add passives to your pool to see odds.")
+            return
+
+        # Per-passive odds (first accepted variant only, as representative)
+        lines = []
+        repr_probs: list[float] = []
+        for entry in self._entries:
+            p = entry["accepted"][0]
+            prob = estimate_passive_prob(p)
+            label = _entry_label(entry)
+            if prob is not None:
+                n = int(round(1.0 / prob))
+                lines.append(f"  {label[:40]}{'…' if len(label) > 40 else ''}  →  ~1 in {n:,} per relic")
+                repr_probs.append(prob)
+            else:
+                lines.append(f"  {label[:40]}{'…' if len(label) > 40 else ''}  →  odds unknown")
+
+        for pair in self._pairings:
+            p1 = pair["left"][0]
+            p2 = pair["right"][0]
+            prob1 = estimate_passive_prob(p1)
+            prob2 = estimate_passive_prob(p2)
+            ll = _entry_label({"accepted": pair["left"]})
+            rl = _entry_label({"accepted": pair["right"]})
+            if prob1 is not None and prob2 is not None:
+                pair_prob = prob1 * prob2
+                n = int(round(1.0 / pair_prob))
+                lines.append(f"  PAIR {ll[:20]}+{rl[:20]}  →  ~1 in {n:,} per relic")
+                repr_probs.append(pair_prob)
+            else:
+                lines.append(f"  PAIR {ll[:20]}+{rl[:20]}  →  odds unknown")
+
+        if repr_probs and len(repr_probs) == n_pool:
+            # P(at least thresh) approximation: sort probs descending, take top thresh
+            sorted_probs = sorted(repr_probs, reverse=True)
+            # Upper bound: P(the thresh most-likely passives all appear)
+            combined = 1.0
+            for p in sorted_probs[:thresh]:
+                combined *= p
+            n_combined = int(round(1.0 / max(combined, 1e-12)))
+            lines.append(f"\n  P(at least {thresh} of {n_pool} pool matches): ~1 in {n_combined:,} relics (upper bound)")
+            secs = n_combined * 45
+            if secs < 3600:
+                time_str = f"~{secs // 60} min"
+            elif secs < 86400:
+                time_str = f"~{secs / 3600:.1f} hrs"
+            else:
+                time_str = f"~{secs / 86400:.1f} days"
+            lines.append(f"  Expected: ~{n_combined:,} relics  |  {time_str} @ ~45 sec/relic")
+
+        self._odds_var.set("\n".join(lines))
 
     # ── add / remove ────────────────────────────────────────────────────── #
 
@@ -846,6 +1001,7 @@ class _PassivePoolTab(ttk.Frame):
         cap = max(1, min(3, n))
         self._spin.configure(to=cap)
         self._threshold.set(min(self._threshold.get(), cap))
+        self._update_odds()
         pool_str  = f"{len(self._entries)} passive{'s' if len(self._entries) != 1 else ''}"
         pair_str  = f"{len(self._pairings)} pair{'s' if len(self._pairings) != 1 else ''}"
         self._count_lbl.set(f"of {pool_str} + {pair_str}")

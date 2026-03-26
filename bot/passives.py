@@ -825,6 +825,12 @@ _COMPAT_EXCLUSIVE_GROUPS: list[list[str]] = [
         *CATEGORIES["Starting Armaments (Imbue)"],
         *CATEGORIES["Starting Armaments (Spell)"],
     ],
+
+    # ── Group 7 – School-Specific Spell Boosters (Cat 4 / compat 800) ────
+    # One school booster per relic — sorcery and incantation schools compete.
+    # CAN coexist with one Group 0 attack booster (different compat category).
+    [p for p in CATEGORIES["Sorceries & Incantations"]
+     if p != "Extended Spell Duration"],
 ]
 
 # Flat lookup: passive_name → group index
@@ -842,6 +848,7 @@ COMPAT_GROUP_NAMES: dict[int, str] = {
     4: "Dormant Power",
     5: "Starting Armament Skill",
     6: "Starting Armament Imbue/Spell",
+    7: "School-Specific Spell Booster",
 }
 
 
@@ -860,6 +867,80 @@ def get_compat_violations(passives: list) -> list[tuple[int, int, str]]:
                 name = COMPAT_GROUP_NAMES.get(gi, f"Group {gi}")
                 violations.append((i, j, name))
     return violations
+
+
+# ── Passive probability estimation ─────────────────────────────────────────── #
+# Rough estimates based on category pool sizes and equal-weight assumptions.
+# Actual probabilities require pool weight data mined from AttachEffectTableParam.
+# Use as relative comparisons; absolute values are approximate.
+
+# Passives only available on Deep of Night relics (not normal shop buys)
+_DEEP_ONLY_PASSIVES: frozenset = frozenset([
+    "Physical Attack Up +3", "Physical Attack Up +4",
+    "Magic Attack Power Up +3", "Magic Attack Power Up +4",
+    "Fire Attack Power Up +3", "Fire Attack Power Up +4",
+    "Lightning Attack Power Up +3", "Lightning Attack Power Up +4",
+    "Holy Attack Power Up +3", "Holy Attack Power Up +4",
+    "Improved Affinity Attack Power",
+    "Improved Affinity Attack Power +1",
+    "Improved Affinity Attack Power +2",
+    "Improved Sorceries", "Improved Sorceries +1", "Improved Sorceries +2",
+    "Improved Incantations", "Improved Incantations +1", "Improved Incantations +2",
+    "Increased Maximum HP", "Increased Maximum FP", "Increased Maximum Stamina",
+    "Reduced FP Consumption", "Improved Flask HP Restoration",
+])
+
+# School-specific spell boosters (Cat 4 / compat 800, 14 passives total)
+_SCHOOL_BOOSTERS: frozenset = frozenset(
+    p for p in CATEGORIES.get("Sorceries & Incantations", [])
+    if p != "Extended Spell Duration"
+)
+
+_STAT_BASES: tuple = (
+    "Vigor", "Mind", "Endurance", "Strength",
+    "Dexterity", "Intelligence", "Faith", "Arcane", "Poise",
+)
+
+
+def estimate_passive_prob(passive: str | None) -> float | None:
+    """
+    Rough probability that a passive appears on any given purchased relic (3 slots).
+    Returns float in (0,1) or None if passive is None.
+
+    Model: 19 normal relic categories, each equally likely per slot, passives
+    within a category are equal weight.  Deep-only passives use a separate estimate.
+    Actual odds require pool weight data — use for relative comparisons only.
+    """
+    if passive is None:
+        return None
+    # Deep-of-Night exclusive — not roleable on normal shop relics
+    if passive in _DEEP_ONLY_PASSIVES:
+        return 0.003   # ~1 in 333 (deep relic pool, smaller total pool)
+    # Dormant Power — rare alternate pool, one per weapon type
+    if passive.startswith("Dormant Power"):
+        return 0.002   # ~1 in 500
+    # School-specific boosters — 14 passives, one exclusive compat category
+    if passive in _SCHOOL_BOOSTERS:
+        return 0.010   # ~1 in 100  (1 category / 19 total × 1/14 passives × ~3 slots)
+    # Per-stat passives (+1/+2/+3) — each stat has its own 3-option compat group
+    for base in _STAT_BASES:
+        if passive.startswith(base + " +"):
+            return 0.015   # ~1 in 67  (many stat categories, small pools)
+    # Character-specific passives
+    if passive.startswith("["):
+        return 0.005   # ~1 in 200
+    # Elemental / physical Attack Up (normal tiers, Cat 1, ~5 elements × 3 tiers)
+    _EL = ("Physical Attack Up", "Magic Attack Power Up", "Fire Attack Power Up",
+           "Lightning Attack Power Up", "Holy Attack Power Up")
+    if any(passive == e or passive.startswith(e + " +") for e in _EL):
+        return 0.004   # ~1 in 250
+    # Weapon-class attack power (Cat 1, large pool, ~24 weapon types)
+    if ("Attack Power" in passive and ("Improved " in passive or "3+" in passive)
+            and "Sorceries" not in passive and "Incantations" not in passive
+            and "Affinity" not in passive):
+        return 0.003   # ~1 in 333  (large Cat 1 pool dilutes individual odds)
+    # Default for everything else
+    return 0.005   # ~1 in 200
 
 
 # ── UI category groupings (displayed in the criteria builder) ─────────────── #
