@@ -807,6 +807,7 @@ class RelicBotApp(tk.Tk):
         self._blocked_curses_list: list[str] = []
         self._excluded_passives_list: list[str] = []
         self._save_exclusion_matches_var = tk.BooleanVar(value=False)
+        self._excl_dormant_var = tk.BooleanVar(value=False)
 
         # ── Excluded Passives ─────────────────────────────────────── #
         excl_frame = ttk.LabelFrame(
@@ -861,9 +862,11 @@ class RelicBotApp(tk.Tk):
         ttk.Button(excl_mid, text="Exclude →",  command=self._excl_add,    width=12).pack(pady=4)
         ttk.Button(excl_mid, text="← Remove",   command=self._excl_remove, width=12).pack(pady=4)
         ttk.Button(excl_mid, text="Clear All",   command=self._excl_clear,  width=12).pack(pady=8)
-        self._excl_dormant_btn = ttk.Button(
-            excl_mid, text="+ All Dormant Powers", command=self._excl_toggle_dormant, width=16)
-        self._excl_dormant_btn.pack(pady=4)
+        ttk.Checkbutton(
+            excl_mid, text="Excl. All Dormants",
+            variable=self._excl_dormant_var,
+            command=self._excl_toggle_dormant,
+        ).pack(pady=4)
 
         # Right: excluded passives list
         excl_right = ttk.LabelFrame(excl_content, text="Excluded Passives")
@@ -1608,6 +1611,12 @@ class RelicBotApp(tk.Tk):
                 if item and item not in self._excluded_passives_list:
                     self._excluded_passives_list.append(item)
                     self._excluded_lb.insert("end", item)
+            # Sync dormant checkbox: checked if every dormant power is in the exclusion list
+            from bot.passives import UI_CATEGORIES as _UCATS
+            _dormant = _UCATS.get("Dormant Powers", [])
+            self._excl_dormant_var.set(
+                bool(_dormant) and all(d in self._excluded_passives_list for d in _dormant if d)
+            )
         self._save_exclusion_matches_var.set(data.get("save_exclusion_matches", False))
         if "allowed_colors" in data:
             saved = data["allowed_colors"]
@@ -5174,25 +5183,21 @@ class RelicBotApp(tk.Tk):
 
     def _excl_toggle_dormant(self):
         """Add or remove all Dormant Powers from the exclusion list."""
-        from bot.passives import CATEGORIES as _CATS
-        dormant = _CATS.get("Dormant Powers", [])
-        already_all = all(d in self._excluded_passives_list for d in dormant if d)
-        if already_all:
-            # Remove all dormant powers from list
+        from bot.passives import UI_CATEGORIES as _UCATS
+        dormant = _UCATS.get("Dormant Powers", [])
+        if self._excl_dormant_var.get():
+            for d in dormant:
+                if d and d not in self._excluded_passives_list:
+                    self._excluded_passives_list.append(d)
+                    self._excluded_lb.insert("end", d)
+        else:
             to_remove = set(dormant)
-            keep = [(p) for p in self._excluded_passives_list if p not in to_remove]
+            keep = [p for p in self._excluded_passives_list if p not in to_remove]
             self._excluded_passives_list.clear()
             self._excluded_lb.delete(0, "end")
             for p in keep:
                 self._excluded_passives_list.append(p)
                 self._excluded_lb.insert("end", p)
-            self._excl_dormant_btn.config(text="+ All Dormant Powers")
-        else:
-            for d in dormant:
-                if d and d not in self._excluded_passives_list:
-                    self._excluded_passives_list.append(d)
-                    self._excluded_lb.insert("end", d)
-            self._excl_dormant_btn.config(text="− All Dormant Powers")
 
     def _get_excluded_passives(self) -> set:
         return set(self._excluded_passives_list)

@@ -2,7 +2,7 @@
 Relic criteria builder widget.
 
 Provides two modes selectable via a notebook (tab bar):
-  1. Exact Relic  – build up to 10 relic targets, each with 3 slots and a
+  1. Exact Relic  – build up to 20 relic targets, each with 3 slots and a
                     configurable match threshold (≥2 or all 3 passives).
                     Incompatible passives (same exclusive category) are
                     flagged and blocked.
@@ -10,6 +10,7 @@ Provides two modes selectable via a notebook (tab bar):
                     at least N of them simultaneously.
 """
 
+import math
 import re
 import tkinter as tk
 from tkinter import ttk
@@ -189,17 +190,17 @@ class _SlotSelector(ttk.LabelFrame):
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-#  EXACT RELIC TAB  (up to 10 targets, each with 3 slots + threshold)
+#  EXACT RELIC TAB  (up to 20 targets, each with 3 slots + threshold)
 # ─────────────────────────────────────────────────────────────────────────── #
 
 class _ExactRelicTab(ttk.Frame):
     """
-    Manage up to 10 relic targets.  Each target has three passive slots and a
+    Manage up to 20 relic targets.  Each target has three passive slots and a
     match threshold (2 = any two specified passives, 3 = all three).  The bot
     considers a relic a MATCH if it satisfies ANY of the defined targets.
     """
 
-    _MAX_TARGETS = 10
+    _MAX_TARGETS = 20
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
@@ -234,7 +235,7 @@ class _ExactRelicTab(ttk.Frame):
         ttk.Label(
             header,
             text=(
-                "Build up to 10 relic targets. "
+                "Build up to 20 relic targets. "
                 "For each target, choose passives for up to 3 slots and set the "
                 "minimum match threshold. "
                 "The bot stops when a relic satisfies ANY target. "
@@ -305,7 +306,7 @@ class _ExactRelicTab(ttk.Frame):
         ).pack(anchor="w", padx=6, pady=(4, 2))
         ttk.Label(
             odds_frame,
-            text="Estimates only — actual odds depend on game pool weights. Do not treat as exact.",
+            text="Odds use actual pool weight data (AttachEffectTableParam). Normal relic probabilities shown; deep-only passives use the Deep of Night pool.",
             foreground=theme.TEXT_MUTED,
         ).pack(anchor="w", padx=6, pady=(0, 4))
 
@@ -351,6 +352,27 @@ class _ExactRelicTab(ttk.Frame):
         self._refresh_list()
         self._target_lb.selection_clear(0, "end")
         self._target_lb.selection_set(self._active)
+
+    def import_target(self, passives: list[str]) -> bool:
+        """
+        Add a new target pre-filled with up to 3 passives from the Build Advisor.
+        Returns True on success, False if at max capacity.
+        """
+        # Filter to only valid passives
+        from bot.passives import ALL_PASSIVES
+        valid = [p for p in passives if p in ALL_PASSIVES][:3]
+        if not valid:
+            return False
+        if len(self._targets) >= self._MAX_TARGETS:
+            return False
+        self._save_current()
+        t = self._new_target()
+        for i, p in enumerate(valid):
+            t["slots"][i] = p
+        self._targets.append(t)
+        self._active = len(self._targets) - 1
+        self._load_active()
+        return True
 
     def _add_target(self):
         if len(self._targets) >= self._MAX_TARGETS:
@@ -482,15 +504,16 @@ class _ExactRelicTab(ttk.Frame):
             else:
                 lines.append(f"\n  Combined (all match): ~1 in {n_combined:,} relics")
 
-            # Expected iterations and time estimate (~45 sec per relic cycle)
-            secs = n_combined * 45
-            if secs < 3600:
-                time_str = f"~{secs // 60} min"
-            elif secs < 86400:
-                time_str = f"~{secs / 3600:.1f} hrs"
+            # Expected iterations (100 relics per iteration, ~45 sec/relic)
+            n_iters = math.ceil(n_combined / 100)
+            total_secs = n_combined * 45
+            if total_secs < 3600:
+                time_str = f"~{total_secs // 60} min"
+            elif total_secs < 86400:
+                time_str = f"~{total_secs / 3600:.1f} hrs"
             else:
-                time_str = f"~{secs / 86400:.1f} days"
-            lines.append(f"  Expected: ~{n_combined:,} relics  |  {time_str} @ ~45 sec/relic")
+                time_str = f"~{total_secs / 86400:.1f} days"
+            lines.append(f"  With 100 relics/iteration: ~{n_iters:,} iterations expected  |  ~{time_str} total")
 
         self._odds_var.set("\n".join(lines))
 
@@ -883,7 +906,7 @@ class _PassivePoolTab(ttk.Frame):
         ).pack(anchor="w", padx=6, pady=(4, 2))
         ttk.Label(
             odds_frame,
-            text="Estimates only — actual odds depend on game pool weights. Do not treat as exact.",
+            text="Odds use actual pool weight data (AttachEffectTableParam). Normal relic probabilities shown; deep-only passives use the Deep of Night pool.",
             foreground=theme.TEXT_MUTED,
         ).pack(anchor="w", padx=6, pady=(0, 4))
 
@@ -947,14 +970,15 @@ class _PassivePoolTab(ttk.Frame):
                 combined *= p
             n_combined = int(round(1.0 / max(combined, 1e-12)))
             lines.append(f"\n  P(at least {thresh} of {n_pool} pool matches): ~1 in {n_combined:,} relics (upper bound)")
-            secs = n_combined * 45
-            if secs < 3600:
-                time_str = f"~{secs // 60} min"
-            elif secs < 86400:
-                time_str = f"~{secs / 3600:.1f} hrs"
+            n_iters = math.ceil(n_combined / 100)
+            total_secs = n_combined * 45
+            if total_secs < 3600:
+                time_str = f"~{total_secs // 60} min"
+            elif total_secs < 86400:
+                time_str = f"~{total_secs / 3600:.1f} hrs"
             else:
-                time_str = f"~{secs / 86400:.1f} days"
-            lines.append(f"  Expected: ~{n_combined:,} relics  |  {time_str} @ ~45 sec/relic")
+                time_str = f"~{total_secs / 86400:.1f} days"
+            lines.append(f"  With 100 relics/iteration: ~{n_iters:,} iterations expected  |  ~{time_str} total")
 
         self._odds_var.set("\n".join(lines))
 
@@ -1111,6 +1135,216 @@ class _PassivePoolTab(ttk.Frame):
 # ─────────────────────────────────────────────────────────────────────────── #
 #  TOP-LEVEL BUILDER FRAME  (replaces the old criteria LabelFrame in app.py)
 # ─────────────────────────────────────────────────────────────────────────── #
+#  BUILD ADVISOR TAB
+# ─────────────────────────────────────────────────────────────────────────── #
+
+class _BuildAdvisorTab(ttk.Frame):
+    """
+    Build Advisor — recommends relic passive combinations for a given
+    weapon/skill/spell build. Two input modes:
+      1. Free text (type what you want to build)
+      2. Dropdown selector (pick a skill, spell, or weapon type directly)
+    Output can be imported into the Exact Relic Builder.
+    """
+
+    def __init__(self, parent, on_import: "callable", **kwargs):
+        super().__init__(parent, **kwargs)
+        self._on_import = on_import    # callback(passives: list[str]) → bool
+        self._hints: list = []         # current RelicHint results
+        self._build_ui()
+
+    def _build_ui(self):
+        pad = {"padx": 6, "pady": 4}
+
+        # ── Top: two input panels side-by-side ──────────────────────── #
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=6, pady=(6, 2))
+        top.columnconfigure(0, weight=1)
+        top.columnconfigure(1, weight=1)
+
+        # ── Panel A: Quick Select ────────────────────────────────────── #
+        qs_frame = ttk.LabelFrame(top, text="Quick Select")
+        qs_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+
+        ttk.Label(qs_frame, text="Category:").grid(row=0, column=0, sticky="w", **pad)
+        self._cat_var = tk.StringVar(value="Weapon Skill")
+        cat_cb = ttk.Combobox(qs_frame, textvariable=self._cat_var,
+                              values=["Weapon Skill", "Sorcery", "Incantation", "Weapon Type"],
+                              state="readonly", width=14)
+        cat_cb.grid(row=0, column=1, sticky="ew", **pad)
+        cat_cb.bind("<<ComboboxSelected>>", lambda _: self._refresh_qs_options())
+        qs_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(qs_frame, text="Selection:").grid(row=1, column=0, sticky="w", **pad)
+        self._qs_var = tk.StringVar()
+        self._qs_cb = ttk.Combobox(qs_frame, textvariable=self._qs_var,
+                                   state="readonly", width=22)
+        self._qs_cb.grid(row=1, column=1, sticky="ew", **pad)
+
+        ttk.Button(qs_frame, text="→ Recommend",
+                   command=self._recommend_from_dropdown).grid(
+            row=2, column=0, columnspan=2, pady=(4, 6))
+
+        self._refresh_qs_options()
+
+        # ── Panel B: Free Text ───────────────────────────────────────── #
+        ft_frame = ttk.LabelFrame(top, text="Free Text")
+        ft_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        ft_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(ft_frame, text='Describe your build:', foreground="#aaa").grid(
+            row=0, column=0, sticky="w", **pad)
+        self._text_var = tk.StringVar()
+        ttk.Entry(ft_frame, textvariable=self._text_var, width=30).grid(
+            row=1, column=0, sticky="ew", padx=6, pady=2)
+        ttk.Label(ft_frame,
+                  text='e.g. "Rain of Arrows Greatbow", "Beast Claw", "Katana bleed build"',
+                  foreground="#888", font=("TkDefaultFont", 8)).grid(
+            row=2, column=0, sticky="w", padx=6)
+        ttk.Button(ft_frame, text="→ Recommend",
+                   command=self._recommend_from_text).grid(
+            row=3, column=0, pady=(4, 6))
+
+        # ── Bottom: Recommendation output ───────────────────────────── #
+        out_frame = ttk.LabelFrame(self, text="Recommendation")
+        out_frame.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+
+        self._label_var = tk.StringVar(value="Make a selection above to see recommendations.")
+        ttk.Label(out_frame, textvariable=self._label_var,
+                  foreground="#c8a84c", font=("TkDefaultFont", 9, "bold")).pack(
+            anchor="w", padx=8, pady=(6, 2))
+
+        # Scrollable hint list
+        list_frame = ttk.Frame(out_frame)
+        list_frame.pack(fill="both", expand=True, padx=4, pady=2)
+        self._hint_lb = tk.Listbox(list_frame, height=7, selectmode="extended",
+                                   font=("Consolas", 9),
+                                   bg="#1e1e1e", fg="#d4d4d4",
+                                   selectbackground="#3a3d41",
+                                   activestyle="none")
+        sb = ttk.Scrollbar(list_frame, orient="vertical",
+                           command=self._hint_lb.yview)
+        self._hint_lb.config(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self._hint_lb.pack(side="left", fill="both", expand=True)
+
+        # Reason text below list
+        self._reason_var = tk.StringVar(value="")
+        ttk.Label(out_frame, textvariable=self._reason_var,
+                  foreground="#90c890", wraplength=680, justify="left").pack(
+            anchor="w", padx=8, pady=(2, 2))
+
+        self._hint_lb.bind("<<ListboxSelect>>", self._on_hint_select)
+
+        # Action buttons
+        btn_row = ttk.Frame(out_frame)
+        btn_row.pack(fill="x", padx=6, pady=(2, 6))
+        ttk.Button(btn_row, text="→ Import Selected into Relic Builder",
+                   command=self._import_selected).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="→ Import All (Top 3) into Relic Builder",
+                   command=self._import_top3).pack(side="left", padx=4)
+        ttk.Label(btn_row,
+                  text="Imports as one new target in the Build Exact Relic tab.",
+                  foreground="#888", font=("TkDefaultFont", 8)).pack(side="left", padx=8)
+
+    # ── Dropdown refresh ─────────────────────────────────────────────── #
+
+    def _refresh_qs_options(self):
+        from bot.build_advisor import get_skill_options, get_spell_options, get_weapon_type_options
+        from database.spells import SORCERIES, INCANTATIONS
+        cat = self._cat_var.get()
+        if cat == "Weapon Skill":
+            opts = get_skill_options()
+        elif cat == "Sorcery":
+            opts = sorted(SORCERIES.keys(), key=str.casefold)
+        elif cat == "Incantation":
+            opts = sorted(INCANTATIONS.keys(), key=str.casefold)
+        else:  # Weapon Type
+            opts = get_weapon_type_options()
+        self._qs_cb["values"] = opts
+        if opts:
+            self._qs_cb.set(opts[0])
+
+    # ── Recommendation triggers ──────────────────────────────────────── #
+
+    def _recommend_from_dropdown(self):
+        from bot.build_advisor import (recommend_for_skill, recommend_for_spell,
+                                        recommend_for_weapon)
+        from database.spells import SORCERIES, INCANTATIONS
+        cat = self._cat_var.get()
+        sel = self._qs_var.get().strip()
+        if not sel:
+            return
+        if cat == "Weapon Skill":
+            hints = recommend_for_skill(sel)
+            label = f"Skill: {sel}"
+        elif cat in ("Sorcery", "Incantation"):
+            hints = recommend_for_spell(sel)
+            label = f"{'Sorcery' if sel in SORCERIES else 'Incantation'}: {sel}"
+        else:
+            hints = recommend_for_weapon(sel)
+            label = f"Weapon: {sel}"
+        self._show_hints(label, hints)
+
+    def _recommend_from_text(self):
+        from bot.build_advisor import recommend_for_text
+        q = self._text_var.get().strip()
+        if not q:
+            return
+        label, hints = recommend_for_text(q)
+        if not hints:
+            self._label_var.set(f'No match found for "{q}". Try a different description.')
+            self._hint_lb.delete(0, "end")
+            self._reason_var.set("")
+            self._hints = []
+            return
+        self._show_hints(label, hints)
+
+    # ── Display ──────────────────────────────────────────────────────── #
+
+    def _show_hints(self, label: str, hints: list):
+        from bot.build_advisor import top_recommendations
+        self._hints = top_recommendations(hints, max_n=6)
+        self._label_var.set(f"Recommendations for: {label}")
+        self._hint_lb.delete(0, "end")
+        for h in self._hints:
+            badge = " [DEEP ONLY]" if h.deep_only else " [NORMAL]  "
+            prio  = "★" * (4 - h.priority) if h.priority <= 3 else ""
+            self._hint_lb.insert("end", f"{prio:<3} {badge}  {h.passive}")
+        self._reason_var.set("")
+
+    def _on_hint_select(self, _evt=None):
+        sel = self._hint_lb.curselection()
+        if sel and self._hints:
+            idx = sel[0]
+            if idx < len(self._hints):
+                self._reason_var.set(f"Why: {self._hints[idx].reason}")
+
+    # ── Import actions ───────────────────────────────────────────────── #
+
+    def _import_selected(self):
+        sel = self._hint_lb.curselection()
+        if not sel or not self._hints:
+            return
+        passives = [self._hints[i].passive for i in sel if i < len(self._hints)]
+        self._do_import(passives)
+
+    def _import_top3(self):
+        if not self._hints:
+            return
+        passives = [h.passive for h in self._hints[:3]]
+        self._do_import(passives)
+
+    def _do_import(self, passives: list):
+        ok = self._on_import(passives)
+        if ok:
+            self._reason_var.set(
+                f"✓ Imported {len(passives)} passive(s) as a new target in Build Exact Relic.")
+        else:
+            self._reason_var.set("✗ Could not import — Build Exact Relic tab is full (20 targets max).")
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 
 class RelicBuilderFrame(ttk.LabelFrame):
     """
@@ -1140,6 +1374,10 @@ class RelicBuilderFrame(ttk.LabelFrame):
         # Tab 1 – Passive Pool
         self._pool = _PassivePoolTab(self._nb)
         self._nb.add(self._pool, text="  Passive Pool  ")
+
+        # Tab 2 – Build Advisor
+        self._advisor = _BuildAdvisorTab(self._nb, on_import=self._exact.import_target)
+        self._nb.add(self._advisor, text="  Build Advisor  ")
 
         # ── Combine toggle ──────────────────────────────────────────── #
         combine_row = ttk.Frame(self)

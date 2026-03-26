@@ -904,43 +904,50 @@ _STAT_BASES: tuple = (
 
 def estimate_passive_prob(passive: str | None) -> float | None:
     """
-    Rough probability that a passive appears on any given purchased relic (3 slots).
+    Probability that a passive appears on any given single relic (per draw).
     Returns float in (0,1) or None if passive is None.
 
-    Model: 19 normal relic categories, each equally likely per slot, passives
-    within a category are equal weight.  Deep-only passives use a separate estimate.
-    Actual odds require pool weight data — use for relative comparisons only.
+    Uses actual pool weight data from database/pool_weights.py (AttachEffectTableParam).
+    Pool weights are averaged across the 6 normal relic tables (100/110/200/210/300/310).
+    Deep-only passives use the average across the 3 deep tables (2000000/2100000/2200000).
+    Falls back to category-based estimates for passives not found in pool data.
     """
     if passive is None:
         return None
-    # Deep-of-Night exclusive — not roleable on normal shop relics
+    try:
+        from database.pool_weights import normal_prob, deep_prob
+        # Try normal relic tables first
+        p = normal_prob(passive)
+        if p is not None:
+            return p
+        # Try deep relic tables (deep-only passives)
+        p = deep_prob(passive)
+        if p is not None:
+            return p
+    except ImportError:
+        pass
+
+    # Fallback: category-based rough estimates (used if pool_weights not available)
     if passive in _DEEP_ONLY_PASSIVES:
-        return 0.003   # ~1 in 333 (deep relic pool, smaller total pool)
-    # Dormant Power — rare alternate pool, one per weapon type
+        return 0.003
     if passive.startswith("Dormant Power"):
-        return 0.002   # ~1 in 500
-    # School-specific boosters — 14 passives, one exclusive compat category
+        return 0.002
     if passive in _SCHOOL_BOOSTERS:
-        return 0.010   # ~1 in 100  (1 category / 19 total × 1/14 passives × ~3 slots)
-    # Per-stat passives (+1/+2/+3) — each stat has its own 3-option compat group
+        return 0.010
     for base in _STAT_BASES:
         if passive.startswith(base + " +"):
-            return 0.015   # ~1 in 67  (many stat categories, small pools)
-    # Character-specific passives
+            return 0.015
     if passive.startswith("["):
-        return 0.005   # ~1 in 200
-    # Elemental / physical Attack Up (normal tiers, Cat 1, ~5 elements × 3 tiers)
+        return 0.005
     _EL = ("Physical Attack Up", "Magic Attack Power Up", "Fire Attack Power Up",
            "Lightning Attack Power Up", "Holy Attack Power Up")
     if any(passive == e or passive.startswith(e + " +") for e in _EL):
-        return 0.004   # ~1 in 250
-    # Weapon-class attack power (Cat 1, large pool, ~24 weapon types)
+        return 0.004
     if ("Attack Power" in passive and ("Improved " in passive or "3+" in passive)
             and "Sorceries" not in passive and "Incantations" not in passive
             and "Affinity" not in passive):
-        return 0.003   # ~1 in 333  (large Cat 1 pool dilutes individual odds)
-    # Default for everything else
-    return 0.005   # ~1 in 200
+        return 0.003
+    return 0.005
 
 
 # ── UI category groupings (displayed in the criteria builder) ─────────────── #

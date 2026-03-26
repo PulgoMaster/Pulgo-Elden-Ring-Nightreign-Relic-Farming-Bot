@@ -366,7 +366,7 @@ def analyze(image_bytes: bytes, criteria: dict) -> dict:
         dict with keys: relics_found, match, matched_relic, matched_passives,
                         matched_relic_curses, near_misses, reason
     """
-    from bot.passives import ALL_PASSIVES_SORTED
+    from bot.passives import ALL_PASSIVES_SORTED, ALL_CURSES
 
     reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)   # full resolution — we crop, not downscale
@@ -387,19 +387,23 @@ def analyze(image_bytes: bytes, criteria: dict) -> dict:
         if conf < 0.35 or len(text.strip()) < 3:
             continue
 
-        color = _classify_color(img, bbox)
-        matched = _match_passive(text, ALL_PASSIVES_SORTED)
-
-        if matched:
-            if color == "curse":
-                if matched not in curses:
-                    curses.append(matched)
-            else:
-                if matched not in passives:
-                    passives.append(matched)
-        elif relic_name is None and conf > 0.55 and color != "curse" \
-                and not text.strip()[0].isdigit():
-            relic_name = text.strip()
+        # Try matching as a known passive first, then as a known curse.
+        # Color-based classification (blue vs white) is NOT used here because
+        # the game renders curses in red/orange — not blue — so _classify_color
+        # returns "unknown" for curses and they would land in passives instead.
+        # Matching against the dedicated ALL_CURSES list is the reliable approach.
+        matched_passive = _match_passive(text, ALL_PASSIVES_SORTED)
+        if matched_passive:
+            if matched_passive not in passives:
+                passives.append(matched_passive)
+        else:
+            matched_curse = _match_passive(text, ALL_CURSES)
+            if matched_curse:
+                if matched_curse not in curses:
+                    curses.append(matched_curse)
+            elif relic_name is None and conf > 0.55 \
+                    and not text.strip()[0].isdigit():
+                relic_name = text.strip()
 
     relic_name = relic_name or "Unknown Relic"
 
