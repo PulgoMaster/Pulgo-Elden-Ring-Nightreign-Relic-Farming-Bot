@@ -1,0 +1,1524 @@
+RELIC DRAW RATES — COMPREHENSIVE PROBABILITY MATHEMATICS
+=========================================================
+Authored during RelicBot development sessions (2026-03-25 / 2026-03-26)
+Derived from: EquipParamAntique.csv, AttachEffectTableParam.csv (Smithbox datamine)
+
+CREDITS
+  By PulgoMaster
+
+  Sections marked [PM] highlight equations and logic originated by PulgoMaster
+  through independent reasoning, separate from raw datamine values.
+  The datamine provided numbers; the probability logic and equations were
+  reasoned from first principles.
+=========================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — VARIABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+T
+  The target passive the player wants on their relic.
+
+C(T)
+  The category (group) that T belongs to.
+  Each category is a set of mutually exclusive passives — drawing one
+  member of that category removes all other members from future draws
+  on the same relic.
+  Example: "Dormant Powers" is a category. Drawing any Dormant Power
+  passive removes all other Dormant Powers from subsequent slots.
+
+C_special
+  The one special category whose passives do NOT trigger category
+  exclusion when drawn. Drawing a passive from C_special leaves all
+  categories (including itself) fully available in subsequent slots.
+  No other category has this property.
+
+K
+  The number of passive slots on a given relic.
+  K = 1 for Delicate, K = 2 for Polished, K = 3 for Grand.
+
+TABLE_k
+  The weighted pool of passives that slot k draws from.
+  Slot assignments by relic size and version (confirmed from EquipParamAntique datamine):
+
+    CURRENT RELICS (post-1.02, sold at Small Jar Bazaar as standard option):
+      Delicate  → slot 1 draws from TABLE_100
+      Polished  → slot 1 from TABLE_200,  slot 2 from TABLE_100
+      Grand     → slot 1 from TABLE_300,  slot 2 from TABLE_200,
+                  slot 3 from TABLE_100
+
+    PRE-1.02 RELICS (legacy version, sold at Collector Signboard and as
+                     separate option; some post-1.02 passives absent):
+      Delicate  → slot 1 draws from TABLE_110
+      Polished  → slot 1 from TABLE_210,  slot 2 from TABLE_110
+      Grand     → slot 1 from TABLE_310,  slot 2 from TABLE_210,
+                  slot 3 from TABLE_110
+
+    NOTE: The version used is determined by PLAYER CHOICE at purchase, not
+    randomly. RelicBot always buys current (post-1.02) relics.
+    All probability calculations in this document use the current tables
+    (100/200/300) unless explicitly stated otherwise.
+
+    DEEP OF NIGHT (9 variants = size × curse_count, see Section 4 for full breakdown):
+      Deep relics are NOT described by a simple slot-1/slot-2 assignment.
+      Each Deep relic belongs to one of 9 structural variants determined
+      by size (Delicate/Polished/Grand) and curse count (0–3).
+      Two pool types exist:
+        T2M = TABLE_2000000 (exclusive slot): W_E = 9,984 (49 entries)
+        T2B = TABLE_2100000 (broad slot):     W_B = 9,977 (277 entries)
+      TABLE_2200000 is defined in the datamine but confirmed NOT present
+      in any bazaar relic entry (EquipParamAntique check, 2026-03-26).
+      Shorthand: W_E = 9,984 (exclusive), W_B = 9,977 (broad).
+
+w_k(p)
+  The integer weight of passive p in TABLE_k.
+  A passive not present in TABLE_k has w_k(p) = 0.
+
+W_k
+  The total weight of TABLE_k (sum of all w_k(p) for all p in the table).
+  Known values from datamine (confirmed by importing pool_weights.py):
+    TABLE_100   total = 10,004   (290 entries)
+    TABLE_110   total = 10,046   (290 entries — pre-1.02)
+    TABLE_200   total = 10,016   (290 entries)
+    TABLE_210   total = 10,058   (290 entries — pre-1.02)
+    TABLE_300   total = 10,017   (290 entries)
+    TABLE_310   total = 10,059   (290 entries — pre-1.02)
+    TABLE_2000000  total =  9,984   (49 entries  — Deep Exclusive)
+    TABLE_2100000  total =  9,977   (277 entries — Deep Broad)
+
+  CONFIRMED (2026-03-26): TABLE_2200000 is defined in the datamine but
+  is NOT used by any bazaar relic entry. EquipParamAntique confirms no
+  bazaar relic has attachEffectTableId_3 = 2200000. It is not part of
+  any probability calculation. W_B = 9,977 refers to TABLE_2100000 only.
+
+W_k(C)
+  The total weight of all passives belonging to category C within TABLE_k.
+  W_k(C) = Σ w_k(p)  for all p in C.
+
+EC_k
+  The set of categories that have been excluded by the time slot k is drawn.
+  EC_1 = {} (nothing excluded before the first draw).
+  EC_k grows as each slot's draw result eliminates its category (if non-special).
+
+W_k_eff(EC)
+  The effective total weight of TABLE_k after removing all excluded categories EC.
+  W_k_eff(EC) = W_k  −  Σ W_k(C)  for C in EC.
+
+P_D, P_P, P_G
+  The probability that a given relic presented at the Small Jar Bazaar is
+  Delicate, Polished, or Grand respectively.
+  P_D + P_P + P_G = 1.
+
+  CONFIRMED via ShopLineupParam (2026-03-26):
+    ItemTableParam 49000 = Normal relic ("Scenic Flatstone") bazaar
+    ItemTableParam 49100 = Deep relic ("Deep Scenic Flatstone") bazaar
+    Confirmed by ShopLineupParam entries 10110/10111 — shop item names are
+    definitive. Prior sessions erroneously labelled 49000 as the Deep relic
+    table; 49000 is Normal-only.
+
+  Normal relic size distribution (ItemTableParam 49000, confirmed):
+    P_D = 0.45   (Delicate — weight 45/100)
+    P_P = 0.35   (Polished — weight 35/100)
+    P_G = 0.20   (Grand    — weight 20/100)
+
+  Deep relic size distribution (ItemTableParam 49100, confirmed 2026-03-26):
+    P_D = 0.10   (Delicate — 49110, weight 100/1000)
+    P_P = 0.50   (Polished — 49111, weight 500/1000)
+    P_G = 0.40   (Grand    — 49111, weight 400/1000)
+    No Nothing group — weights sum exactly to 1000.
+    49110=Delicate / 49111=Polished / 49112=Grand confirmed by cross-reference
+    with sub-variant section (49111 sub-weights 300/500/200 match lines below).
+
+  Each relic in the Bazaar rolls its size independently from these weights.
+  The size variance observed across a single shop refresh (sometimes more
+  Delicate, sometimes more Grand) is pure sampling noise from independent
+  draws at these fixed probabilities.
+
+  [PM] The identification that relic size probability must be treated as
+  the outermost layer of the calculation — that passive odds are meaningless
+  without first weighting them by how likely each relic size is to appear —
+  was raised by PulgoMaster. Without this framing the formula is incomplete.
+
+P_A, P_B
+  DEPRECATED — this variable framing was incorrect.
+  There is no random Group A/Group B split. What was previously labelled
+  "Group A" (TABLE_100/200/300) = current post-1.02 relics.
+  What was labelled "Group B" (TABLE_110/210/310) = pre-1.02 relics.
+  The version is chosen by the player at purchase, not rolled randomly.
+  RelicBot always buys current relics; all formulas use 100/200/300 only.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — RELIC TYPE PROBABILITY (THE OUTERMOST LAYER) [PM]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[PM] This section's structure was proposed by PulgoMaster, who correctly
+identified that the probability of a passive appearing cannot be computed
+without first accounting for which relic size appears. The layered formula
+below is a direct result of that reasoning.
+
+Before any passive probabilities are computed, the game determines which
+relic SIZE appears. This is independent of the passive system and gates
+everything downstream.
+
+  P(T on any relic from shop) =
+      P_D × P(T | Delicate)
+    + P_P × P(T | Polished)
+    + P_G × P(T | Grand)
+
+This means a passive that only exists in TABLE_300/310 (the Grand slot-1 pool)
+is only reachable when the relic happens to be Grand AND the right slot is
+reached. Its true probability is gated by P_G, which may be much less than 1.
+
+Conversely, passives that appear in TABLE_100/110 are reachable from all three
+relic sizes (slot-3 of Grand, slot-2 of Polished, and the sole slot of Delicate
+all draw from 100/110). However their probability in each slot is diluted
+because TABLE_100/110 is the largest and most generic pool.
+
+Until P_D, P_P, P_G are measured, the per-type formulas below must be
+computed separately and combined using those probabilities.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — SINGLE-SLOT DRAW MECHANICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Each slot performs one weighted random draw from its assigned table,
+after removing all passives whose categories have been excluded by prior slots.
+
+The probability of drawing passive T in slot k, given excluded set EC_k, is:
+
+  P_k(T | EC_k) = w_k(T) / W_k_eff(EC_k)
+                    if C(T) ∉ EC_k   (T is still available)
+                = 0
+                    if C(T) ∈ EC_k   (T's category was already used)
+
+The weights are fixed integers from the datamine. What changes is the
+denominator (effective total weight) as categories are eliminated.
+This denominator shift is what drives the odds-shifting phenomenon in Section 5.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — SLOT → TABLE ASSIGNMENT (CONFIRMED FROM DATAMINE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Derived from EquipParamAntique.csv. Each relic item has
+attachEffectTableId_1/2/3 fields that directly specify which pool table
+each slot draws from. The mapping is deterministic per relic variant.
+
+NORMAL RELICS:
+  Each normal relic is either Group A or Group B. Both groups exist in
+  the datamine in equal numbers. The tables differ in passive composition
+  but cover the same categories.
+
+  Slot 1 always draws from the HIGHEST-TIER table for that variant.
+  Slot 2 draws from one tier lower. Slot 3 from the lowest tier.
+  Slot 1 is where the rarest and most unique passives can appear.
+  Slot 3 is the most generic draw.
+
+DEEP OF NIGHT RELICS — 9-VARIANT MODEL:
+  Confirmed from EquipParamAntique.csv (2026-03-26). Deep relics have
+  9 structural variants determined by size × curse_count. Each variant
+  has a fixed list of passive slots (T2M = TABLE_2000000 exclusive,
+  T2B = TABLE_2100000 broad).
+
+  A T2M slot is always paired 1-to-1 with one curse slot. A T2B slot
+  never has a curse. Curse count = number of T2M slots on the relic.
+
+  TABLE_2200000 is confirmed NOT present in any bazaar EQA entry.
+
+  ┌───────────────────────┬─────────┬──────────────────────┬────────────┐
+  │ Variant               │  Prob   │ Passive Slots        │ Curse Slots│
+  ├───────────────────────┼─────────┼──────────────────────┼────────────┤
+  │ Delicate / 0 curses   │  5.0%   │ [T2B]                │ —          │
+  │ Delicate / 1 curse    │  5.0%   │ [T2M]                │ [C]        │
+  │ Polished / 0 curses   │ 15.0%   │ [T2B, T2B]           │ —          │
+  │ Polished / 1 curse    │ 25.0%   │ [T2M, T2B]           │ [C]        │
+  │ Polished / 2 curses   │ 10.0%   │ [T2M, T2M]           │ [C, C]     │
+  │ Grand / 0 curses      │ 16.0%   │ [T2B, T2B, T2B]      │ —          │
+  │ Grand / 1 curse       │ 12.0%   │ [T2M, T2B, T2B]      │ [C]        │
+  │ Grand / 2 curses      │  8.0%   │ [T2M, T2M, T2B]      │ [C, C]     │
+  │ Grand / 3 curses      │  4.0%   │ [T2M, T2M, T2M]      │ [C, C, C]  │
+  └───────────────────────┴─────────┴──────────────────────┴────────────┘
+
+  HOW TO READ THE COMBINED PROBABILITY COLUMN:
+  These percentages are NOT "probability of X curses given you got that size."
+  They are the combined probability of drawing that EXACT variant from ANY
+  Deep relic purchase at the bazaar. The calculation is two-layered:
+
+    Combined % = (size distribution %) × (curse-count % within that size)
+
+  Example — Polished / 1 curse = 25%:
+    P(Polished) = 50%   ×   P(1 curse | Polished) = 50%   =   25%
+
+  Example — Grand / 1 curse = 12%:
+    P(Grand) = 40%   ×   P(1 curse | Grand) = 30%   =   12%
+
+  Why is Polished/1-curse (25%) more common than Grand/1-curse (12%)?
+  Two reasons compounding: Polished relics are more frequent (50% vs 40%),
+  AND within Grand relics the 1-curse variant is less likely than within
+  Polished (30% vs 50%). Grand curse counts are more spread out across
+  0/1/2/3 options; Polished concentrates into 1-curse. Grand relics are
+  NOT "more cursed" on average — their curse distribution is actually
+  flatter, making the individual 1-curse bucket smaller despite Grand
+  having more total slots.
+
+  Curse-count distributions within each size (from ItemTableParam sub-chains):
+    Delicate: 50% 0-curse / 50% 1-curse
+    Polished: 30% 0-curse / 50% 1-curse / 20% 2-curse
+    Grand:    40% 0-curse / 30% 1-curse / 20% 2-curse / 10% 3-curse
+
+  P(at least 1 curse | size):
+    Delicate: 50%     (1 − 50%)
+    Polished: 70%     (1 − 30%)
+    Grand:    60%     (1 − 40%)
+
+  Grand has a LOWER "at least 1 curse" rate than Polished because 40% of Grand
+  relics are the 0-curse variant — a larger zero-curse pool than Polished's 30%.
+  However, on relics that DO have curses, Grand can have 2 or 3 vs Polished's max of 2.
+  Grand has more curse SLOTS on average per cursed relic, but is less likely to
+  have ANY curse at all compared to Polished.
+
+  P(at least 1 curse, across all Deep purchases) — combined weighted:
+    = 0.10 × 50%  +  0.50 × 70%  +  0.40 × 60%  =  5% + 35% + 24%  =  64%
+
+  ~36% of all Deep relic purchases have zero curses (all T2B slots).
+  ~64% have at least one curse.
+
+  T2M = TABLE_2000000 (exclusive, 49 entries, W_E = 9,984)
+  T2B = TABLE_2100000 (broad, 277 entries, W_B = 9,977)
+  C   = curse slot draws from TABLE_3000000 (24 curses, uniform weight)
+
+─── 4A. TIER-POOL EXCLUSIVITY FOR NORMAL RELICS ─────────────────────────
+
+Every passive in the Normal relic pools carries a name prefix that reveals
+exactly which pool it belongs to (confirmed from pool_weights.py):
+
+  <Delicate Scene> ... → lives in TABLE_100 / TABLE_110 only
+  <Polished Scene> ... → lives in TABLE_200 / TABLE_210 only
+  <Grand Scene>    ... → lives in TABLE_300 / TABLE_310 only
+
+Because a Normal Grand relic assigns one slot per tier (slot1=300,
+slot2=200, slot3=100), and each passive only exists in one tier's pool:
+
+  CONSEQUENCE: A Normal Grand relic always contains EXACTLY one Grand-tier
+  passive, one Polished-tier passive, and one Delicate-tier passive.
+  It is STRUCTURALLY IMPOSSIBLE to get two passives from the same tier
+  on a single Normal relic.
+
+This eliminates the 6-permutation sum from Section 7 for Normal Grand relics.
+Since each target is locked to its slot by its prefix, there is AT MOST one
+valid slot ordering. See Section 7A for the simplified combined formula.
+
+─── 4B. DEEP POOL MEMBERSHIP ────────────────────────────────────────────
+
+Deep relics do NOT use the Delicate/Polished/Grand tier structure.
+Instead, two passive pools exist for all Deep relics:
+
+  Deep Exclusive pool (TABLE_2000000, 49 entries, W_E = 9,984):
+    High-value passives unique to Deep relics: PA+3/+4, Max HP boost,
+    Affinity+2, Improved Sorceries+2, and other top-tier effects.
+    These passives ONLY appear when a relic has a T2M (exclusive) slot.
+    A relic with zero T2M slots (zero curses) CANNOT roll any of these.
+
+  Deep Broad pool (TABLE_2100000, 277 entries, W_B = 9,977):
+    The standard Deep passive pool — PA+2, Poise+3, and mid-tier effects.
+    Used for all T2B (broad) slots. Available on curse-free relics.
+
+  IMPORTANT: TABLE_2200000 is NOT used by any bazaar relic (confirmed from
+  EquipParamAntique.csv). Do not factor it into any probability calculation.
+
+  IMPORTANT: Stat boosts (Vigor +1, Strength +2, etc.) are Normal-only
+  passives. They have weight 0 in both Deep pools. When computing Deep relic
+  probabilities, any stat-boost target returns 0.0 (impossible, not unknown).
+
+To determine which pool a Deep passive belongs to, look it up in
+pool_weights.py under TABLE_2000000 (exclusive) vs TABLE_2100000 (broad).
+Unlike Normal relics, there is no prefix in the passive name that reveals
+pool membership for Deep relics. A passive can exist in both pools
+(giving it access from either T2M or T2B slots), or only in one.
+
+KEY CONSEQUENCE OF THE CURSE-PASSIVE PAIRING RULE:
+  - Every T2M slot has exactly one paired curse slot.
+  - This means: if you see an exclusive passive (PA+3, PA+4, Max HP, etc.)
+    on any Deep relic, that relic ALWAYS has at least one curse.
+  - A relic with 2 exclusive passives always has 2 curses.
+  - A 0-curse Deep relic can only roll passives from TABLE_2100000 (broad).
+  - No individual passive determines WHICH curse appears — curse identity
+    is drawn randomly from TABLE_3000000 (see Section 14 for curse math).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — CATEGORY EXCLUSION AND THE ODDS SHIFTING PHENOMENON [PM]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[PM] The entire framework of this section — the question of whether odds
+shift after category elimination, the double-edge insight, and the
+C_special "slot cost with no benefit" observation — was originated by
+PulgoMaster through a line of questioning developed without reference to
+datamine numbers. The datamine only supplied the weights needed to verify
+and quantify what was already logically described.
+
+─── 5A. THE BASIC EXCLUSION RULE ────────────────────────────────────────
+
+When slot k draws passive p:
+  - If C(p) is NOT C_special:
+      All other passives in C(p) are removed from all subsequent draws.
+      The effective pool for slot k+1 shrinks by W_{k+1}(C(p)).
+  - If C(p) IS C_special:
+      Nothing is excluded. The pool for slot k+1 is unchanged.
+
+─── 5B. WHAT HAPPENS TO T'S ODDS WHEN ANOTHER CATEGORY IS ELIMINATED ───
+
+Suppose slot k drew a passive from category C_q (not C(T), not C_special).
+C_q is now excluded. For slot k+1:
+
+  Before exclusion: P(T in slot k+1) = w_{k+1}(T) / W_{k+1}
+  After exclusion:  P(T in slot k+1) = w_{k+1}(T) / (W_{k+1} − W_{k+1}(C_q))
+
+  Since W_{k+1}(C_q) > 0, the denominator decreases, so P(T) increases.
+  All surviving passives receive the same proportional boost.
+
+  Boost factor = W_{k+1} / (W_{k+1} − W_{k+1}(C_q))
+
+  Example:
+    W = 10,000   W(C_q) = 200   w(T) = 20
+    Before: P(T) = 20/10000 = 0.200%
+    After:  P(T) = 20/9800  = 0.204%
+    Boost factor ≈ 1.0204
+
+─── 5C. THE DOUBLE-EDGE EFFECT [PM] ─────────────────────────────────────
+
+[PM] PulgoMaster identified the following non-obvious consequence: when an
+external category is eliminated and T's raw probability rises, the raw
+probability of T's category siblings — the passives that would disqualify
+T from future slots — rises by the exact same proportional amount.
+
+PulgoMaster's original formulation (paraphrased):
+  "If we give 9 [sibling] passives each a 0.10% raise then it would add
+   up to 0.90% while our desired passive only got raised by 0.10%."
+
+This is precisely correct. Formalised:
+
+Let:
+  w_T      = weight of T in the table
+  W_CatT   = total weight of C(T) in the table
+  W_sibs   = W_CatT − w_T   (combined weight of T's category siblings)
+
+After eliminating external category C_q with weight W_Cq from pool W:
+
+  T's absolute probability increase:
+    Δ_T    = w_T × W_Cq / (W × (W − W_Cq))
+
+  Siblings' collective absolute probability increase:
+    Δ_sibs = W_sibs × W_Cq / (W × (W − W_Cq))
+
+  Ratio: Δ_sibs / Δ_T  =  W_sibs / w_T
+
+  If C(T) has 10 members of equal weight (T plus 9 siblings):
+    For every +0.10% T gains, siblings collectively gain +0.90%.
+    The exclusion risk grows 9× faster than T's own draw probability.
+
+─── 5D. THE CONSTANT RATIO PROPERTY ────────────────────────────────────
+
+The ratio P(T drawn) / P(sibling drawn) is invariant under elimination of
+external categories. Both scale by the same factor W/(W−W_Cq). Therefore:
+
+  P(T drawn | C(T) resolves this slot)
+  ─────────────────────────────────────  =  w_T / W_sibs   (constant)
+  P(T excluded by sibling | same slot)
+
+  The relative competition within C(T) is fixed regardless of what else
+  has been eliminated. Only the absolute probability of C(T) resolving
+  in this slot changes.
+
+─── 5E. WHEN DOES CATEGORY ELIMINATION PURELY HELP T? ──────────────────
+
+[PM] PulgoMaster posed this precisely: does eliminating an external
+category strictly help T, or is the benefit partially negated?
+
+On the FINAL slot of a relic: strictly positive.
+  No future draws remain. Exclusion risk from siblings resolves on this
+  same slot. Fewer categories in the pool = better odds for T, period.
+
+On INTERMEDIATE slots: mixed.
+  1. T's probability in THIS slot increases (positive).
+  2. The probability that a sibling eliminates T from FUTURE slots also
+     increases proportionally (negative offset).
+  Net effect across all remaining slots is complex — see Section 6.
+
+─── 5F. THE SPECIAL CATEGORY — SLOT COST WITH PARTIAL POOL ELIMINATION [PM] ─
+
+[PM] PulgoMaster identified this asymmetry: C_special passives consume
+a slot without reducing the pool for future slots at the category level.
+Formalised (corrected 2026-03-26):
+
+  - C_special draws use a physical slot on the relic.
+  - They do NOT eliminate the C_special category from future draws.
+    All other C_special passives remain available in subsequent slots.
+  - HOWEVER: the specific drawn passive and all of its tier variants
+    (e.g., base + /+1/ +2 if they exist) ARE eliminated from future draws.
+    A relic cannot contain two instances or variants of the same passive.
+  - Therefore the pool shrinks by exactly the weight of the drawn passive's
+    tier group, not by the full category weight. Category stays open; one
+    passive base is consumed.
+  - Therefore on a multi-slot relic, a C_special draw in an early slot
+    is strictly worse for T than a non-special draw would have been:
+    it costs a draw opportunity and provides only minimal thinning
+    (one passive base removed vs. an entire category removed).
+  - This makes C_special draws the near-worst-case outcome for T's odds
+    on intermediate slots (though not harmful on the final slot,
+    where no future draws remain regardless).
+
+  Correction note: The earlier framing "slot cost with no pool benefit"
+  was slightly imprecise — there IS a marginal pool reduction (the drawn
+  passive base is eliminated), but it is negligible compared to full
+  category elimination. The practical conclusion is unchanged: C_special
+  draws are near-worst-case for target passive odds.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — MULTI-SLOT CONDITIONAL PROBABILITY CHAIN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For a relic with K slots, P(T appears on relic) is the sum over all
+slot positions of the probability T is drawn in that position given
+the results of all prior slots.
+
+─── 6A. DELICATE RELIC (K = 1) ─────────────────────────────────────────
+
+  P(T | Delicate, Group A) = w_100(T) / W_100   (W_100 = 10,004)
+  P(T | Delicate, Group B) = w_110(T) / W_110   (W_110 = 10,046)
+
+  Combined (assuming P_A = P_B = 0.5):
+  P(T | Delicate) = 0.5 × [w_100(T)/10004]  +  0.5 × [w_110(T)/10046]
+
+  No conditional complexity. Single draw, fixed pool.
+
+─── 6B. POLISHED RELIC (K = 2) ─────────────────────────────────────────
+
+For Group A (slot 1 = TABLE_200, slot 2 = TABLE_100):
+
+  P(T | Polished, A) = Term1 + Term2
+
+  Term1: w_200(T) / W_200
+
+  Term2: sum over all slot-1 outcomes p where T is still available
+         (i.e., p ∉ C(T), unless C(T) = C_special):
+
+    If C(p) = C_special:
+      P(T in slot 2 | S1=p) = w_100(T) / W_100
+    Else:
+      P(T in slot 2 | S1=p) = w_100(T) / (W_100 − W_100(C(p)))
+
+    Term2 =
+      Σ_{p ∉ C(T), C(p) ≠ C_special} [w_200(p)/W_200] × [w_100(T)/(W_100 − W_100(C(p)))]
+      +
+      Σ_{p ∈ C_special}               [w_200(p)/W_200] × [w_100(T)/W_100]
+
+─── 6C. GRAND RELIC (K = 3) ────────────────────────────────────────────
+
+For Group A (slot1=TABLE_300, slot2=TABLE_200, slot3=TABLE_100):
+
+  P(T | Grand, A) = Term1 + Term2 + Term3
+
+  Term1: w_300(T) / W_300
+
+  Term2:
+    Σ_{p1 valid for T}
+      [w_300(p1)/W_300] × [w_200(T) / W_200_eff(EC from p1)]
+
+    where EC from p1 = {C(p1)} if C(p1) ≠ C_special, else {}
+
+  Term3:
+    Σ_{p1 valid for T}  Σ_{p2 valid for T given p1}
+      [w_300(p1)/W_300]
+      × [w_200(p2) / W_200_eff(EC_p1)]
+      × [w_100(T)  / W_100_eff(EC_p1 ∪ EC_p2)]
+
+  EC_p2 = {C(p2)} if C(p2) ≠ C_special, else {}
+
+  The inner sums iterate over all passives in each slot's effective table
+  (hundreds of entries per slot) and must be computed numerically.
+
+─── 6D. FULL COMBINED FORMULA (NORMAL RELICS) ──────────────────────────
+
+  RelicBot always buys current relics (Group A = TABLE_100/200/300).
+  For bot calculations, P_B = 0 and P_A = 1. Formula simplifies to:
+
+  P(T on any Normal relic) =
+      P_D × P(T | Delicate, A)
+    + P_P × P(T | Polished, A)
+    + P_G × P(T | Grand, A)
+
+  Where P_D = 0.45, P_P = 0.35, P_G = 0.20 (Normal bazaar, confirmed).
+  Full formula retaining both groups retained above for completeness.
+
+─── 6E. DEEP DELICATE (K = 1) ──────────────────────────────────────────
+
+  Deep Delicate has two variants with equal probability (5% each of all
+  Deep relics purchased — 10% Delicate × 50%/50% curse split):
+
+    Variant Del/0-curse (5.0%): one T2B slot (broad pool only)
+    Variant Del/1-curse (5.0%): one T2M slot (exclusive pool only)
+
+  How to read this: a Deep Delicate relic is a single-slot relic, but
+  WHICH pool that slot draws from depends on the variant. Half the time
+  it's a broad slot (TABLE_2100000), half the time it's an exclusive slot
+  (TABLE_2000000). These are mutually exclusive outcomes.
+
+  Probability formulas:
+
+  For a target T ∈ TABLE_2000000 (exclusive) only:
+    P(T | Deep Delicate) = 0.50 × (w_E(T) / W_E)
+    (only the Del/1-curse variant can ever produce this passive)
+
+  For a target T ∈ TABLE_2100000 (broad) only:
+    P(T | Deep Delicate) = 0.50 × (w_B(T) / W_B)
+    (only the Del/0-curse variant can ever produce this passive)
+
+  For a target T in BOTH pools:
+    P(T | Deep Delicate) = 0.50 × (w_E(T) / W_E)  +  0.50 × (w_B(T) / W_B)
+
+  For a target T in neither pool:
+    P(T | Deep Delicate) = 0   (impossible — return 0.0, not unknown)
+
+  Combined over all Deep purchases (P_D_deep = 0.10):
+    P(T | any Deep relic, Delicate portion) = 0.10 × P(T | Deep Delicate)
+
+─── 6F. DEEP POLISHED (K = 2) ──────────────────────────────────────────
+
+  Deep Polished has three variants (within P_P_deep = 50% of all Deep purchases):
+
+    Variant Pol/0-curse (15.0%): slots = [T2B, T2B]
+    Variant Pol/1-curse (25.0%): slots = [T2M, T2B]
+    Variant Pol/2-curse (10.0%): slots = [T2M, T2M]
+
+  How to read this: the slot pool assignments vary by variant. The overall
+  probability for a target is the weighted sum across all three variants.
+  For each variant, compute P(T appears in any slot given that slot list),
+  then multiply by the variant probability, then sum.
+
+  General formula (exact, variant-weighted):
+
+    P(T | Deep Polished) =
+      Σ_{v ∈ {Pol variants}} p_v × P(T appears in at least one slot | slot_list_v)
+
+  For each variant, P(T in at least one slot | slot_list) uses the
+  conditional exclusion chain (same logic as Normal multi-slot, but now
+  the pools vary per slot per variant instead of being fixed by tier).
+
+  Shorthand for T in one pool only:
+
+    T ∈ TABLE_2000000 (exclusive) only:
+      Only slots that are T2M can draw T.
+      P(T | Pol/0-curse) = 0                    (no T2M slots)
+      P(T | Pol/1-curse) = w_E(T) / W_E         (one T2M slot)
+      P(T | Pol/2-curse) = 1 − (1 − w_E(T)/W_E) × (1 − w_E(T)/(W_E − W_E(C(T))))
+        Approximation: ≈ 2 × w_E(T) / W_E       (if W_E(C(T)) << W_E)
+
+    T ∈ TABLE_2100000 (broad) only:
+      Only T2B slots can draw T.
+      P(T | Pol/0-curse) ≈ 1 − (1 − w_B(T)/W_B)²  (two T2B slots)
+        ≈ 2 × w_B(T) / W_B                      (if w_B(T) << W_B)
+      P(T | Pol/1-curse) = w_B(T) / W_B_eff     (one T2B slot; W_B_eff adjusts
+        for the T2M slot-1 draw having potentially excluded C(T) from broad pool)
+      P(T | Pol/2-curse) = 0                    (no T2B slots)
+
+  Combined:
+    P(T | Deep Polished) = 0.15 × P(T | Pol/0) + 0.25 × P(T | Pol/1) + 0.10 × P(T | Pol/2)
+
+  WITHIN each variant's slot list, the conditional exclusion chain applies
+  exactly as in Section 6B: each draw may exclude C(p_drawn) for the next slot.
+  For T2M→T2B sequences: the T2M draw may reduce the effective broad pool
+  for the T2B slot if C(T2M_result) has weight in TABLE_2100000.
+
+─── 6G. DEEP GRAND — SINGLE TARGET (K = 3) ─────────────────────────────
+
+  Deep Grand has four variants (within P_G_deep = 40% of all Deep purchases):
+
+    Variant Grd/0-curse (16.0%): slots = [T2B, T2B, T2B]
+    Variant Grd/1-curse (12.0%): slots = [T2M, T2B, T2B]
+    Variant Grd/2-curse  (8.0%): slots = [T2M, T2M, T2B]
+    Variant Grd/3-curse  (4.0%): slots = [T2M, T2M, T2M]
+
+  How to read this: unlike Normal Grand (which has strictly tiered slots),
+  Deep Grand variants differ in HOW MANY exclusive vs broad slots they have.
+  More T2M slots = more curses = more access to rare exclusive passives, but
+  fewer broad slots available. A 3-curse Grand cannot roll any broad passive.
+
+  General formula — variant-weighted sum:
+
+    P(T | Deep Grand) =
+      Σ_{v ∈ {Grd variants}} p_v × P(T in at least one slot | slot_list_v)
+
+  For T ∈ TABLE_2000000 (exclusive) only:
+    P(T | Grd/0) = 0           (no T2M slots)
+    P(T | Grd/1) = w_E(T)/W_E  (one T2M slot)
+    P(T | Grd/2) ≈ 1 − (1 − w_E(T)/W_E)²   (two T2M slots, with exclusion)
+    P(T | Grd/3) ≈ 1 − (1 − w_E(T)/W_E)³   (three T2M slots, with exclusion)
+
+  For T ∈ TABLE_2100000 (broad) only:
+    P(T | Grd/0) ≈ 1 − (1 − w_B(T)/W_B)³   (three T2B slots)
+    P(T | Grd/1) ≈ 1 − (1 − w_B(T)/W_B)²   (two T2B slots after T2M slot-1)
+    P(T | Grd/2) = w_B(T)/W_B_eff           (one T2B slot)
+    P(T | Grd/3) = 0                         (no T2B slots)
+
+  (W_B_eff adjusts for C(T2M draws) potentially excluding C(T) from broad pool.)
+
+  Combined:
+    P(T | Deep Grand) =
+      0.16 × P(T | Grd/0)
+    + 0.12 × P(T | Grd/1)
+    + 0.08 × P(T | Grd/2)
+    + 0.04 × P(T | Grd/3)
+
+  Note: T ∈ TABLE_2100000 has multiple broad-slot chances on 0-curse and
+  1-curse variants — this is why broad-pool passives on Grand Deep relics
+  have meaningfully better odds than exclusive-pool passives despite the
+  exclusive pool being available to more curse variants.
+
+─── 6H. DEEP GRAND — TWO TARGETS ────────────────────────────────────────
+
+  For T1 ∈ TABLE_2000000, T2 ∈ TABLE_2100000, C(T1) ≠ C(T2):
+
+  How to read this: T1 needs a T2M slot, T2 needs a T2B slot. Grd/0-curse
+  has no T2M slots (T1 is impossible). Grd/3-curse has no T2B slots (T2
+  is impossible). Only Grd/1-curse and Grd/2-curse can deliver both.
+
+    P(T1 AND T2 | Deep Grand) =
+        0.12 × P(T1 AND T2 | Grd/1)   +   0.08 × P(T1 AND T2 | Grd/2)
+
+    For Grd/1-curse [T2M, T2B, T2B]:
+      T1 fills the T2M slot, T2 must appear in one of the two T2B slots.
+      = [w_E(T1)/W_E] × [1 − (1 − w_B(T2)/W_B_eff)²]
+      where W_B_eff = W_B − W_B(C(T1))
+      (T1's category exclusion may reduce the effective broad pool)
+      If C(T1) absent from TABLE_2100000: W_B_eff = W_B = 9,977.
+
+    For Grd/2-curse [T2M, T2M, T2B]:
+      T1 fills one T2M slot, the other T2M draws something else, T2 fills T2B.
+      ≈ 2 × [w_E(T1)/W_E] × [w_B(T2)/W_B_eff]   (two T2M slots T1 can occupy)
+
+  For T1, T2 both ∈ TABLE_2100000, C(T1) ≠ C(T2):
+
+  How to read this: both targets need broad slots. Grd/0-curse (3 T2B slots)
+  and Grd/1-curse (2 T2B slots) can fit both. Grd/2-curse has only 1 T2B slot —
+  can't fit two broad targets simultaneously. Grd/3-curse has no T2B slots.
+
+    P(T1 AND T2 | Deep Grand) =
+        0.16 × P(T1 AND T2 | Grd/0)   +   0.12 × P(T1 AND T2 | Grd/1)
+
+    For Grd/0-curse [T2B, T2B, T2B]:
+      T1 and T2 must fill two of the three T2B slots. The third draws anything.
+      = Σ_{p1} [w_B(p1)/W_B] × { [w_B(T1)/W_B'] × [w_B(T2)/(W_B' − W_B'(C(T1)))]
+                                + [w_B(T2)/W_B'] × [w_B(T1)/(W_B' − W_B'(C(T2)))] }
+      Approximation: ≈ 3 × [w_B(T1)/W_B] × [w_B(T2)/W_B]
+
+    For Grd/1-curse [T2M, T2B, T2B]:
+      Slot 1 is a T2M "free" draw. T1 and T2 must both appear in slots 2+3.
+      = Σ_{p1} [w_E(p1)/W_E]
+        × { [w_B(T1)/W_B'] × [w_B(T2)/(W_B' − W_B'(C(T1)))]
+          + [w_B(T2)/W_B'] × [w_B(T1)/(W_B' − W_B'(C(T2)))] }
+      where W_B' = W_B − W_B(C(p1))
+      Approximation: ≈ 2 × [w_B(T1)/W_B] × [w_B(T2)/W_B]
+
+─── 6I. DEEP GRAND — THREE TARGETS (Full God Roll) ─────────────────────
+
+  For T1 ∈ TABLE_2000000, T2 ∈ TABLE_2100000, T3 ∈ TABLE_2100000,
+  all in different compat categories (C(T1) ≠ C(T2) ≠ C(T3)):
+
+  How to read this: T1 needs a T2M slot. T2 and T3 both need T2B slots.
+  We need at least 1 T2M slot AND at least 2 T2B slots. Only Grd/1-curse
+  [T2M, T2B, T2B] satisfies this — it has exactly one T2M and two T2B.
+  Grd/0-curse has no T2M (T1 impossible). Grd/2-curse has only 1 T2B (T2
+  and T3 can't both land). Grd/3-curse has no T2B (T2 and T3 impossible).
+
+    P(T1 AND T2 AND T3 | Deep Grand) = 0.12 × P(T1 AND T2 AND T3 | Grd/1)
+
+    For Grd/1-curse [T2M, T2B, T2B]:
+      T1 fills the T2M slot. T2 and T3 must fill both T2B slots in either order.
+      P(T1 AND T2 AND T3 | Grd/1)
+        = [w_E(T1)/W_E]
+          × { [w_B(T2)/W_B_eff] × [w_B(T3)/(W_B_eff − W_B_eff(C(T2)))]
+            + [w_B(T3)/W_B_eff] × [w_B(T2)/(W_B_eff − W_B_eff(C(T3)))] }
+
+      where W_B_eff = W_B − W_B(C(T1))
+      (T1's exclusion may reduce the effective broad pool for T2/T3)
+
+      If C(T1) absent from TABLE_2100000: W_B_eff = W_B = 9,977.
+      If T2 and T3 share a compat category: P = 0 (one excludes the other).
+
+    EXACT FORMULA (assuming C(T1) absent from TABLE_2100000):
+
+    P(T1 AND T2 AND T3 | Deep Grand)
+      = 0.12
+        × [w_E(T1) / 9,984]
+        × { [w_B(T2)/9,977] × [w_B(T3)/(9,977 − W_B(C(T2)))]
+          + [w_B(T3)/9,977] × [w_B(T2)/(9,977 − W_B(C(T3)))] }
+
+  For T1, T2, T3 all ∈ TABLE_2100000:
+    Three broad targets need 3 T2B slots — only Grd/0-curse has 3 T2B.
+    The formula is a 3-slot conditional probability chain across all
+    6 permutations of (T1,T2,T3):
+    P = 0.16 × Σ_{σ} P(slot1=Tσ1) × P(slot2=Tσ2|σ1) × P(slot3=Tσ3|σ1,σ2)
+
+  For T1, T2 ∈ TABLE_2000000, T3 ∈ TABLE_2100000:
+    Both exclusive targets need T2M slots — Grd/2-curse [T2M, T2M, T2B].
+    T3 needs the single T2B slot.
+    P = 0.08
+        × { [w_E(T1)/W_E] × [w_E(T2)/(W_E − W_E(C(T1)))] × [w_B(T3)/W_B_eff]
+          + (T1↔T2 swap) }
+    where W_B_eff = W_B adjusted for C(T1) and C(T2) exclusions from broad pool.
+
+─── 6J. DEEP GRAND — FULL COMBINED PROBABILITY ─────────────────────────
+
+  How to read this: The top-level formula multiplies each size's probability
+  by that size's per-relic passive probability. The per-size formulas (6E/6F/6G)
+  already account internally for the variant structure — you do NOT also weight
+  by the individual variant probabilities at this level. The size weights
+  P_D_deep/P_P_deep/P_G_deep are the outer layer; variant weights are the
+  inner layer handled inside each sub-formula.
+
+  P(T on any Deep relic from bazaar) =
+      P_D_deep × P(T | Deep Delicate)
+    + P_P_deep × P(T | Deep Polished)
+    + P_G_deep × P(T | Deep Grand)
+
+  Where: P_D_deep=0.10, P_P_deep=0.50, P_G_deep=0.40 (confirmed Section 1)
+
+  For a three-passive combination (T1 AND T2 AND T3): only Grand relics
+  have 3 slots, so the size terms for Delicate and Polished both = 0.
+
+  P(T1 AND T2 AND T3 on any Deep relic) = 0.40 × P(T1 AND T2 AND T3 | Deep Grand)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — ODDS OF MULTIPLE TARGET PASSIVES TOGETHER [PM]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[PM] PulgoMaster identified that a complete probability model must account
+for the case where the player wants multiple specific passives on the same
+relic simultaneously, and that these events are NOT independent — they
+interact through the exclusion system.
+
+For two targets T1 and T2 (different categories):
+
+  P(T1 AND T2 on relic) ≠ P(T1) × P(T2)
+
+  Drawing T1 excludes C(T1), changing the effective pool T2 draws from,
+  and vice versa. The events are correlated through the exclusion chain.
+
+The correct calculation sums over all valid slot-assignment orderings:
+
+  P(T1 in slot i, T2 in slot j) for all valid (i,j) pairs where i ≠ j,
+  conditioned on the full exclusion state at each point.
+
+For THREE targets (a full God Roll on a Grand relic):
+
+  P(T1 AND T2 AND T3 on Grand) =
+    Σ over all 6 permutations (σ1, σ2, σ3) of (T1, T2, T3):
+      P(slot 1 = Tσ1)
+      × P(slot 2 = Tσ2 | slot 1 = Tσ1)
+      × P(slot 3 = Tσ3 | slots 1,2 = Tσ1, Tσ2)
+
+  Each permutation uses its respective slot tables and respects the
+  exclusion chain. There are 6 permutations; each is a product of
+  3 conditional probabilities.
+
+─── 7A. NORMAL GRAND — SIMPLIFIED MULTI-TARGET FORMULA ─────────────────
+
+  [PM] The 6-permutation sum collapses for Normal Grand relics due to
+  tier-pool exclusivity (Section 4A). Each passive is locked to the slot
+  matching its pool — a Grand-tier passive can only appear in slot 1, a
+  Polished-tier passive only in slot 2, and a Delicate-tier passive only
+  in slot 3. Most permutations have probability 0 because the passive
+  doesn't exist in the other slots' pools.
+
+  For T1 ∈ TABLE_300, T2 ∈ TABLE_200, T3 ∈ TABLE_100
+  (one passive from each tier, all in different compat categories):
+
+  P(T1 AND T2 AND T3 | Normal Grand, current relics)
+    = [w_300(T1) / W_300]
+      × [w_200(T2) / (W_200 − W_200(C(T1)))]
+      × [w_100(T3) / (W_100 − W_100(C(T1)) − W_100(C(T2)))]
+
+  This is a single product — no permutation sum. The ordering is
+  determined entirely by which pool each target passive lives in.
+
+  If any two targets are in the SAME tier pool (e.g., T1 and T2 both
+  in TABLE_300): P = 0. A Normal relic cannot have two same-tier passives.
+
+  If any two targets share a compat category: P = 0.
+
+─── 7B. DEEP GRAND — PERMUTATION STRUCTURE ─────────────────────────────
+
+  For Deep Grand, the permutation count depends on pool membership:
+
+  Case A — T1 in TABLE_2000000, T2 and T3 in TABLE_2100000:
+    T1 needs a T2M slot; T2 and T3 need two T2B slots.
+    Only Grd/1-curse [T2M, T2B, T2B] satisfies all three requirements.
+    T1 fills the T2M slot; T2 and T3 can be in either of the two T2B slots → 2 valid orderings.
+    Full formula: Section 6I (Grd/1-curse path).
+
+  Case B — T1, T2, T3 all in TABLE_2100000:
+    All three targets need broad (T2B) slots. Three T2B slots exist only in
+    Grd/0-curse [T2B, T2B, T2B] — that variant can accommodate all three.
+    Full formula: see Section 6I (T1/T2/T3 all broad path) — uses the 0.16 weighted term.
+
+  Case C — T1 and T2 in TABLE_2000000, T3 in TABLE_2100000:
+    Both T1 and T2 need T2M (exclusive) slots. Only Grd/2-curse [T2M, T2M, T2B]
+    has two T2M slots AND one T2B slot for T3.
+    This variant has probability 8.0% of all Deep Grand purchases (0.40 × 20%).
+
+    P(T1 AND T2 AND T3) =
+      0.08 × { [w_E(T1)/W_E] × [w_E(T2)/(W_E − W_E(C(T1)))] × [w_B(T3)/W_B_eff]
+             + (T1↔T2 swap) }
+    where W_B_eff = W_B adjusted for C(T1) and C(T2) exclusions from the broad pool.
+
+  Case D — all three targets in TABLE_2000000:
+    All three need T2M slots. Only Grd/3-curse [T2M, T2M, T2M] has three.
+    P = 0.04 × 6-permutation formula over the exclusive pool.
+    This is the rarest possible three-target combination on a Deep Grand relic.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — PRACTICAL IMPLICATIONS AND SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. SLOT POSITION MATTERS.
+   A passive only in TABLE_300/310 can ONLY appear on Grand relics in slot 1.
+   A passive in TABLE_100/110 can appear in any relic size but in the most
+   diluted pool.
+
+2. CATEGORY ELIMINATION IS SYMMETRIC WITHIN THE POOL.
+   All survivors boost proportionally. T is not special relative to its
+   own category siblings — they all scale together.
+
+3. [PM] ELIMINATING EXTERNAL CATEGORIES HAS MIXED IMPACT ON T.
+   Final slot: strictly positive.
+   Intermediate slots: positive for this slot, simultaneously raises
+   T-sibling exclusion risk by the same factor. Net effect requires the
+   full probability tree to evaluate.
+
+4. [PM] C_SPECIAL DRAWS ARE SLOT COST WITH NO POOL BENEFIT.
+   They use a slot without clearing any competition. Worst-case outcome
+   for T on intermediate slots of multi-passive relics.
+
+5. THE SYSTEM CANNOT BE REDUCED TO INDEPENDENT DRAWS.
+   Naive multiplication of per-passive probabilities is incorrect.
+   The exact answer requires the conditional probability tree.
+
+6. [PM] MULTI-TARGET PROBABILITY REQUIRES PERMUTATION SUM.
+   P(T1 AND T2) ≠ P(T1) × P(T2). All valid slot orderings must be
+   enumerated and summed, each respecting the exclusion chain.
+   Exception: Normal Grand (Section 7A) — tier-pool exclusivity locks
+   each target to one slot, eliminating the permutation sum entirely.
+
+7. RELIC COLOR HAS ZERO EFFECT ON PASSIVE ODDS.
+   Color (Burning/Drizzly/Luminous/Tranquil) is cosmetic. All four colors
+   use the exact same passive pool tables. No passive is color-exclusive.
+   See Section 12 for full color distribution data.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — WORKED EXAMPLE (SIMPLIFIED)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Target: "Dormant Power Helps Discover Staves" (T)
+Simplified pool: 500 entries, 10 Dormant Power passives weight 1 each,
+490 other passives in 49 categories of 10 weight 1 each.
+
+  W = 500, w(T) = 1, W(C(T)) = 10, W_sibs = 9
+
+Delicate (1 slot):
+  P(T) = 1/500 = 0.200%
+
+Polished (2 slots, same table both slots for simplicity):
+  Slot 1 lands T:        P = 1/500
+  Slot 1 misses C(T) entirely (490/500), pool shrinks to 490:
+    P(T in slot 2) ≈ (490/500) × (1/490) = 1/500
+  Slot 1 lands C(T) sibling (9/500): T excluded, no further chance.
+
+  Total ≈ 1/500 + 1/500 = 2/500 = 0.400%
+
+Grand (3 slots):
+  Total ≈ 3/500 = 0.600%   (symmetric simplified case)
+
+  [PM] Note from PulgoMaster: the above shows why odds do NOT cleanly
+  multiply per slot — the exclusion system creates dependencies that
+  largely cancel in this symmetric case but create real deviations in
+  the actual asymmetric weight tables.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — CONFIRMED VALUES AND REMAINING UNKNOWNS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CONFIRMED (from ItemTableParam.csv analysis, 2026-03-26):
+
+  Current vs Pre-1.02 relic table assignments (EquipParamAntique, 2026-03-26):
+    EquipParamAntique items 100–135: current (post-1.02) relics → TABLE_100/200/300
+    EquipParamAntique items 200–235: pre-1.02 relics             → TABLE_110/210/310
+    Version is selected by player at purchase (not random).
+    The Small Jar Bazaar (ItemTableParam table 49000) only references
+    items 100–135 — it exclusively supplies current relics.
+    Collector Signboard also offers pre-1.02 variants (items 200–235).
+    CORRECTION: The previous "P_A = P_B = 0.5 Group A/B" finding was a
+    misidentification of current vs pre-1.02 relic sets.
+
+  Deep Relic Size Probabilities (ItemTableParam 49100, confirmed 2026-03-26):
+    P_deep_Delicate = 10%   (49110, weight 100/1000)
+    P_deep_Polished = 50%   (49111, weight 500/1000)
+    P_deep_Grand    = 40%   (49112, weight 400/1000)
+
+  NOTE: An earlier entry in this doc stated "10%/50%/40% was INCORRECT" and
+  replaced it with 45%/35%/20%. That "correction" was itself the error —
+  it arose from misidentifying 49000 (Normal relic table) as the Deep relic
+  table. The original 10/50/40 finding was correct. ShopLineupParam confirms
+  the table IDs definitively (see P_D/P_P/P_G section above).
+
+  Guaranteed-Grand Tables:
+    Normal: 49010 (current) / 49030 (pre-1.02) — Collector Signboard
+    Deep:   49200 (current) / 49400 (DLC)       — Collector Signboard
+    None of these apply to the Small Jar Bazaar (RelicBot's source).
+
+  Deep Relic 9-Variant Probabilities (confirmed from EquipParamAntique.csv, 2026-03-26):
+    These are COMBINED probabilities across all Deep relic purchases (not per-size).
+    Each = (size probability) × (curse-count probability within that size).
+
+    Variant               Combined P   Passive Slots          Curse Slots
+    ──────────────────────────────────────────────────────────────────────
+    Delicate / 0 curses    5.0%        [T2B]                  —
+    Delicate / 1 curse     5.0%        [T2M]                  [C]
+    Polished / 0 curses   15.0%        [T2B, T2B]             —
+    Polished / 1 curse    25.0%        [T2M, T2B]             [C]
+    Polished / 2 curses   10.0%        [T2M, T2M]             [C, C]
+    Grand / 0 curses      16.0%        [T2B, T2B, T2B]        —
+    Grand / 1 curse       12.0%        [T2M, T2B, T2B]        [C]
+    Grand / 2 curses       8.0%        [T2M, T2M, T2B]        [C, C]
+    Grand / 3 curses       4.0%        [T2M, T2M, T2M]        [C, C, C]
+
+    T2M = TABLE_2000000 (exclusive, paired with a curse)
+    T2B = TABLE_2100000 (broad, never has a curse)
+    C   = curse drawn from TABLE_3000000 (24 curses, uniform weight)
+
+    Curse-count distributions within each size (source: ItemTableParam sub-chains):
+      Delicate: 50% 0-curse / 50% 1-curse
+      Polished: 30% 0-curse / 50% 1-curse / 20% 2-curse
+      Grand:    40% 0-curse / 30% 1-curse / 20% 2-curse / 10% 3-curse
+    ~36% of all Deep relic purchases have zero curses (all T2B slots).
+
+    NOTE: The previous "variant IDs" (2000xxx, 2001xxx, 2003xxx) listed in
+    earlier versions of this doc were datamine artifact labels that did not
+    reflect actual bazaar relic slot structure. The 9-variant model above
+    is the confirmed replacement (EquipParamAntique.csv cross-check, 2026-03-26).
+
+STILL UNKNOWN:
+
+  - C_special — exact identity of the non-excluding passive category
+
+  - Deep Delicate curse split: CONFIRMED 50% 0-curse / 50% 1-curse
+    from equal sub-table weights in ItemTableParam 49110 chain.
+
+  - Exact passive differences between TABLE_100 and TABLE_110 (current vs
+    pre-1.02). Known: pre-1.02 tables are missing passives added in patch
+    1.02. Unknown: which specific passives were added and what their weights
+    are in the current tables vs being absent in the pre-1.02 tables.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — ROLLING SOURCE COMPARISON AND FUTURE FEATURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This section documents all known rolling sources and their structural
+differences. Currently RelicBot only uses the Small Jar Bazaar (current
+relics). This section is retained for future feature planning.
+
+─── 11A. COMPLETE SOURCE MAP ─────────────────────────────────────────────
+
+  Eight ItemTableParam tables cover all relic purchase sources:
+
+  NORMAL RELICS ("Scenic Flatstone") — passive pools: TABLE_100/200/300
+  ┌─────────────────┬───────────┬──────────────────────────┐
+  │ Source          │ IT Table  │ Size distribution        │
+  ├─────────────────┼───────────┼──────────────────────────┤
+  │ Bazaar current  │ 49000     │ 45% Del / 35% Pol / 20% G│
+  │ Signboard curr. │ 49010     │ 100% Grand               │
+  │ Bazaar pre-1.02 │ 49020     │ 45% Del / 35% Pol / 20% G│
+  │ Signboard pre   │ 49030     │ 100% Grand               │
+  └─────────────────┴───────────┴──────────────────────────┘
+
+  DEEP RELICS ("Deep Scenic Flatstone") — passive pools: TABLE_2000000/2100000
+  ┌─────────────────┬───────────┬──────────────────────────┐
+  │ Source          │ IT Table  │ Size distribution        │
+  ├─────────────────┼───────────┼──────────────────────────┤
+  │ Bazaar current  │ 49100     │ 10% Del / 50% Pol / 40% G│  ← RelicBot source
+  │ Signboard curr. │ 49200     │ 100% Grand               │
+  │ Bazaar DLC      │ 49300     │ 10% Del / 50% Pol / 40% G│
+  │ Signboard DLC   │ 49400     │ 100% Grand               │
+  └─────────────────┴───────────┴──────────────────────────┘
+
+  Table IDs confirmed via ShopLineupParam (shop item names are definitive).
+
+  Key facts:
+  - Grand relics from the Bazaar and Signboard (same version) use IDENTICAL
+    passive tables. The Signboard simply guarantees Grand; it does not change
+    what passives can appear.
+  - Pre-1.02 and current Grand relics pull from structurally parallel tables
+    (310/210/110 vs 300/200/100) but with different passive content.
+  - The version (current vs pre-1.02) is chosen by the player at purchase,
+    not rolled randomly.
+
+─── 11B. COLLECTOR SIGNBOARD MECHANICS ──────────────────────────────────
+
+  Currency: Everdark Sigils — earned exclusively by defeating Everdark Bosses.
+  Rarity of currency makes each purchase high-stakes; batches are necessarily
+  small compared to Murk-based Bazaar runs.
+
+  All Signboard relics are Grand (3 passives). This has a structural
+  consequence for batch efficiency:
+
+    At a Bazaar (45/35/20 size split):
+      P(Grand) per relic = 0.20
+      In a batch of 20 relics: expected 4 Grand relics
+
+    At the Signboard:
+      P(Grand) per relic = 1.00
+      Every relic is a Grand — 3 passive draw slots guaranteed each time
+
+  Because every relic has 3 draws instead of an average of ~1.9, the
+  Signboard provides roughly 3× the passive draw attempts per relic
+  compared to the Bazaar's weighted average. Even a small Signboard
+  batch (5–10 relics) generates meaningful passive draw coverage.
+
+─── 11C. OPTIMAL SOURCE SELECTION (FUTURE FEATURE) ─────────────────────
+
+  For a given target passive T, the optimal rolling source depends on
+  which table T appears in and at what weight. Three decisions are involved:
+
+  1. BAZAAR vs SIGNBOARD (assuming same version):
+     - If T has weight > 0 in TABLE_300, Signboard is always better:
+       every relic is Grand, maximising slot-3 coverage.
+     - If T only exists in TABLE_100 (the most diluted pool), Signboard
+       still helps because more Grand relics = more TABLE_100 draws
+       (slot 3 of Grand), but the per-relic odds improvement is modest.
+     - If T does not appear in Grand relics at all (TABLE_300 weight = 0
+       AND the passive is somehow size-restricted), Signboard offers no
+       advantage. Verify via EquipParamAntique before assuming.
+
+  2. CURRENT vs PRE-1.02:
+     - If T was added in patch 1.02: it exists only in TABLE_100/200/300.
+       Pre-1.02 tables (110/210/310) do not contain it. Current-only rolling.
+     - If T existed before 1.02: it appears in both table sets. The weights
+       may differ slightly between versions (requires direct comparison).
+     - In most cases current tables are preferred because the pool is richer
+       (more passives = slightly lower per-passive weight, but the presence
+       of all post-1.02 passives makes the build space complete).
+
+  3. COMBINED OPTIMAL STRATEGY:
+     For a target T that has meaningful weight in TABLE_300/200/100:
+       Best source = Signboard current (all Grand, current tables)
+       Second best = Bazaar current (random size, current tables)
+       Avoid pre-1.02 unless T is confirmed present and has higher relative
+       weight there due to the smaller pool.
+
+─── 11D. PRE-1.02 TABLE CONTENT DELTA (PARTIALLY KNOWN) ────────────────
+
+  TABLE_100 vs TABLE_110, TABLE_200 vs TABLE_210, TABLE_300 vs TABLE_310:
+  Structurally parallel. Key differences to document when investigated:
+
+  - Which passives exist in current (1xx) tables but NOT in pre-1.02 (11x)?
+    (These are the passives added in patch 1.02.)
+  - Do any passives have HIGHER relative weight in pre-1.02 tables due to
+    the smaller pool? (This could make pre-1.02 preferable for certain targets.)
+  - Pool totals:
+      TABLE_100 = 10,004   TABLE_110 = 10,046
+      TABLE_200 = 10,016   TABLE_210 = 10,058
+      TABLE_300 = 10,017   TABLE_310 = 10,059
+    The pre-1.02 tables (11x series) have HIGHER totals despite presumably
+    having fewer passives. This is counterintuitive and warrants investigation —
+    it may mean pre-1.02 tables have higher-weight entries for some passives,
+    or contain different filler entries not present in current tables.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — RELIC COLOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Confirmed from EquipParamAntique.csv (2026-03-26). Each relic has a
+relicColor field (0–3) that determines its visual color name.
+
+  Color 0 = Burning Scene  (visually: red/fire)
+  Color 1 = Drizzly Scene  (visually: blue/water)
+  Color 2 = Luminous Scene (visually: yellow/gold)
+  Color 3 = Tranquil Scene (visually: green/nature)
+
+─── 12A. EFFECT ON PASSIVE ODDS ────────────────────────────────────────
+
+  NONE. All four colors point to identical passive pool tables.
+
+  A Burning Delicate relic and a Tranquil Delicate relic both draw from
+  TABLE_100. A Burning Grand and a Tranquil Grand both draw from
+  TABLE_300 → TABLE_200 → TABLE_100 in their respective slots.
+  No passive is color-exclusive. Color is a cosmetic attribute only.
+
+─── 12B. COLOR DISTRIBUTION — CONFIRMED ENTRY COUNTS ───────────────────
+
+  Counts from EquipParamAntique.csv, all relic items with "Scene" in name:
+
+  NORMAL RELICS (isDeepRelic = 0):
+    Burning  (Color 0): 148 entries   (25.56%)
+    Drizzly  (Color 1): 145 entries   (25.04%)
+    Luminous (Color 2): 143 entries   (24.70%)
+    Tranquil (Color 3): 143 entries   (24.70%)
+    Total: 579 entries
+
+    The slight Burning surplus (5 extra entries vs Luminous/Tranquil) is
+    due to 579 not dividing evenly by 4. Probability-wise this is negligible
+    (~0.86% relative deviation from perfect 25%). For practical Normal relic
+    calculations, treat all four colors as equally probable (25% each).
+
+  DEEP RELICS (isDeepRelic = 1):
+    Burning  (Color 0): 54 entries    (25.00% exactly)
+    Drizzly  (Color 1): 54 entries    (25.00% exactly)
+    Luminous (Color 2): 54 entries    (25.00% exactly)
+    Tranquil (Color 3): 54 entries    (25.00% exactly)
+    Total: 216 entries
+
+    Deep relics are perfectly balanced across colors.
+
+─── 12C. IMPLICATIONS FOR FUTURE CALCULATIONS ──────────────────────────
+
+  When Normal relic calculations are added:
+  - Color probability is 25% for all practical purposes (exact: 25.56% /
+    25.04% / 24.70% / 24.70% if precision is needed)
+  - Color does NOT alter which passive pool tables are drawn from
+  - Color does NOT gate access to any passive
+  - No formula needs a color term — color is independent of passive odds
+
+  For the bot: color is observable via OCR (the passive name prefix
+  includes the color name, e.g. "<Burning Scene> Wylder: ...") but
+  does not factor into match scoring or target probability estimates.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 14 — CURSE PROBABILITY (DEEP RELICS ONLY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Curses only appear on Deep relics. Normal relics never have curses.
+This section covers: what determines curse count, curse identity, and how
+the curse filter in RelicBot adjusts probability calculations.
+
+─── 14A. HOW CURSE COUNT IS DETERMINED ──────────────────────────────────
+
+Curse count is NOT a separate random roll that happens after passives are
+assigned. It is determined entirely by which of the 9 structural variants
+the relic belongs to (Section 4). The variant is selected when the relic
+is generated, and the variant definition fixes the number of T2M vs T2B
+slots — which in turn fixes the curse count.
+
+  Number of curses = Number of T2M (exclusive) slots in the variant.
+  A T2B (broad) slot never generates a curse. No exceptions.
+
+This is why certain passives ALWAYS come with curses:
+  Any passive from TABLE_2000000 (exclusive pool) can only appear in a T2M
+  slot. A T2M slot always has a paired curse. Therefore, seeing any exclusive
+  passive on a relic guarantees at least one curse is present.
+
+  EXCLUSIVE PASSIVES (TABLE_2000000, always paired with a curse):
+    Physical Attack Up +3        Physical Attack Up +4
+    All Attack Up +3             All Attack Up +4
+    Maximum HP Up                Vigor/Strength/Dexterity/etc. Up +2 (affinity)
+    Improved Sorceries+2         Improved Incantations+2
+    ... and all other entries exclusive to TABLE_2000000 (49 total)
+
+  BROAD PASSIVES (TABLE_2100000, never paired with a curse when drawn):
+    Physical Attack Up +2        Poise Up +3
+    Stamina Recovery +X          All Attack Up +2
+    ... and all other entries in TABLE_2100000 (277 total)
+
+PROBABILITY OF AT LEAST ONE CURSE BY SIZE:
+
+  A common question is: "how likely is a Grand relic to have any curse at all,
+  vs a Polished?" The answer is counterintuitive:
+
+    P(≥1 curse | Delicate) = 50%
+    P(≥1 curse | Polished) = 70%   ← more likely than Grand
+    P(≥1 curse | Grand)    = 60%   ← lower than Polished
+
+  Grand has a LOWER "at least 1 curse" rate than Polished because 40% of Grand
+  relics are 0-curse variants — a larger zero-curse fraction than Polished's 30%.
+  However, when a Grand relic IS cursed, it can have 2 or 3 curses (Polished maxes
+  at 2). Grand has more curse slots on cursed relics, but is less likely to be
+  cursed in the first place.
+
+  Combined across all Deep relic purchases (10/50/40 size split):
+    P(≥1 curse) = 0.10×50% + 0.50×70% + 0.40×60% = 5% + 35% + 24% = 64%
+
+  ~64% of Deep relic purchases have at least one curse.
+  ~36% have zero curses (all T2B slots).
+
+IMPORTANT: No individual passive guarantees a SPECIFIC curse. The curse
+identity is drawn separately after the variant determines how many cursed
+slots exist (see Section 14B).
+
+─── 14B. CURSE IDENTITY — TABLE_3000000 ─────────────────────────────────
+
+Once the variant determines that a relic has K curse slots (K > 0), each
+curse slot independently draws one curse from TABLE_3000000.
+
+  TABLE_3000000: 24 curses, all exactly equal weight (100 each, total 2400).
+  Each curse has exactly 4.167% (1/24) probability per curse slot.
+
+  The 24 curses include debuffs such as:
+    Weakened Recovery, Weakened Stamina, Weakened Poise, Lowered Vigor,
+    Lowered Endurance, Lowered Strength, Lowered Dexterity, Lowered Mind,
+    Weakened Weapons, Slowed Sprinting, Reduced Rune Acquisition, etc.
+
+TABLE_3000000 determines WHICH curse appears. WHETHER a curse appears is
+determined by the variant structure (Section 14A). These are independent
+decisions at different stages of relic generation.
+
+  If you block N curses using the curse filter and the relic has K curse
+  slots, then for each slot the probability of drawing an unblocked curse is:
+    P(slot passes | N blocked) = (24 − N) / 24
+
+  If the relic has K curse slots and N curses are blocked, the probability
+  that ALL curse slots avoid all blocked curses is:
+    P(relic passes curse filter | K slots) = ((24 − N) / 24)^K
+
+─── 14C. CURSE FILTER PROBABILITY FORMULA ───────────────────────────────
+
+The RelicBot curse filter lets you block up to 21 specific curses
+(at least 3 must remain unblocked — the UI enforces this minimum).
+
+When N curses are blocked, the probability that a given Deep relic of a
+specific size passes the curse filter:
+
+  P(passes | size, N blocked):
+
+    Let p_ok = (24 − N) / 24    (probability each curse slot avoids blocked curses)
+    Let dist = curse-count distribution for that size (Section 4 table)
+
+    P(passes | size) = Σ_{k curses in size} P(k curses | size) × p_ok^k
+
+  This weights each possible curse count for that size by the probability
+  of ALL k curse slots drawing unblocked curses.
+
+  For Delicate (0 or 1 curse):
+    P(passes | Delicate) = 0.50 × 1.0  +  0.50 × p_ok
+                         = 0.50 + 0.50 × p_ok
+
+  For Polished (0, 1, or 2 curses):
+    P(passes | Polished) = 0.30 × 1.0  +  0.50 × p_ok  +  0.20 × p_ok²
+
+  For Grand (0, 1, 2, or 3 curses):
+    P(passes | Grand) = 0.40 × 1.0  +  0.30 × p_ok  +  0.20 × p_ok²  +  0.10 × p_ok³
+
+  Combined across all Deep relic sizes:
+    P(passes | any Deep relic)
+      = 0.10 × P(passes | Delicate)
+      + 0.50 × P(passes | Polished)
+      + 0.40 × P(passes | Grand)
+
+HOW THE CURSE FILTER AFFECTS COMBINED PASSIVE PROBABILITY:
+
+  When the curse filter is active, the effective probability of finding a
+  relic that has both the desired passives AND passes the curse filter is:
+
+    P(target passives AND passes curse filter)
+      = P(target passives on relic)  ×  P(passes curse filter | that relic's size)
+
+  Because curse count is structurally linked to passive slot type (T2M = cursed),
+  the conditional structure is:
+
+    P(passes curse filter | relic had exclusive passive)
+      ≠  P(passes curse filter | relic had only broad passives)
+
+  A relic with an exclusive passive necessarily had a T2M slot → at least 1 curse.
+  That relic's curse-filter pass rate starts lower than a broad-only relic's.
+  The engine handles this correctly by computing the probability over all 9 variants
+  and multiplying the passive-probability contribution of each variant by its
+  curse-filter pass rate.
+
+─── 14D. CURSE FILTER PASS RATE TABLE (Reference) ──────────────────────
+
+  For quick reference — approximate % of Deep relics passing the curse filter
+  given N blocked curses (using combined size distribution 10/50/40):
+
+    N Blocked   p_ok      Pass Rate (approx)
+    ─────────────────────────────────────────
+    0           100.00%    100.0%   (no filter)
+    1            95.83%     95.8%
+    3            87.50%     88.2%
+    5            79.17%     80.9%
+    7            70.83%     73.3%
+    10           58.33%     62.2%
+    15           37.50%     43.3%
+    20           16.67%     24.0%
+    21           12.50%     20.2%   (maximum allowed — 3 curses remain)
+
+  These rates reflect the combined probability weighted across the 9 variants
+  and their individual curse-count distributions. ~36% of Deep relics have
+  zero curses and always pass the filter regardless of N blocked.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — CHANGELOG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2026-03-26  v1.0
+  Initial document. Slot→table mapping confirmed from datamine.
+  Category exclusion, double-edge effect, C_special analysis added.
+  Deep relic 4-variant structure confirmed. Credits added for [PM] logic.
+
+2026-03-26  v1.1
+  P_A = P_B = 0.5 confirmed from ItemTableParam equal sub-table weights.
+  Deep relic sub-variant probabilities confirmed from weighted chains.
+  Normal relic P_D/P_P/P_G remains unknown — not in standard param CSVs.
+
+2026-03-26  v1.2
+  CORRECTION: Deep relic size probabilities revised.
+  Previous entry (10% / 50% / 40%) was wrong — misread of chain structure.
+  Correct values from ItemTableParam table 49000: 45% Delicate / 35% Polished / 20% Grand.
+  Guaranteed-Grand tables (49010, 49030) confirmed as Collector Signboard tables.
+  AntiqueStandParam analysed: Urns/Goblets/Chalices are relic HOUSING units only,
+  with no bearing on passive rolling or size probabilities.
+
+2026-03-26  v1.3
+  CORRECTION: "Group A/B" framing completely replaced.
+  EquipParamAntique analysis of items 100–235 confirms:
+    Items 100–135 (TABLE_100/200/300) = current post-1.02 relics
+    Items 200–235 (TABLE_110/210/310) = pre-1.02 relics (reduced passive pool)
+  No random split exists — version is player-chosen at purchase.
+  Small Jar Bazaar (ItemTableParam 49000 for Normal / 49100 for Deep) exclusively
+  supplies current relics. Collector Signboard supplies both versions but always
+  as Grand relics.
+  All probability formulas updated to use current tables (100/200/300) only.
+  Pre-1.02 probability functions retained for reference but not used by bot.
+  NOTE: This v1.3 entry incorrectly attributed 49000 to Deep relics — corrected
+  in v1.5.
+
+2026-03-26  v1.5
+  CORRECTION: Critical table ID swap fixed throughout document.
+  Previous sessions had ItemTableParam 49000 labeled as the Deep relic bazaar
+  table and 49100 as the Normal relic table. This was backwards.
+  Authoritative source: ShopLineupParam.csv entries
+    10110 "[Small Jar Bazaar] Scenic Flatstone (No DLC)" → equipId=49000  (NORMAL)
+    10111 "[Small Jar Bazaar] Deep Scenic Flatstone (No DLC)" → equipId=49100 (DEEP)
+  Correct size distributions confirmed from ItemTableParam hierarchy:
+    Normal (49000 → 49010/49011/49012): 45% Delicate / 35% Polished / 20% Grand
+    Deep   (49100 → 49110/49111/49112): 10% Delicate / 50% Polished / 40% Grand
+  Deep relics weight toward larger sizes — Polished is the modal size (not Delicate).
+  Section 11A source map table split into separate Normal/Deep tables with correct IDs.
+  Glossary P_D/P_P/P_G entries updated with both distributions and confirmed IDs.
+  The prior v1.4 "NOTE: prior entry 10/50/40 was INCORRECT" has been removed —
+  that note was itself the error; 10/50/40 was always the correct Deep distribution.
+  NOTE: Sections 3–6 passive pool formulas still reference TABLE_100/200/300 (Normal
+  relic pools). Bot farms Deep relics, which use TABLE_2000000/2100000/2200000.
+  This structural mismatch is flagged for a future correction pass.
+  In-run encounter bonus lots (ItemLotParam_map 4512/4522/4552 etc.) use Nothing=500
+  (50% no-relic) and cover multiple Boss Raid types and field bosses — NOT bazaar lots.
+  These do not affect bazaar purchase odds.
+
+2026-03-26  v1.6
+  NEW: Section 12 — Relic Color added.
+  Confirmed from EquipParamAntique.csv: relic color (Burning/Drizzly/Luminous/
+  Tranquil) is purely cosmetic. All four colors use identical passive pool tables.
+  No passive is color-exclusive. Color does not affect any probability formula.
+  Color distribution: Normal = 148/145/143/143 (~25% each, slight Burning surplus
+  due to 579 not dividing by 4); Deep = exactly 54/54/54/54 (perfect 25%).
+  Section 13 (Changelog) renumbered from Section 12.
+
+  NEW: Section 1 — W_k values for Deep pools added.
+  TABLE_2000000 = 9,984 (49 entries, Deep Exclusive)
+  TABLE_2100000 = TABLE_2200000 = 9,977 (277 entries each, Deep Broad)
+  Confirmed: TABLE_2100000 and TABLE_2200000 are bit-for-bit identical —
+  all 277 entries, all weights match. W_B = 9,977 used for both.
+
+  NEW: Section 4A — Tier-Pool Exclusivity for Normal Relics.
+  Normal relic passives carry name prefixes (<Delicate/Polished/Grand Scene>)
+  that lock them to their respective pool tier. A Normal Grand relic therefore
+  always contains EXACTLY one passive from each tier — two same-tier passives
+  on one relic is structurally impossible.
+
+  NEW: Section 4B — Deep Pool Membership note.
+  Deep relics use TABLE_2000000 (49-entry exclusive) for slot 1 and
+  TABLE_2100000 (277-entry broad) for secondary slots. No name prefix.
+  Look up pool_weights.py to determine which pool a Deep passive lives in.
+
+  NEW: Sections 6E–6J — Deep Relic Probability Formulas.
+  Full conditional probability formulas for Deep Delicate, Polished, and
+  Grand relics. Includes single-target, two-target, and three-target (God Roll)
+  formulas with exact compat-exclusion terms. Section 6D clarified as
+  Normal-only; notes that RelicBot uses current relics (P_B = 0).
+
+  NEW: Sections 7A–7B — Permutation Collapse.
+  For Normal Grand targeting one passive from each tier: 6-permutation sum
+  reduces to a single product (no permutation needed). For Deep Grand: reduces
+  to 2 orderings (or 0 if two targets from TABLE_2100000 plus a third from
+  TABLE_2100000 — impossible, only 2 broad slots available).
+
+  NEW: Section 8 item 7 — Color note in practical implications.
+
+2026-03-26  v1.4
+  CORRECTION: Section 5F "C_special" model refined.
+  Previous framing "slot cost with no pool benefit" was imprecise.
+  Corrected: the drawn C_special passive AND all its tier variants (+1/+2)
+  are eliminated from future slots. The category itself stays open.
+  Pool shrinks by the drawn passive's tier group weight, not zero and not the
+  full category weight. Practical conclusion unchanged (near-worst-case for T)
+  but the model is now accurate.
+  Verified: "Improved Glintstone and Gravity Stone Damage" is a damage-type
+  passive in TABLE_100/200/300 (weight 39/34/29). No "Improved Glintstone
+  Sorceries" school booster exists. Glintstone Pebble school ID = 0 (no
+  school relic passive). "Improved Glintblade Sorcery" exists separately.
+
+2026-03-27  v1.7
+  MAJOR CORRECTION: Complete rewrite of Deep relic variant model throughout doc.
+  Previous model (Sections 1, 4, 6, 7, 10) described Deep relics using fabricated
+  "variant IDs" (2000xxx, 2001xxx, 2003xxx) and incorrectly included TABLE_2200000
+  as an active pool. Both were confirmed errors by EquipParamAntique.csv cross-check.
+
+  REMOVED everywhere: TABLE_2200000 (confirmed not present in any bazaar relic entry).
+  REMOVED: Old 4-variant slot model (TABLE_2000000/2100000/2200000 assignments).
+
+  REPLACED WITH: 9-Variant Model (size × curse_count). Deep relics belong to one
+  of 9 structural variants confirmed from EquipParamAntique. Each variant has a
+  fixed list of T2M (exclusive, paired with curse) and T2B (broad, no curse) slots.
+
+  CRITICAL DISCOVERY — Curse-Passive Pairing Rule (confirmed 2026-03-26):
+    Every T2M slot is permanently 1-to-1 paired with one curse slot.
+    Curse count = number of T2M slots = number of exclusive passives on the relic.
+    A relic with zero curses can ONLY draw from TABLE_2100000 (broad pool).
+    A relic with any exclusive passive (PA+3, PA+4, Max HP, Affinity+2, etc.)
+    ALWAYS has at least one curse — structurally guaranteed, not coincidental.
+
+  Section 1: Deep TABLE_k variable description rewritten; TABLE_2200000 note added.
+  Section 1: W_k table — TABLE_2200000 row removed; note added explaining status.
+  Section 4 header: Replaced 4-variant table with confirmed 9-variant table.
+  Section 4: Added probability explanation explaining combined vs per-size %.
+  Section 4B: Rewritten — curse-passive pairing rule explained, T2200000 removed,
+    stat-boost passives confirmed Normal-only (return 0.0 for Deep queries).
+  Section 6E: Rewritten for two Delicate variants (0-curse T2B / 1-curse T2M).
+  Section 6F: Rewritten for three Polished variants with variant-weighted formula.
+  Section 6G: Rewritten for four Grand variants with variant-weighted formula.
+  Section 6H: Rewritten — variant filtering determines which variants can deliver
+    each target combination; full multi-variant formulas added.
+  Section 6I: Rewritten — God Roll formula now variant-weighted; Case B/C/D added.
+  Section 7B: Case A/B/C replaced — now references correct variant names and slot
+    counts. Case D (all three in exclusive pool) added.
+  Section 10: Sub-variant table completely replaced with 9-variant confirmed data.
+  Section 11A: Deep table header — TABLE_2200000 removed.
+
+  NEW: Section 14 — Curse Probability.
+    14A: How curse count is determined (variant structure, pairing rule).
+    14B: Curse identity (TABLE_3000000, 24 uniform curses, which vs whether).
+    14C: Curse filter probability formula (per-size and combined).
+    14D: Curse filter pass rate reference table (0–21 blocked).
+
+  Section 13 renumbered to remain as the Changelog (Section 14 inserted before it).
+  Old Section 12 (Color) retains its number; new Section 14 added at end before log.

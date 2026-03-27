@@ -1,99 +1,86 @@
 # Relic Bot — Implementation Status
-Last updated: 2026-03-25 | Current version: v1.4.6
+Last updated: 2026-03-27 | Current version: v1.5.0 (in progress)
 
 ---
 
-## DONE THIS SESSION (v1.4.6)
+## COMPLETED — v1.5.0
 
-### 1. School-Specific Compat Fix — `bot/passives.py`
-- All 14 school-specific passives (Improved Glintblade Sorcery, Improved Giants' Flame
-  Incantations, etc.) now form their own exclusive compat group (Group 7)
-- In the Relic Builder: two school boosters in the same target are correctly blocked
-- Fire Attack Up + Improved Giants' Flame correctly ALLOWED (they are different compat
-  categories in the actual game param data)
-- Previously: any two school boosters could be combined without warning — FIXED
+### Probability Engine — `bot/probability_engine.py` (complete rewrite)
+- All passive probabilities now use exact datamined pool weights from `database/pool_weights.py`
+- Normal relics: full conditional probability chain with category exclusion, tier-locked slots
+- Deep relics: 9-variant model (size × curse_count), variant-weighted across T2M/T2B configs
+- Confirmed datamine finding: TABLE_2200000 is NOT present in any bazaar relic (EquipParamAntique verified)
+- Multi-target combos: inclusion-exclusion across arbitrary slot configurations
+- Curse probability functions: `prob_curse_pass`, `prob_curse_pass_on_size`
+- Return value convention: `0.0` = impossible, `None` = no data, `float > 0` = real probability
 
-### 2. Odds Display — `ui/relic_builder.py`
-- "Odds (estimated)" panel added to both Exact Relic tab and Passive Pool tab
-- Per-passive: shows ~1 in N relics for each selected passive
-- Combined: multiplied probability for the full combination
-- Threshold-aware: if threshold = 2 of 3 slots, shows both "all 3" and "≥2 of 3" estimates
-- Expected iterations: ~N relics to find the combo
-- Time estimate: expected × ~45 sec/relic, shown as minutes / hours / days
-- Disclaimer on all displays: "Estimates only — actual odds depend on game pool weights"
-- Probability model used (rough, category-based):
-    School boosters (14 passives, Cat 4):    ~1 in 100 per relic
-    Stat passives (per stat, 3 tiers):       ~1 in 67 per relic
-    Elemental Attack Up (normal tiers):      ~1 in 250 per relic
-    Weapon-class Attack Up (Cat 1, large):   ~1 in 333 per relic
-    Deep-only passives (+3/+4, Affinity...): ~1 in 333 per relic
-    Dormant Powers:                          ~1 in 500 per relic
-    Character-specific passives:             ~1 in 200 per relic
-    Everything else:                         ~1 in 200 per relic
-- NOTE: These numbers will be refined once AttachEffectTableParam.csv pool weights
-  are mined. For now they are usable for relative comparison only.
+### Odds Viewer — `ui/app.py`
+- Live probability display in Batch Mode Settings panel
+- Shows: odds in N relics, expected iterations, ideal time per iter, expected total time for L loops
+- Curse filter factor applied: blocked curses multiply down effective `p_per_relic`
+- Setting-aware timing: adjusts for Low Perf Mode, parallel workers, async vs sync
+- Arrow key support on slider; live update on all relevant setting changes
+- Mode note shows "N curse(s) blocked" when curse filter is active
 
-### 3. Exclusion List — `ui/app.py`
-(Implemented previous session, committed and released this session)
-- "Excluded Passives" section in Batch Mode Settings
-- A relic that MATCHES your criteria but ALSO has an excluded passive = REJECTED
-- Exception: if the excluded passive is also in your Pool, Pairings, or Build targets,
-  the explicit request wins and the exclusion is ignored for that passive
-- "Add All Dormant Powers" button for quick setup
-- Saves/loads with profile
+### Odds Display in Relic Builder — `ui/relic_builder.py`
+- Per-passive: `X.XX%  (~1 in N per relic)` with color filter factor
+- Impossible passives: explicit "Impossible — not available on {pool} Relics" message
+- Impossible combos: "Impossible Combo, can't be rolled on {pool} Relics"
+- Combined: "Odds of finding a relic that fulfills at least N of the expected criteria"
+- Pair odds: direct `prob_combo_on_relic` call (fixes "odds unknown" bug for pairs)
 
-### 4. Spell School Database — `database/spells.py` (new file)
-- Mined from Magic.csv (56 sorceries + 65 incantations)
-- School ID → GROUP_800 passive mapping confirmed from param data
-- `get_school_passive("O, Flame!")` → "Improved Giants' Flame Incantations"
-- `get_spells_for_passive("Improved Dragon Cult Incantations")` → [Lightning Spear, ...]
-- Unmapped schools (no relic passive): Magma, Death/Ghostflame, Cold, Crucible, Moon
-- NOTE: database/ is kept separate from bot/ until robust enough to integrate
+### Curse Probability System
+- Confirmed: curse count is determined by EQA variant selection, NOT a separate roll
+- Each T2M (exclusive) passive slot is permanently paired with one curse slot
+- A relic with zero curses can ONLY draw from TABLE_2100000 — no exclusive passives reachable
+- Any exclusive passive (PA+3, PA+4, Max HP, Affinity+2, etc.) guarantees ≥1 curse
+- `_update_curse_odds()`: shows pass-rate label below Blocked Curses panel
+- Maximum blocked curses enforced at 21 (3 must remain unblocked)
+- Curse label + Odds Viewer both refresh on relic type change
+
+### Matches Log Panel
+- Overlay "View Matches" button shows scrollable log of every matched relic
+- Matches written to `matches_log.txt` in batch run folder
+
+### Other Fixes
+- Analyzed counter correctly tracks relics analyzed (not Stored count)
+- Stored counter fixed to show pending async queue backlog
+- `batch_output_var` initialization order fixed
+- Color deselect safety: restoring previous multi-color set instead of going blank
+- Hardware detection: RAM, CPU cores, GPU name shown in Batch Mode Settings
+- Batch Mode restructured: Hours mode removed, Loops only (1–1000)
 
 ---
 
-## STILL TO DO — Bot Features
+## PENDING — v1.5.0 (final step)
 
-### High Priority
+### Smart Analyze Integration
+The toggle UI is already in place (Batch Mode Settings row=5, col=2).
+Modules are complete: `bot/smart_rules.py` (8 rules) and `bot/game_knowledge.py` (2,400+ lines).
 
-#### Smart Analyze Integration (→ v1.4.7)
-The data layer is complete (bot/game_knowledge.py + bot/smart_rules.py).
 What still needs to happen:
-- Toggle in Batch Mode Settings: "Smart Analyze — flag notable relics not matched by criteria"
 - In sync + async analysis paths: call `evaluate_relic(passives)` on relics that do NOT
-  match the main criteria and are NOT excluded
+  match main criteria and are NOT excluded
 - If rules fire: copy screenshot + append findings to
   `Recommended Unassigned Hits/smart_summary.txt` in run_dir
-- New overlay counter: "Unassigned: N" separate from HIT/GOD ROLL counter
-- Profile save/load for the toggle state (`"smart_analyze": bool`)
+- Overlay counter: "Unassigned: N" updating live
+- Profile save/load: `"smart_analyze": bool`
 
-#### Accurate Pool Odds (refinement of the odds display)
-- Mine `AttachEffectTableParam.csv` for actual pool weights per passive
-- Replace `estimate_passive_prob()` rough estimates with data-driven values
-- Will make the odds display in the Relic Builder genuinely accurate rather than approximate
+---
+
+## STILL TO DO — Future Features
 
 ### Medium Priority
-
-#### More Database Mining
-- `SwordArtsParam.csv` / `SwordArtsTableParam.csv` — weapon skill (AoW) data
-- `ReinforceParamWeapon.csv` — weapon damage at each reinforcement level (+0 to +10)
-- Consumable damage params — thrown pots, knives, etc.
-- `CharaInitParam.csv` / `HeroStatusParam.csv` — character base stats per level
-
-#### Bot Features
 - Sound alert on GOD ROLL match
 - Discord / email notification on match
 - Per-character overlay stats
+- Color scheme / legibility improvements (green text flagged as hard to read)
 
 ### Low Priority / Future
-
 - Hotkeys tab: configurable start/stop/reset hotkeys (currently hardcoded)
 - Phase 3 debug mode: log tab brightness values, standalone tab detection test
-- Dead code cleanup: `_passive_variants()` in relic_builder.py:24-28 (unused),
-  unused `pair_required` keys (~859/907/910/911)
 - Non-16:9 aspect ratio support (currently blocked + warned)
 - Faster OCR (Tesseract or tighter pre-crop to reduce EasyOCR input size)
-- OCR-based Phase 0/2 menu position verification (reliability uncertain, needs testing)
 
 ---
 
@@ -106,7 +93,7 @@ What still needs to happen:
 | `database/passive_groups.py` | Complete | AttachEffectParam.csv | GROUP_100 and GROUP_800 definitions |
 | `database/normal_relic_categories.py` | Complete | AttachEffectParam.csv + community data | 19-category normal relic system |
 | `database/deep_relic_data.py` | Complete | AttachEffectTableParam.csv + community data | 6-category deep relic system, pool lists |
-| `database/pool_weights.py` | Complete | AttachEffectTableParam.csv | 2606 lines — per-passive chanceWeight for all 9 key pool tables (100/110/200/210/300/310/2M/2.1M/2.2M) |
+| `database/pool_weights.py` | Complete | AttachEffectTableParam.csv | Per-passive chanceWeight for 8 active pool tables (100/110/200/210/300/310/2M/2.1M). TABLE_2200000 confirmed not used in any bazaar relic. |
 | `database/character_stats.py` | Complete | HeroStatusParam.csv + CharaInitParam.csv | All 10 heroes, stats at Lv1/2/12/15, passive upgrade deltas, body scale |
 | `database/weapon_tiers.py` | Complete | ReinforceParamWeapon.csv | White/Blue/Purple/Orange rarity multipliers, Uncommon/Rare/Legendary tracks, skill upgrade tracks |
 | `database/weapon_skills.py` | Complete | SwordArtsParam.csv + SwordArtsTableParam.csv | 155 named skills with FP costs, categories, pool table base IDs |
@@ -115,8 +102,7 @@ What still needs to happen:
 | `bot/game_knowledge.py` | Complete | Manual + param data | 113 weapons, 414 passives, 10 characters |
 | `bot/smart_rules.py` | Complete | Manual | 8 auditable named rules for Smart Analyze |
 
-None of the `database/` files are integrated into the bot yet — they're built and ready,
-waiting for Smart Analyze integration and other feature work.
+`database/` files are not integrated into the bot except `pool_weights.py` (used by probability engine) and `deep_relic_data.py` / `normal_relic_categories.py` (used by passives.py compat system).
 
 ---
 
@@ -126,7 +112,8 @@ waiting for Smart Analyze integration and other feature work.
   flag. Antspur Rapier has it set but IS in the game. Some weapon analysis may be off.
 - Antspur Rapier is not in EquipParamCustomWeapon (the loot pool param) despite being in
   game — there is at least one other weapon sourcing mechanism not yet identified.
-- Odds estimates in the Relic Builder are rough until AttachEffectTableParam weights are mined.
 - Sorcery school IDs 1 (Moon), 6, 8 (Magma), 10 (Death), 13 (Cold), 14, 15, 28 (Crucible)
   have no corresponding GROUP_800 passive — spells in these schools benefit only from
   Improved Sorceries (broad booster) and elemental attack-up passives.
+- C_special (the passive category that does not trigger exclusion when drawn) — exact
+  identity still unknown from datamine.

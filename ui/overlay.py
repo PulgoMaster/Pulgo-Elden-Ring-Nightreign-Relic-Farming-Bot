@@ -328,6 +328,13 @@ class BotOverlay:
         tk.Label(row_top, textvariable=sv("best_hits", "N/A"), bg=_BG, fg=_FG,
                  font=("Consolas", 8)).pack(side="left")
 
+        row_smart = tk.Frame(bb, bg=_BG)
+        row_smart.pack(fill="x", pady=1)
+        tk.Label(row_smart, text="Smart Hits:", bg=_BG, fg="#9966ff",
+                 font=("Consolas", 8, "bold"), width=11, anchor="w").pack(side="left")
+        tk.Label(row_smart, textvariable=sv("smart_hits", "0"), bg=_BG, fg=_FG,
+                 font=("Consolas", 8)).pack(side="left")
+
         # ── Overflow hits section ────────────────────────────────────── #
         # Invisible when count = 0; lights up when old-batch overflow workers
         # find a 2/3 or 3/3.  Always packed so layout never shifts.

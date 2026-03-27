@@ -368,7 +368,6 @@ def recommend_for_spell(spell_name: str) -> list[RelicHint]:
         hints.append(RelicHint(
             passive=booster,
             reason=f"Direct booster for all {school_name} {'incantations' if is_incantation else 'sorceries'} — 12% damage increase.",
-            deep_only=True,  # school boosters are deep-only
             priority=1,
         ))
     elif school_id == 0 or school_name is None:
@@ -377,7 +376,6 @@ def recommend_for_spell(spell_name: str) -> list[RelicHint]:
         hints.append(RelicHint(
             passive=broad,
             reason=f"Broad booster for all {'incantations' if is_incantation else 'sorceries'} — best tier.",
-            deep_only=True,
             priority=1,
         ))
 
@@ -387,7 +385,6 @@ def recommend_for_spell(spell_name: str) -> list[RelicHint]:
         hints.append(RelicHint(
             passive=broad,
             reason=f"Broad booster stacks with the school passive — both apply simultaneously.",
-            deep_only=True,
             priority=2,
         ))
 

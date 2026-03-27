@@ -16,6 +16,7 @@ Integration notes:
 
 from __future__ import annotations
 import re as _re
+from collections.abc import Callable
 
 from bot.game_knowledge import (
     PASSIVE_CATEGORY,
@@ -229,7 +230,7 @@ def _rule_physical_plus_melee(passives: list[str]) -> str | None:
 # Ordered by value (highest-signal rules first).
 # Each entry: (rule_id, rule_fn, short_label)
 
-RULES: list[tuple[str, callable]] = [
+RULES: list[tuple[str, Callable]] = [
     ("dragon_cult_triple",       _rule_dragon_cult_triple),
     ("incant_triple_any",        _rule_incant_triple_any),
     ("incant_school_double",     _rule_incant_school_double),

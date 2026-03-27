@@ -31,7 +31,7 @@ KEY INSIGHT: Categories 1 and 4 are different numbers, meaning
 
 IMPORTANT: "Improved Affinity Attack Power", "Improved Sorceries", "Improved Incantations"
   (base tier) do NOT appear on normal purchasable relics.
-  They are Deep of Night relic exclusives (tables 2100000/2200000).
+  They are Deep of Night relic exclusives (table 2100000, base tier).
   Higher tiers (+1, +2) are also Deep of Night exclusive (table 2000000).
 
 NOTE ON DEEP RELIC CATEGORIES: The Deep of Night system uses different category numbers

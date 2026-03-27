@@ -86,13 +86,14 @@ def _to_array(image_bytes: bytes, max_width: int = 0) -> np.ndarray:
     return np.array(img)
 
 
-# ── Color classification ──────────────────────────────────────────────── #
+# ── Color classification (UNUSED) ─────────────────────────────────────── #
+# This approach was abandoned — analyze() uses ALL_CURSES direct matching instead.
 
 def _classify_color(img: np.ndarray, bbox) -> str:
     """
-    Sample pixels inside an EasyOCR bounding box and classify as
+    UNUSED. Sample pixels inside an EasyOCR bounding box and classify as
     'passive' (white-ish text) or 'curse' (blue-ish text).
-    Background pixels (dark) are ignored — only bright pixels are sampled.
+    Retained for reference; analyze() does not call this.
     """
     pts = np.array(bbox, dtype=int)
     x0, y0 = pts[:, 0].min(), pts[:, 1].min()

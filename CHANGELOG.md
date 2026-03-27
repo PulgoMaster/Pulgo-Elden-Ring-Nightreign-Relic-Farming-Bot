@@ -4,14 +4,30 @@ All notable changes to this project are documented here.
 
 ---
 
-## [1.4.8] – 2026-03-26
+## [1.5.0] – 2026-03-27 — SUBSTANTIAL UPDATE
 
 ### Added
 - **Matches log panel** — "View Matches" button in the overlay toggles the two log panels into a single full-width scrollable view showing every matched relic with batch #, relic #, tier (2/3 or 3/3), passives, and curses. Clicking "Back to Logs" returns to the normal split log view. All matches are also written to `matches_log.txt` in the batch run folder for persistent review.
 - **Analyzed counter** — new overlay stat (next to Stored) showing total relics analyzed in the current batch across all iterations.
+- **Probability Engine** (`bot/probability_engine.py`) — complete rewrite using actual datamined pool weights. Replaces rough category-based estimates with exact per-passive probability calculations derived from `AttachEffectTableParam` data.
+  - Normal relics: conditional probability chain across tier-locked slots (TABLE_100/200/300), full category exclusion, C_special handling
+  - Deep relics: 9-variant model (size × curse_count), variant-weighted probability across all T2M/T2B slot configurations
+  - Multi-target combos: inclusion-exclusion for arbitrary slot counts; compat group enforcement
+  - Curse filter integration: variant-weighted pass rate applied to any passive probability when curses are blocked
+  - `prob_passive_on_relic`, `prob_combo_on_relic`, `prob_at_least_k_of_pool`, `prob_success_in_n`, `prob_curse_pass`, `format_duration`, `color_probability`
+- **Odds Viewer** (Batch Mode Settings) — live probability display showing: odds of finding a relic that meets criteria in N relics, expected iterations, ideal time per iteration, expected total time for L loops. Updates instantly when any relevant setting changes. Slider with arrow-key support to sweep relic count.
+- **Odds display in Relic Builder** — per-passive probability shown on each row as `X.XX%  (~1 in N per relic)`. Impossible passives (not in pool) and impossible combinations (compat conflict) shown explicitly. Combined pool odds shown for multi-passive targets.
+- **Curse Probability System** — curse count on a Deep relic is structurally determined by variant selection, not a separate roll. Each T2M (exclusive) passive slot is permanently paired with one curse slot. A relic with zero curses can only roll from TABLE_2100000 (broad pool) — no exclusive passives are reachable. Full variant-weighted math implemented.
+- **Curse filter odds label** — live label below the Blocked Curses panel showing "~X% of Deep relics pass curse filter" with a warning color if fewer than 3 curses remain unblocked.
+- **Hardware detection** — auto-detects RAM, CPU core count, and GPU name on startup; shown in Batch Mode Settings hardware recommendations block.
+- **Batch Mode restructure** — Hours mode removed (only Loops, capped at 1000). Output Folder moved to Save File section. Hardware recommendations block added. Batch limit has ▲▼ buttons with digit-only validation.
+- **Color deselect safety** — deselecting the last active color now restores the previous multi-color selection instead of going to zero (which would block all relics). Auto-dismissing warning label.
 
 ### Fixed
 - **Stored counter** — was incorrectly displaying total relics analyzed; now correctly shows the number of relics currently pending in the async priority queue backlog.
+- **Deep relic probability engine** — previous engine incorrectly included TABLE_2200000 as an active pool. Confirmed from EquipParamAntique: no bazaar relic uses this table. Engine rewritten around confirmed 9-variant model.
+- **Odds display impossible-combo detection** — pair probability was returning "odds unknown" when both passives are in the same compat group. Now correctly returns "Impossible Combo" with an explanation.
+- **`batch_output_var` initialization order** — variable was initialized inside the batch frame builder (too late), causing errors if other components referenced it during UI construction. Moved to top of `_build_ui`.
 
 ---
 

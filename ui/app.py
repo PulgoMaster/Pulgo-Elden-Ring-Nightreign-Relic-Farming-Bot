@@ -4,9 +4,9 @@ Main UI for the Elden Ring Nightreign Relic Bot.
 Two modes:
   Live Mode  – runs continuously; pauses when a match is found and asks the
                user to keep it or keep searching.
-  Batch Mode – runs for a fixed number of loops or a fixed duration; saves
-               every iteration's save file to its own folder, then writes a
-               README.txt summarising matches (with passives + screenshots).
+  Batch Mode – runs for a fixed number of loops; saves every iteration's
+               save file to its own folder, then writes a README.txt
+               summarising matches (with passives + screenshots).
 """
 
 import ctypes
@@ -525,9 +525,12 @@ class RelicBotApp(tk.Tk):
         self._parallel_enabled_var  = tk.BooleanVar(value=False)
         self._parallel_workers_var  = tk.IntVar(value=2)
         self._async_enabled_var     = tk.BooleanVar(value=False)
+        self._hw_ram_gb, self._hw_cpu_cores, self._hw_gpu_name = self._detect_hardware()
         self._stop_after_batch      = False   # graceful stop flag
         self._game_hung             = False   # set True by watchdog when game freezes
         self._low_perf_mode_var     = tk.BooleanVar(value=False)
+        self._prev_colors: set = {"Red", "Blue", "Green", "Yellow"}
+        self._color_warn_job = None   # after() job for warning auto-dismiss
         self._mouse_blocker_hook   = None   # WH_MOUSE_LL hook handle
         self._mouse_blocker_cb     = None   # keep-alive for hook callback (prevent GC)
         self._mouse_blocker_thread = None   # daemon thread running hook message pump
@@ -623,6 +626,9 @@ class RelicBotApp(tk.Tk):
         ttk.Button(profile_frame, text="Delete", command=self._delete_profile).grid(row=0, column=5, **pad)
         ttk.Button(profile_frame, text="Restore Defaults", command=self._reset_to_defaults).grid(row=0, column=6, **pad)
 
+        # Pre-initialize vars that are referenced by multiple sections below
+        self.batch_output_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "batch_output"))
+
         # ── Save File & Game Configuration ──────────────────────────── #
         save_frame = ttk.LabelFrame(inner, text="Save File & Game Configuration")
         save_frame.grid(row=1, column=0, sticky="ew", **pad)
@@ -630,22 +636,38 @@ class RelicBotApp(tk.Tk):
         ttk.Label(save_frame, text="Save file:").grid(row=0, column=0, sticky="w", **pad)
         self.save_path_var = tk.StringVar()
         ttk.Entry(save_frame, textvariable=self.save_path_var, width=52).grid(row=0, column=1, **pad)
-        ttk.Button(save_frame, text="Browse", command=self._browse_save).grid(row=0, column=2, **pad)
+        _save_browse_btn = ttk.Button(save_frame, text="Browse", command=self._browse_save)
+        _save_browse_btn.grid(row=0, column=2, **pad)
+        _Tooltip(_save_browse_btn,
+                 "Your Elden Ring save file. Typical path:\n"
+                 "  C:\\Users\\[YourName]\\AppData\\Roaming\\EldenRing\\[SteamID]\\ER0000.sl2\n\n"
+                 "The bot backs this file up before each iteration so you can restore\n"
+                 "to any previous state. Always set this before starting.")
 
         ttk.Label(save_frame, text="Backup folder:").grid(row=1, column=0, sticky="w", **pad)
         self.backup_path_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "save_backups"))
         ttk.Entry(save_frame, textvariable=self.backup_path_var, width=52).grid(row=1, column=1, **pad)
         ttk.Button(save_frame, text="Browse", command=self._browse_backup).grid(row=1, column=2, **pad)
 
-        ttk.Label(save_frame, text="Game executable:").grid(row=2, column=0, sticky="w", **pad)
+        ttk.Label(save_frame, text="Output folder:").grid(row=2, column=0, sticky="w", **pad)
+        ttk.Entry(save_frame, textvariable=self.batch_output_var, width=52).grid(row=2, column=1, **pad)
+        ttk.Button(save_frame, text="Browse", command=self._browse_batch_output).grid(row=2, column=2, **pad)
+
+        ttk.Label(save_frame, text="Game executable:").grid(row=3, column=0, sticky="w", **pad)
         self.game_exe_var = tk.StringVar()
-        ttk.Entry(save_frame, textvariable=self.game_exe_var, width=52).grid(row=2, column=1, **pad)
-        ttk.Button(save_frame, text="Browse", command=self._browse_game_exe).grid(row=2, column=2, **pad)
+        ttk.Entry(save_frame, textvariable=self.game_exe_var, width=52).grid(row=3, column=1, **pad)
+        _exe_browse_btn = ttk.Button(save_frame, text="Browse", command=self._browse_game_exe)
+        _exe_browse_btn.grid(row=3, column=2, **pad)
+        _Tooltip(_exe_browse_btn,
+                 "Path to the Elden Ring game executable. Typical Steam path:\n"
+                 "  C:\\Program Files (x86)\\Steam\\steamapps\\common\\ELDEN RING\\Game\\eldenring.exe\n\n"
+                 "The bot uses this path to relaunch the game after each iteration.\n"
+                 "Without this set, the bot cannot restart the game automatically.")
 
         ttk.Label(
             save_frame,
             text="\u26a0  The bot requires default in-game keybinds — F must be your confirm/interact key.",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", **pad)
+        ).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Choose Relic Type + Color Filter ────────────────────────── #
         type_color_frame = ttk.LabelFrame(inner, text="Choose Relic Type")
@@ -806,9 +828,19 @@ class RelicBotApp(tk.Tk):
         self._blocked_curses_lb.pack(side="left", fill="both", expand=True)
         cb_sb.pack(side="right", fill="y")
         self._blocked_curses_list: list[str] = []
+
+        # Curse odds impact label (Deep mode only)
+        self._curse_odds_lbl = ttk.Label(
+            curse_frame, text="", foreground=theme.TEXT_MUTED,
+            wraplength=700, justify="left",
+        )
+        self._curse_odds_lbl.pack(anchor="w", padx=6, pady=(0, 4))
+
         self._excluded_passives_list: list[str] = []
         self._save_exclusion_matches_var = tk.BooleanVar(value=False)
         self._excl_dormant_var = tk.BooleanVar(value=False)
+        self._smart_analyze_var = tk.BooleanVar(value=False)
+        self._ov_smart_hits: int = 0
 
         # ── Excluded Passives ─────────────────────────────────────── #
         excl_frame = ttk.LabelFrame(
@@ -893,21 +925,37 @@ class RelicBotApp(tk.Tk):
         self.batch_frame = ttk.LabelFrame(inner, text="Batch Mode Settings")
         self.batch_frame.grid(row=6, column=0, sticky="ew", **pad)
 
-        ttk.Label(self.batch_frame, text="Run for:").grid(row=0, column=0, sticky="w", **pad)
-        self.batch_limit_type = tk.StringVar(value="loops")
-        ttk.Radiobutton(self.batch_frame, text="Loops (max 1000)", variable=self.batch_limit_type,
-                        value="loops").grid(row=0, column=1, **pad)
-        ttk.Radiobutton(self.batch_frame, text="Hours (max 24)", variable=self.batch_limit_type,
-                        value="hours").grid(row=0, column=2, **pad)
+        ttk.Label(self.batch_frame, text="Loops (max 1000):").grid(row=0, column=0, sticky="w", **pad)
+        self.batch_limit_type = tk.StringVar(value="loops")   # kept for save/load compat; always "loops"
         self.batch_limit_var = tk.StringVar(value="20")
-        ttk.Entry(self.batch_frame, textvariable=self.batch_limit_var, width=7).grid(row=0, column=3, **pad)
+        _vcmd = (self.register(lambda v: v.isdigit() or v == ""), "%P")
+        _batch_entry = ttk.Entry(self.batch_frame, textvariable=self.batch_limit_var,
+                                 width=7, validate="key", validatecommand=_vcmd)
+        _batch_entry.grid(row=0, column=1, **pad)
 
+        def _batch_clamp(*_):
+            try:
+                v = int(self.batch_limit_var.get())
+                clamped = max(1, min(1000, v))
+                if clamped != v:
+                    self.batch_limit_var.set(str(clamped))
+            except ValueError:
+                pass
+            self._update_odds_viewer()
 
-        ttk.Label(self.batch_frame, text="Output folder:").grid(row=2, column=0, sticky="w", **pad)
-        self.batch_output_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "batch_output"))
-        ttk.Entry(self.batch_frame, textvariable=self.batch_output_var, width=52).grid(row=2, column=1,
-                                                                                        columnspan=3, **pad)
-        ttk.Button(self.batch_frame, text="Browse", command=self._browse_batch_output).grid(row=2, column=4, **pad)
+        self.batch_limit_var.trace_add("write", _batch_clamp)
+
+        def _batch_inc(delta):
+            try:
+                v = max(1, min(1000, int(self.batch_limit_var.get()) + delta))
+            except ValueError:
+                v = 1
+            self.batch_limit_var.set(str(v))
+
+        _arrow_col = ttk.Frame(self.batch_frame)
+        _arrow_col.grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(_arrow_col, text="▲", width=2, command=lambda: _batch_inc(1)).pack(side="top")
+        ttk.Button(_arrow_col, text="▼", width=2, command=lambda: _batch_inc(-1)).pack(side="top")
 
         # Overlay toggle
         ov_chk = ttk.Checkbutton(
@@ -988,6 +1036,21 @@ class RelicBotApp(tk.Tk):
                  "to fully finish before stopping (grace period).\n\n"
                  "Best paired with Brute Force Analysis for maximum throughput.")
 
+        # Smart Analyze toggle
+        sa_chk = ttk.Checkbutton(
+            self.batch_frame, text="🔍 Smart Analyze",
+            variable=self._smart_analyze_var,
+        )
+        sa_chk.grid(row=5, column=2, columnspan=3, sticky="w", **pad)
+        _Tooltip(sa_chk,
+                 "After OCR, evaluates non-matching relics against a set of curated rules.\n"
+                 "Catches valuable combinations not in your target criteria — school stacks,\n"
+                 "affinity doubles, weapon class combos, and more.\n\n"
+                 "Smart hits are saved to a smart_hits/ subfolder inside the iteration folder.\n"
+                 "The overlay shows a live counter of smart hits found this session.\n\n"
+                 "Runs in the same worker thread — no extra RAM needed.\n"
+                 "Has no effect on matched relics (God Rolls and HITs are unaffected).")
+
         # ── Overlay Elements sub-section ────────────────────────────── #
         ov_elem_lf = ttk.LabelFrame(self.batch_frame, text="Overlay Elements")
         ov_elem_lf.grid(row=6, column=0, columnspan=5, sticky="ew", **pad)
@@ -1042,9 +1105,82 @@ class RelicBotApp(tk.Tk):
                  "(see [Adaptive] log entries). This mode raises the baseline floor\n"
                  "so the adaptive scaling starts from a safer starting point.")
 
+        # ── Hardware Recommendations ──────────────────────────────────── #
+        brute_rec, workers_rec, async_rec, lpm_rec = self._get_hw_recommendations()
+        hw_frame = ttk.LabelFrame(self.batch_frame, text="Recommended Settings for Your System")
+        hw_frame.grid(row=8, column=0, columnspan=5, sticky="ew", **pad)
+
+        ram_str  = f"{self._hw_ram_gb} GB" if self._hw_ram_gb else "unknown"
+        cpu_str  = f"{self._hw_cpu_cores} logical cores" if self._hw_cpu_cores else "unknown"
+        disclaimer = (
+            f"Detected hardware: {self._hw_gpu_name}  |  RAM: {ram_str}  |  CPU: {cpu_str}\n"
+            f"Recommendations are estimates based on hardware specs. Results may vary."
+        )
+        ttk.Label(hw_frame, text=disclaimer,
+                  foreground=theme.TEXT_MUTED, wraplength=720).grid(
+            row=0, column=0, columnspan=4, sticky="w", **pad)
+
+        rec_data = [
+            ("⚡ Brute Force Analysis:", brute_rec),
+            ("Workers:",                 workers_rec),
+            ("⚑ Async Analysis:",        async_rec),
+            ("🐢 Low Performance Mode:", lpm_rec),
+        ]
+        for col, (label, rec) in enumerate(rec_data):
+            ttk.Label(hw_frame, text=label,
+                      foreground=theme.TEXT_MUTED).grid(row=1, column=col*2, sticky="e", padx=(8, 2), pady=2)
+            ttk.Label(hw_frame, text=rec,
+                      foreground="#7ec8f0").grid(row=1, column=col*2+1, sticky="w", padx=(0, 12), pady=2)
+
+        # ── Odds Viewer ──────────────────────────────────────────────── #
+        odds_viewer = ttk.LabelFrame(inner, text="Odds Viewer")
+        odds_viewer.grid(row=7, column=0, sticky="ew", **pad)
+
+        ov_top = ttk.Frame(odds_viewer)
+        ov_top.pack(fill="x", padx=8, pady=(6, 2))
+
+        ttk.Label(ov_top, text="Relics per iteration:").pack(side="left")
+        self._ov_n_var = tk.IntVar(value=1)
+        self._ov_slider = ttk.Scale(
+            ov_top, from_=1, to=500, orient="horizontal",
+            variable=self._ov_n_var, length=280,
+            command=lambda _: self._update_odds_viewer(),
+        )
+        self._ov_slider.pack(side="left", padx=8)
+        self.after(0, lambda: self._ov_slider.set(1))
+        self._ov_key_repeat = None
+        self._ov_slider.bind("<Left>",  lambda e: self._slider_key_press(-1))
+        self._ov_slider.bind("<Right>", lambda e: self._slider_key_press(1))
+        self._ov_slider.bind("<KeyRelease-Left>",  lambda e: self._slider_key_release())
+        self._ov_slider.bind("<KeyRelease-Right>", lambda e: self._slider_key_release())
+        self._ov_n_lbl = ttk.Label(ov_top, text="1", width=5)
+        self._ov_n_lbl.pack(side="left")
+
+        self._ov_result_var = tk.StringVar(
+            value="Set relic criteria above to see projections.")
+        ttk.Label(
+            odds_viewer, textvariable=self._ov_result_var,
+            foreground="#90c890", wraplength=760, justify="left",
+        ).pack(anchor="w", padx=8, pady=(0, 2))
+
+        ttk.Label(
+            odds_viewer,
+            text="Ideal conditions (no lag, no crashes). "
+                 "Rolling: 45 s/relic baseline (+5 s with LPM). "
+                 "Analysis: ~3 s/relic sync, less with Brute Force workers. "
+                 "Async mode overlaps analysis with the next iteration, reducing total batch time.",
+            foreground=theme.TEXT_MUTED, wraplength=760,
+        ).pack(anchor="w", padx=8, pady=(0, 6))
+
+        # Wire odds updates from relic_builder and all relevant settings
+        self.relic_builder._on_odds_changed = lambda p: self._update_odds_viewer()
+        for _ov_var in (self._low_perf_mode_var, self._parallel_enabled_var,
+                        self._async_enabled_var, self._parallel_workers_var):
+            _ov_var.trace_add("write", lambda *_: self._update_odds_viewer())
+
         # ── Bot Control ─────────────────────────────────────────────── #
         ctrl_frame = ttk.LabelFrame(inner, text="Bot Control")
-        ctrl_frame.grid(row=7, column=0, sticky="ew", **pad)
+        ctrl_frame.grid(row=8, column=0, sticky="ew", **pad)
 
         self.start_btn = ttk.Button(ctrl_frame, text="▶ START", command=self._start_bot,
                                     style="Start.TButton")
@@ -1067,18 +1203,38 @@ class RelicBotApp(tk.Tk):
 
         # ── Log ─────────────────────────────────────────────────────── #
         log_frame = ttk.LabelFrame(inner, text="Log")
-        log_frame.grid(row=8, column=0, sticky="ew", **pad)
+        log_frame.grid(row=9, column=0, sticky="ew", **pad)
         self.log_box = scrolledtext.ScrolledText(
             log_frame, height=10, width=82, state="disabled", wrap="word"
         )
         theme.style_text(self.log_box)
         self.log_box.grid(row=0, column=0, **pad)
 
+        # ── Resources ───────────────────────────────────────────────── #
+        res_frame = ttk.LabelFrame(inner, text="Resources")
+        res_frame.grid(row=10, column=0, sticky="ew", **pad)
+
+        ttk.Button(
+            res_frame,
+            text="Relic Draw Rate Mathematics",
+            command=self._open_draw_rate_doc,
+        ).grid(row=0, column=0, **pad)
+
+        ttk.Label(
+            res_frame,
+            text="In-depth probability analysis of relic passive draw rates, "
+                 "category exclusion mechanics, and odds calculations.",
+            foreground=theme.TEXT_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=520,
+            justify="left",
+        ).grid(row=0, column=1, sticky="w", padx=(0, 8))
+
         # ── Credit ──────────────────────────────────────────────────── #
         ttk.Label(inner, text="Made by Pulgo",
                   foreground=theme.TEXT_MUTED,
                   font=("Segoe UI", 8)).grid(
-            row=9, column=0, sticky="e", padx=12, pady=(0, 4)
+            row=10, column=0, sticky="e", padx=12, pady=(0, 4)
         )
 
         # Auto-load standard sequences after UI is built
@@ -1400,6 +1556,9 @@ class RelicBotApp(tk.Tk):
                 self._log(f"Phase 0 (Setup) swapped to {rtype} sequence ({n} events).")
             except Exception as e:
                 self._log(f"WARNING: Could not load Phase 0 for '{rtype}': {e}")
+        self.relic_builder.set_relic_context(rtype, self._get_allowed_colors())
+        self._update_curse_odds()
+        self._update_odds_viewer()
 
     def _log_screen_resolution(self):
         """Log detected screen resolution in a background thread to avoid blocking mainloop."""
@@ -1745,6 +1904,14 @@ class RelicBotApp(tk.Tk):
         return False
 
     _STEAM_APP_ID = "2622380"
+
+    def _open_draw_rate_doc(self):
+        path = os.path.join(_REPO_ROOT, "docs", "Relic Draw Rate Mathematics.txt")
+        if os.path.exists(path):
+            os.startfile(path)
+        else:
+            messagebox.showerror("File Not Found",
+                                 f"Could not locate:\n{path}")
 
     def _launch_game(self):
         self._log(f"Launching via Steam (App ID: {self._STEAM_APP_ID})…")
@@ -2276,6 +2443,7 @@ class RelicBotApp(tk.Tk):
         self._ov_at_33       = 0
         self._ov_at_23       = 0
         self._ov_at_duds     = 0
+        self._ov_smart_hits  = 0
         self._best_33_iter          = None
         self._best_hits_iter        = None
         self._ov_total_relics       = 0
@@ -2339,7 +2507,7 @@ class RelicBotApp(tk.Tk):
         region = self._get_region()
         limit_type = self.batch_limit_type.get()
         limit_value = float(self.batch_limit_var.get())
-        mode_desc = "loops" if limit_type == "loops" else "hours"
+        mode_desc = "loops"
         base_output = self.batch_output_var.get()
         # Minimum passive count for a result to be labelled a "HIT" tier.
         # If the user's criteria requires all 3 passives, 2/3 near-misses are
@@ -2642,8 +2810,6 @@ class RelicBotApp(tk.Tk):
             # Check stopping condition
             if limit_type == "loops" and iteration >= int(limit_value):
                 break
-            if limit_type == "hours" and (time.time() - start_time) / 3600 >= limit_value:
-                break
 
             if not _is_restart:
                 iteration += 1
@@ -2656,11 +2822,7 @@ class RelicBotApp(tk.Tk):
 
             # Overlay: batch progress
             if self._overlay:
-                if limit_type == "loops":
-                    _bs = f"Batch {iteration} / {int(limit_value)}"
-                else:
-                    _eh = (time.time() - start_time) / 3600
-                    _bs = f"{_eh:.1f}h / {limit_value:.1f}h"
+                _bs = f"Batch {iteration} / {int(limit_value)}"
                 ov = self._overlay
                 self.after(0, lambda s=_bs: ov.update(
                     batch=s, relic_num="—", analysing="—",
@@ -3540,6 +3702,45 @@ class RelicBotApp(tk.Tk):
                         )
                 except Exception:
                     pass
+
+        # Smart Analyze: evaluate non-matching relics against curated rules
+        _smart_reasons: list[str] = []
+        if (self._smart_analyze_var.get()
+                and is_current_batch
+                and not result.get("match", False)):
+            try:
+                from bot.smart_rules import evaluate_relic as _eval_relic
+                relics_sa = result.get("relics_found", [])
+                r0_sa = relics_sa[0] if relics_sa else {}
+                passives_sa = (r0_sa.get("passives", [])
+                               if isinstance(r0_sa, dict) else [])
+                _smart_reasons = _eval_relic(passives_sa)
+                if _smart_reasons and iter_dir and img_bytes:
+                    smart_dir = os.path.join(iter_dir, "smart_hits")
+                    os.makedirs(smart_dir, exist_ok=True)
+                    sa_fname = f"relic_{step_i + 1:02d}_SMART.jpg"
+                    try:
+                        with open(os.path.join(smart_dir, sa_fname), "wb") as _f:
+                            _f.write(img_bytes)
+                        with open(os.path.join(smart_dir, "smart_hits.log"), "a",
+                                  encoding="utf-8") as _f:
+                            _f.write(
+                                f"Iter {iteration} · Relic {step_i + 1}  [{sa_fname}]\n"
+                                + "".join(f"  • {r}\n" for r in _smart_reasons)
+                            )
+                        self._log(
+                            f"  [Smart] Relic {step_i + 1} — {'; '.join(_smart_reasons)}",
+                            overlay=True)
+                    except Exception:
+                        pass
+                    self._ov_smart_hits += 1
+                    if self._overlay:
+                        _sh = self._ov_smart_hits
+                        self.after(0, lambda _sh=_sh:
+                                   self._overlay.update(smart_hits=_sh)
+                                   if self._overlay and self._overlay._win else None)
+            except Exception:
+                pass
 
         saved_fname = ""
         if iter_dir and img_bytes:
@@ -5180,18 +5381,14 @@ class RelicBotApp(tk.Tk):
             messagebox.showwarning("No Output Folder", "Choose an output folder for batch results.")
             return False
         try:
-            v = float(self.batch_limit_var.get())
+            v = int(self.batch_limit_var.get())
             if v <= 0:
                 raise ValueError
-            limit_type = self.batch_limit_type.get()
-            if limit_type == "loops" and v > 1000:
+            if v > 1000:
                 messagebox.showwarning("Limit Too High", "Maximum allowed loops is 1000.")
                 return False
-            if limit_type == "hours" and v > 24:
-                messagebox.showwarning("Limit Too High", "Maximum allowed run time is 24 hours.")
-                return False
         except ValueError:
-            messagebox.showwarning("Invalid Limit", "Batch limit must be a positive number.")
+            messagebox.showwarning("Invalid Limit", "Loop count must be a number between 1 and 1000.")
             return False
         return True
 
@@ -5204,14 +5401,137 @@ class RelicBotApp(tk.Tk):
         return None
 
     def _on_color_change(self):
-        enabled = [c for c, v in self._color_vars.items() if v.get()]
+        enabled = {c for c, v in self._color_vars.items() if v.get()}
         if not enabled:
-            # Enforce at least one
-            for var in self._color_vars.values():
-                var.set(True)
+            # Keep only the last enabled color — don't re-enable the others
+            for c in self._prev_colors:
+                self._color_vars[c].set(True)
+            # Cancel any pending dismiss job and start a fresh one
+            if self._color_warn_job:
+                self.after_cancel(self._color_warn_job)
             self._color_warn.configure(text="At least one color must be enabled.")
+            self._color_warn_job = self.after(
+                5000, lambda: self._color_warn.configure(text=""))
         else:
+            self._prev_colors = enabled
             self._color_warn.configure(text="")
+            if self._color_warn_job:
+                self.after_cancel(self._color_warn_job)
+                self._color_warn_job = None
+        self.relic_builder.set_relic_context(
+            self.relic_type_var.get(), self._get_allowed_colors())
+
+    def _slider_key_press(self, delta: int):
+        """Move the Odds Viewer slider by delta on arrow key press, with hold-repeat."""
+        v = int(round(self._ov_slider.get()))
+        new_v = max(1, min(500, v + delta))
+        self._ov_slider.set(new_v)
+        self._ov_n_var.set(new_v)
+        self._update_odds_viewer()
+        if self._ov_key_repeat:
+            self.after_cancel(self._ov_key_repeat)
+        self._ov_key_repeat = self.after(400, lambda: self._slider_key_repeat(delta))
+
+    def _slider_key_repeat(self, delta: int):
+        """Continue moving slider while key is held."""
+        v = int(round(self._ov_slider.get()))
+        new_v = max(1, min(500, v + delta))
+        self._ov_slider.set(new_v)
+        self._ov_n_var.set(new_v)
+        self._update_odds_viewer()
+        self._ov_key_repeat = self.after(50, lambda: self._slider_key_repeat(delta))
+
+    def _slider_key_release(self):
+        if self._ov_key_repeat:
+            self.after_cancel(self._ov_key_repeat)
+            self._ov_key_repeat = None
+
+    def _update_odds_viewer(self):
+        """Refresh the Odds Viewer panel from the current criteria probability and slider."""
+        try:
+            p = self.relic_builder.get_current_p_per_relic()
+            n = int(self._ov_n_var.get())
+        except Exception:
+            return
+
+        self._ov_n_lbl.configure(text=str(n))
+
+        if not p or p <= 0:
+            self._ov_result_var.set(
+                "Set relic criteria (Build Exact Relic or Passive Pool) to see projections.")
+            return
+
+        from bot.probability_engine import prob_success_in_n, format_duration, prob_curse_pass
+
+        # ── Curse filter adjustment (Deep mode only) ───────────────────────── #
+        rtype = self.relic_type_var.get()
+        n_blocked_curses = len(getattr(self, "_blocked_curses_list", []))
+        if rtype == "night" and n_blocked_curses > 0:
+            p_curse = prob_curse_pass(n_blocked_curses, rtype)
+            p = p * p_curse  # adjust base probability for curse exclusions
+
+        if p <= 0:
+            self._ov_result_var.set(
+                "Set relic criteria (Build Exact Relic or Passive Pool) to see projections.")
+            return
+
+        # ── Timing model ──────────────────────────────────────────────────── #
+        lpm_on      = getattr(self, "_low_perf_mode_var", None)
+        parallel_on = getattr(self, "_parallel_enabled_var", None)
+        async_on    = getattr(self, "_async_enabled_var", None)
+        workers_var = getattr(self, "_parallel_workers_var", None)
+
+        sec_roll = 50 if (lpm_on and lpm_on.get()) else 45   # rolling time per relic
+
+        # Per-relic analysis overhead (rough estimate, workers reduce it)
+        workers = (workers_var.get() if (workers_var and parallel_on and parallel_on.get()) else 1)
+        sec_analyze = {1: 3.0, 2: 1.5, 3: 1.0, 4: 0.8}.get(min(workers, 4), 0.6)
+
+        is_async = async_on and async_on.get()
+        if is_async:
+            # Analysis runs in background — iteration time is rolling only
+            sec_per_iter_ideal = n * sec_roll
+        else:
+            sec_per_iter_ideal = n * (sec_roll + sec_analyze)
+
+        # Total batch time for configured loops
+        try:
+            loops = max(1, int(self.batch_limit_var.get()))
+        except (AttributeError, ValueError):
+            loops = 1
+
+        if is_async:
+            # Analysis overlaps with iterations — only last iter has unmasked analysis time
+            total_batch_sec = loops * sec_per_iter_ideal + n * sec_analyze
+        else:
+            total_batch_sec = loops * sec_per_iter_ideal
+
+        # ── Probability stats ─────────────────────────────────────────────── #
+        p_at_n     = prob_success_in_n(p, n)
+        exp_relics = 1.0 / p
+        exp_iters  = exp_relics / n
+
+        # ── Timing context note ───────────────────────────────────────────── #
+        mode_parts = []
+        if lpm_on and lpm_on.get():
+            mode_parts.append("LPM +5 s/relic")
+        if is_async:
+            mode_parts.append("Async (analysis overlaps)")
+        if parallel_on and parallel_on.get():
+            mode_parts.append(f"Brute Force {workers}×")
+        if n_blocked_curses > 0 and rtype == "night":
+            mode_parts.append(f"{n_blocked_curses} curse(s) blocked")
+        mode_note = "  |  " + ", ".join(mode_parts) if mode_parts else ""
+
+        lines = [
+            f"  Odds of finding a desired relic in {n:,}-relic iteration:  "
+            f"{p_at_n*100:.1f}%  (~1 in {int(round(1/p)):,} relics expected{mode_note})",
+            f"  Expected iterations to find a match: ~{exp_iters:.1f}",
+            f"  Ideal time per iteration ({n:,} relics × {sec_roll} s rolling):  "
+            f"{format_duration(sec_per_iter_ideal)}",
+            f"  Expected time for {loops:,} loops:  {format_duration(total_batch_sec)}",
+        ]
+        self._ov_result_var.set("\n".join(lines))
 
     def _toggle_color(self, color: str):
         """Toggle a relic colour checkbox when its gem image is clicked."""
@@ -5231,6 +5551,88 @@ class RelicBotApp(tk.Tk):
     def _get_allowed_colors(self) -> list[str]:
         return [c for c, v in self._color_vars.items() if v.get()]
 
+    @staticmethod
+    def _detect_hardware() -> tuple[int, int, str]:
+        """Return (ram_gb, cpu_cores, gpu_name). Never raises."""
+        ram_gb = 0
+        try:
+            import ctypes
+            class _MEMSTAT(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength",               ctypes.c_ulong),
+                    ("dwMemoryLoad",           ctypes.c_ulong),
+                    ("ullTotalPhys",           ctypes.c_ulonglong),
+                    ("ullAvailPhys",           ctypes.c_ulonglong),
+                    ("ullTotalPageFile",       ctypes.c_ulonglong),
+                    ("ullAvailPageFile",       ctypes.c_ulonglong),
+                    ("ullTotalVirtual",        ctypes.c_ulonglong),
+                    ("ullAvailVirtual",        ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            stat = _MEMSTAT()
+            stat.dwLength = ctypes.sizeof(stat)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            ram_gb = int(stat.ullTotalPhys // (1024 ** 3))
+        except Exception:
+            pass
+
+        cpu_cores = 0
+        try:
+            import os
+            cpu_cores = os.cpu_count() or 0
+        except Exception:
+            pass
+
+        gpu_name = "Unknown GPU"
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["wmic", "path", "win32_VideoController", "get", "name", "/value"],
+                capture_output=True, text=True, timeout=3,
+            )
+            names = [
+                line.split("=", 1)[1].strip()
+                for line in result.stdout.splitlines()
+                if line.startswith("Name=") and line.split("=", 1)[1].strip()
+            ]
+            # Prefer NVIDIA/AMD discrete GPU if present
+            discrete = [n for n in names if any(k in n for k in ("NVIDIA", "Radeon RX", "RTX", "GTX"))]
+            gpu_name = discrete[0] if discrete else (names[0] if names else "Unknown GPU")
+        except Exception:
+            pass
+
+        return ram_gb, cpu_cores, gpu_name
+
+    def _get_hw_recommendations(self) -> tuple[str, str, str, str]:
+        """Return (brute_rec, workers_rec, async_rec, lpm_rec) based on detected hardware."""
+        ram  = self._hw_ram_gb
+        cpus = self._hw_cpu_cores
+
+        if ram <= 0:
+            return ("Unknown", "Unknown", "Unknown", "Unknown")
+
+        # Brute Force + workers
+        if ram <= 8:
+            brute_rec   = "OFF  (insufficient RAM)"
+            workers_rec = "N/A"
+        elif ram <= 12:
+            brute_rec   = "ON — 2 workers"
+            workers_rec = "2"
+        elif ram <= 20:
+            brute_rec   = "ON — 2–3 workers"
+            workers_rec = "2–3"
+        elif ram <= 32:
+            brute_rec   = "ON — 4–5 workers"
+            workers_rec = "4–5"
+        else:
+            brute_rec   = "ON — 6–8 workers"
+            workers_rec = "6–8"
+
+        async_rec = "ON" if cpus >= 8 else "OFF  (low core count)"
+        lpm_rec   = "OFF" if ram >= 12 and cpus >= 8 else "ON  (limited hardware)"
+
+        return brute_rec, workers_rec, async_rec, lpm_rec
+
     def _curse_filter_list(self, *_):
         q = self._curse_search_var.get().strip().lower()
         self._curse_src_lb.delete(0, "end")
@@ -5239,12 +5641,21 @@ class RelicBotApp(tk.Tk):
                 self._curse_src_lb.insert("end", p)
 
     def _curse_add(self):
+        from bot.probability_engine import NUM_CURSES, MIN_UNBLOCKED_CURSES
         sel = self._curse_src_lb.curselection()
         if sel:
             item = self._curse_src_lb.get(sel[0])
             if item not in self._blocked_curses_list:
+                if len(self._blocked_curses_list) >= NUM_CURSES - MIN_UNBLOCKED_CURSES:
+                    self._curse_odds_lbl.configure(
+                        text=f"Cannot block more curses — at least {MIN_UNBLOCKED_CURSES} must remain unblocked.",
+                        foreground="#e05050",
+                    )
+                    return
                 self._blocked_curses_list.append(item)
                 self._blocked_curses_lb.insert("end", item)
+                self._update_curse_odds()
+                self._update_odds_viewer()
 
     def _curse_remove(self):
         sel = self._blocked_curses_lb.curselection()
@@ -5252,10 +5663,54 @@ class RelicBotApp(tk.Tk):
             idx = sel[0]
             self._blocked_curses_list.pop(idx)
             self._blocked_curses_lb.delete(idx)
+            self._update_curse_odds()
+            self._update_odds_viewer()
 
     def _curse_clear(self):
         self._blocked_curses_list.clear()
         self._blocked_curses_lb.delete(0, "end")
+        self._update_curse_odds()
+        self._update_odds_viewer()
+
+    def _update_curse_odds(self):
+        """Refresh the curse odds impact label below the Curse Filter panel."""
+        from bot.probability_engine import (
+            prob_curse_pass, NUM_CURSES, MIN_UNBLOCKED_CURSES,
+        )
+        rtype = self.relic_type_var.get()
+        n_blocked = len(self._blocked_curses_list)
+        n_remaining = NUM_CURSES - n_blocked
+
+        if rtype != "night":
+            self._curse_odds_lbl.configure(
+                text="Curse filter only applies to Deep of Night relics.",
+                foreground=theme.TEXT_MUTED,
+            )
+            return
+
+        if n_blocked == 0:
+            self._curse_odds_lbl.configure(text="", foreground="")
+            return
+
+        if n_remaining < MIN_UNBLOCKED_CURSES:
+            self._curse_odds_lbl.configure(
+                text=f"Warning: only {n_remaining} curse(s) unblocked. At least {MIN_UNBLOCKED_CURSES} must remain.",
+                foreground="#e05050",
+            )
+            return
+
+        p_pass = prob_curse_pass(n_blocked, "night")
+        pct = p_pass * 100
+        n_in = int(round(1.0 / p_pass)) if p_pass > 0 else 0
+        self._curse_odds_lbl.configure(
+            text=(
+                f"With {n_blocked} curse(s) blocked ({n_remaining} unblocked): "
+                f"~{pct:.1f}% of Deep relics pass the curse filter "
+                f"(~1 in {n_in:,} relics will have a blocked curse).  "
+                f"Odds Viewer factors this in automatically."
+            ),
+            foreground=theme.TEXT_MUTED,
+        )
 
     def _get_blocked_curses(self) -> list:
         return [c.lower() for c in self._blocked_curses_list]

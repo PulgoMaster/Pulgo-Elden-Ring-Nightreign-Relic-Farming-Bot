@@ -19,7 +19,10 @@ from ui import theme, relic_images
 from bot.passives import (
     ALL_PASSIVES_SORTED, CATEGORIES, UI_CATEGORIES,
     COMPAT_GROUPS, get_compat_violations,
-    estimate_passive_prob,
+)
+from bot.probability_engine import (
+    prob_combo_on_relic,
+    prob_passive_on_relic, prob_at_least_k_of_pool,
 )
 
 
@@ -210,6 +213,8 @@ class _ExactRelicTab(ttk.Frame):
         self._slots: list[_SlotSelector] = []
         self._threshold_var = tk.IntVar(value=2)
         self._compat_var = tk.StringVar(value="")
+        self._relic_type: str = "night"
+        self._allowed_colors: list[str] = ["Red", "Blue", "Green", "Yellow"]
         self._build()
 
     # ── construction ─────────────────────────────────────────────────── #
@@ -296,7 +301,7 @@ class _ExactRelicTab(ttk.Frame):
         self._compat_lbl.pack(anchor="w", padx=8, pady=(4, 0))
 
         # ── Odds display ──────────────────────────────────────────────────── #
-        odds_frame = ttk.LabelFrame(right, text="Odds  (estimated)")
+        odds_frame = ttk.LabelFrame(right, text="Odds  (per relic)")
         odds_frame.pack(fill="x", padx=6, pady=(2, 6))
 
         self._odds_var = tk.StringVar(value="Select passives above to see odds.")
@@ -304,10 +309,11 @@ class _ExactRelicTab(ttk.Frame):
             odds_frame, textvariable=self._odds_var,
             foreground="#90c890", wraplength=620, justify="left",
         ).pack(anchor="w", padx=6, pady=(4, 2))
+        self._odds_disclaimer_var = tk.StringVar(
+            value="Odds from AttachEffectTableParam. Per-relic rate accounts for size distribution and color filter.")
         ttk.Label(
-            odds_frame,
-            text="Odds use actual pool weight data (AttachEffectTableParam). Normal relic probabilities shown; deep-only passives use the Deep of Night pool.",
-            foreground=theme.TEXT_MUTED,
+            odds_frame, textvariable=self._odds_disclaimer_var,
+            foreground=theme.TEXT_MUTED, wraplength=620,
         ).pack(anchor="w", padx=6, pady=(0, 4))
 
         # Populate initial state
@@ -405,8 +411,21 @@ class _ExactRelicTab(ttk.Frame):
         self._refresh_list()
         self._target_lb.selection_set(self._active)
 
+    def set_relic_context(self, relic_type: str, allowed_colors: list[str]) -> None:
+        """Called by RelicBuilderFrame when relic type or color selection changes."""
+        self._relic_type = relic_type
+        self._allowed_colors = list(allowed_colors)
+        pool_label = "Deep of Night" if relic_type == "night" else "Normal"
+        color_note = (f"{len(allowed_colors)} color(s) selected"
+                      if len(allowed_colors) < 4 else "all colors")
+        self._odds_disclaimer_var.set(
+            f"Odds from AttachEffectTableParam ({pool_label} pools, {color_note}). "
+            f"Per-relic rate accounts for size distribution and color filter.")
+        self._update_odds()
+
     def _on_threshold_change(self):
         self._save_current()
+        self._update_odds()
 
     def _update_exclusions(self):
         """
@@ -459,63 +478,112 @@ class _ExactRelicTab(ttk.Frame):
 
     def _update_odds(self):
         """Recompute and display odds for the currently active target."""
-        slots = [s.get() for s in self._slots]
+        rtype  = self._relic_type
+        colors = self._allowed_colors
+
+        slots  = [s.get() for s in self._slots]
         filled = [(i, p) for i, p in enumerate(slots) if p]
 
         if not filled:
             self._odds_var.set("Select passives above to see odds.")
+            self._propagate_p(None)
             return
 
         violations = get_compat_violations(slots)
         if violations:
             self._odds_var.set("Cannot calculate — incompatible passives selected.")
+            self._propagate_p(None)
             return
 
-        lines = []
-        probs = []
+        targets = [p for _, p in filled]
+        thresh  = self._threshold_var.get()
+        lines   = []
+
+        # ── Per-passive odds (per-relic, color-filtered) ─────────────────────
+        pool_name = "Deep of Night" if rtype == "night" else "Normal"
         for i, p in filled:
-            prob = estimate_passive_prob(p)
-            if prob is not None:
-                n = int(round(1.0 / prob))
-                lines.append(f"  Slot {i + 1}: {p[:45]}{'…' if len(p) > 45 else ''}  →  ~1 in {n:,} relics")
-                probs.append(prob)
+            label = p[:42] + ("…" if len(p) > 42 else "")
+            p_relic = prob_passive_on_relic(p, rtype, colors)
+            if p_relic and p_relic > 0:
+                n_r = int(round(1.0 / p_relic))
+                pct = p_relic * 100
+                lines.append(f"  {label}  →  {pct:.2f}%  (~1 in {n_r:,} per relic)")
+            elif p_relic == 0.0:
+                lines.append(f"  {label}  →  Impossible — not available on {pool_name} Relics")
             else:
-                lines.append(f"  Slot {i + 1}: {p[:45]}{'…' if len(p) > 45 else ''}  →  odds unknown")
+                lines.append(f"  {label}  →  not in {pool_name} pool")
 
-        if len(probs) == len(filled):
-            combined = 1.0
-            for p in probs:
-                combined *= p
-            n_combined = int(round(1.0 / combined))
-            thresh = self._threshold_var.get()
-            n_filled = len(filled)
-            if thresh < n_filled:
-                lines.append(f"\n  Combined (all {n_filled} match): ~1 in {n_combined:,} relics")
-                # P(≥thresh of n_filled) — exact computation for small n
-                if n_filled == 3 and thresh == 2:
-                    p0, p1, p2 = probs
-                    p_exactly_2 = (p0 * p1 * (1 - p2)
-                                   + p0 * (1 - p1) * p2
-                                   + (1 - p0) * p1 * p2)
-                    approx = combined + p_exactly_2
-                    n_any = int(round(1.0 / max(approx, 1e-12)))
-                    lines.append(f"  Combined (≥{thresh} of {n_filled} match): ~1 in {n_any:,} relics")
-                    n_combined = n_any
+        # ── This target probability (color-filtered, size-weighted) ─────────
+        lines.append("")
+        n_filled = len(filled)
+        p_this: float | None = None
+
+        if thresh >= n_filled:
+            p_this = prob_combo_on_relic(targets, rtype, colors)
+            if p_this and p_this > 0:
+                n = int(round(1.0 / p_this))
+                pct = p_this * 100
+                lines.append(f"  This target (all {n_filled}): {pct:.2f}%  (~1 in {n:,} per relic)")
+            elif p_this == 0.0:
+                lines.append(f"  Impossible Combo — can't be rolled on {pool_name} Relics")
             else:
-                lines.append(f"\n  Combined (all match): ~1 in {n_combined:,} relics")
+                lines.append(f"  This target: odds unknown (passive may not be in pool)")
+        else:
+            per_p    = [prob_passive_on_relic(t, rtype, colors) or 0.0 for t in targets]
+            p_thresh = prob_at_least_k_of_pool(per_p, thresh)
+            p_all    = prob_combo_on_relic(targets, rtype, colors)
+            p_this   = p_thresh if p_thresh > 0 else p_all
+            if p_thresh > 0:
+                n_thresh = int(round(1.0 / max(p_thresh, 1e-12)))
+                pct_thresh = p_thresh * 100
+                lines.append(f"  This target (≥{thresh} of {n_filled}): {pct_thresh:.2f}%  (~1 in {n_thresh:,} per relic)")
+            if p_all and p_all > 0:
+                n_all = int(round(1.0 / max(p_all, 1e-12)))
+                pct_all = p_all * 100
+                lines.append(f"  This target (all {n_filled}): {pct_all:.2f}%  (~1 in {n_all:,} per relic)")
 
-            # Expected iterations (100 relics per iteration, ~45 sec/relic)
-            n_iters = math.ceil(n_combined / 100)
-            total_secs = n_combined * 45
-            if total_secs < 3600:
-                time_str = f"~{total_secs // 60} min"
-            elif total_secs < 86400:
-                time_str = f"~{total_secs / 3600:.1f} hrs"
-            else:
-                time_str = f"~{total_secs / 86400:.1f} days"
-            lines.append(f"  With 100 relics/iteration: ~{n_iters:,} iterations expected  |  ~{time_str} total")
+        # ── All defined targets combined (any target matches) ────────────────
+        self._save_current()
+        all_valid = [
+            {"slots": [p for p in t["slots"] if p], "threshold": t["threshold"]}
+            for t in self._targets
+            if any(t["slots"])
+        ]
+        p_combined: float | None = None
 
+        if len(all_valid) > 1:
+            complement = 1.0
+            found_any  = False
+            for t in all_valid:
+                t_slots  = t["slots"]
+                t_thresh = t["threshold"]
+                if t_thresh >= len(t_slots):
+                    p = prob_combo_on_relic(t_slots, rtype, colors)
+                else:
+                    pp_list = [prob_passive_on_relic(s, rtype, colors) or 0.0 for s in t_slots]
+                    p = prob_at_least_k_of_pool(pp_list, t_thresh)
+                if p and p > 0:
+                    complement *= max(0.0, 1.0 - p)
+                    found_any   = True
+            if found_any:
+                p_combined = max(0.0, 1.0 - complement)
+                if p_combined > 0:
+                    n_any = int(round(1.0 / max(p_combined, 1e-12)))
+                    pct_any = p_combined * 100
+                    lines.append(f"  Odds of meeting any of {len(all_valid)} targets: {pct_any:.2f}%  (~1 in {n_any:,} per relic)")
+
+        self._propagate_p(p_combined if p_combined is not None else p_this)
         self._odds_var.set("\n".join(lines))
+
+    def _propagate_p(self, p: float | None) -> None:
+        """Push the current per-relic probability up to RelicBuilderFrame."""
+        try:
+            nb = self.nametowidget(self.winfo_parent())
+            rb = self.nametowidget(nb.winfo_parent())
+            if hasattr(rb, "_set_p_per_relic"):
+                rb._set_p_per_relic(p)
+        except Exception:
+            pass
 
     def has_compat_errors(self) -> bool:
         """Return True if any defined target has incompatible passive combinations."""
@@ -797,6 +865,8 @@ class _PassivePoolTab(ttk.Frame):
         self._entries: list[dict] = []
         # Pairings: {"left": list[str], "right": list[str]}  (independent of pool)
         self._pairings: list[dict] = []
+        self._relic_type: str = "night"
+        self._allowed_colors: list[str] = ["Red", "Blue", "Green", "Yellow"]
         self._build()
 
     def _build(self):
@@ -896,7 +966,7 @@ class _PassivePoolTab(ttk.Frame):
         ttk.Label(foot, textvariable=self._count_lbl).pack(side="left")
 
         # ── Odds display ───────────────────────────────────────────────────── #
-        odds_frame = ttk.LabelFrame(self, text="Odds  (estimated)")
+        odds_frame = ttk.LabelFrame(self, text="Odds  (per relic)")
         odds_frame.pack(fill="x", padx=8, pady=(0, 6))
 
         self._odds_var = tk.StringVar(value="Add passives to your pool to see odds.")
@@ -904,10 +974,11 @@ class _PassivePoolTab(ttk.Frame):
             odds_frame, textvariable=self._odds_var,
             foreground="#90c890", wraplength=680, justify="left",
         ).pack(anchor="w", padx=6, pady=(4, 2))
+        self._odds_disclaimer_var = tk.StringVar(
+            value="Odds from AttachEffectTableParam. Per-relic rate accounts for size distribution and color filter.")
         ttk.Label(
-            odds_frame,
-            text="Odds use actual pool weight data (AttachEffectTableParam). Normal relic probabilities shown; deep-only passives use the Deep of Night pool.",
-            foreground=theme.TEXT_MUTED,
+            odds_frame, textvariable=self._odds_disclaimer_var,
+            foreground=theme.TEXT_MUTED, wraplength=680,
         ).pack(anchor="w", padx=6, pady=(0, 4))
 
     # ── category filter ─────────────────────────────────────────────────── #
@@ -919,68 +990,96 @@ class _PassivePoolTab(ttk.Frame):
         self._left_lb._refresh(items)
         self._left_lb.clear_search()
 
+    def set_relic_context(self, relic_type: str, allowed_colors: list[str]) -> None:
+        """Called by RelicBuilderFrame when relic type or color selection changes."""
+        self._relic_type = relic_type
+        self._allowed_colors = list(allowed_colors)
+        pool_label = "Deep of Night" if relic_type == "night" else "Normal"
+        color_note = (f"{len(allowed_colors)} color(s) selected"
+                      if len(allowed_colors) < 4 else "all colors")
+        self._odds_disclaimer_var.set(
+            f"Odds from AttachEffectTableParam ({pool_label} pools, {color_note}). "
+            f"Per-relic rate accounts for size distribution and color filter.")
+        self._update_odds()
+
     def _on_threshold_change(self):
         self._update_odds()
 
     def _update_odds(self):
         """Recompute and display odds for the current pool + threshold."""
-        all_passives = [p for e in self._entries for p in e["accepted"]]
+        rtype  = self._relic_type
+        colors = self._allowed_colors
         n_pool = len(self._entries) + len(self._pairings)
         thresh = self._threshold.get()
 
         if n_pool == 0:
             self._odds_var.set("Add passives to your pool to see odds.")
+            self._propagate_p(None)
             return
 
-        # Per-passive odds (first accepted variant only, as representative)
-        lines = []
-        repr_probs: list[float] = []
-        for entry in self._entries:
-            p = entry["accepted"][0]
-            prob = estimate_passive_prob(p)
-            label = _entry_label(entry)
-            if prob is not None:
-                n = int(round(1.0 / prob))
-                lines.append(f"  {label[:40]}{'…' if len(label) > 40 else ''}  →  ~1 in {n:,} per relic")
-                repr_probs.append(prob)
-            else:
-                lines.append(f"  {label[:40]}{'…' if len(label) > 40 else ''}  →  odds unknown")
+        lines: list[str] = []
+        per_relic_probs: list[float] = []
 
+        pool_name = "Deep of Night" if rtype == "night" else "Normal"
+
+        # ── Single-entry odds ────────────────────────────────────────────────
+        for entry in self._entries:
+            rep_passive = entry["accepted"][0]
+            label = _entry_label(entry)
+            short = label[:40] + ("…" if len(label) > 40 else "")
+            p_relic = prob_passive_on_relic(rep_passive, rtype, colors)
+            if p_relic and p_relic > 0:
+                n_r = int(round(1.0 / p_relic))
+                pct = p_relic * 100
+                lines.append(f"  {short}  →  {pct:.2f}%  (~1 in {n_r:,} per relic)")
+                per_relic_probs.append(p_relic)
+            elif p_relic == 0.0:
+                lines.append(f"  {short}  →  Impossible Combo, can't be rolled on {pool_name} Relics")
+            else:
+                lines.append(f"  {short}  →  not in {pool_name} pool")
+
+        # ── Pairing odds ─────────────────────────────────────────────────────
         for pair in self._pairings:
             p1 = pair["left"][0]
             p2 = pair["right"][0]
-            prob1 = estimate_passive_prob(p1)
-            prob2 = estimate_passive_prob(p2)
             ll = _entry_label({"accepted": pair["left"]})
             rl = _entry_label({"accepted": pair["right"]})
-            if prob1 is not None and prob2 is not None:
-                pair_prob = prob1 * prob2
-                n = int(round(1.0 / pair_prob))
-                lines.append(f"  PAIR {ll[:20]}+{rl[:20]}  →  ~1 in {n:,} per relic")
-                repr_probs.append(pair_prob)
+            pair_p = prob_combo_on_relic([p1, p2], rtype, colors)
+            if pair_p and pair_p > 0:
+                n = int(round(1.0 / pair_p))
+                pct = pair_p * 100
+                lines.append(f"  PAIR {ll[:22]}+{rl[:22]}  →  {pct:.2f}%  (~1 in {n:,} per relic)")
+                per_relic_probs.append(pair_p)
+            elif pair_p == 0.0:
+                lines.append(f"  PAIR {ll[:22]}+{rl[:22]}  →  Impossible Combo, can't be rolled on {pool_name} Relics")
             else:
-                lines.append(f"  PAIR {ll[:20]}+{rl[:20]}  →  odds unknown")
+                lines.append(f"  PAIR {ll[:22]}+{rl[:22]}  →  not available in {pool_name} pool")
 
-        if repr_probs and len(repr_probs) == n_pool:
-            # P(at least thresh) approximation: sort probs descending, take top thresh
-            sorted_probs = sorted(repr_probs, reverse=True)
-            # Upper bound: P(the thresh most-likely passives all appear)
-            combined = 1.0
-            for p in sorted_probs[:thresh]:
-                combined *= p
-            n_combined = int(round(1.0 / max(combined, 1e-12)))
-            lines.append(f"\n  P(at least {thresh} of {n_pool} pool matches): ~1 in {n_combined:,} relics (upper bound)")
-            n_iters = math.ceil(n_combined / 100)
-            total_secs = n_combined * 45
-            if total_secs < 3600:
-                time_str = f"~{total_secs // 60} min"
-            elif total_secs < 86400:
-                time_str = f"~{total_secs / 3600:.1f} hrs"
-            else:
-                time_str = f"~{total_secs / 86400:.1f} days"
-            lines.append(f"  With 100 relics/iteration: ~{n_iters:,} iterations expected  |  ~{time_str} total")
+        # ── Combined P(≥ thresh of pool) ─────────────────────────────────────
+        p_combined: float | None = None
+        if per_relic_probs:
+            p_combined = prob_at_least_k_of_pool(per_relic_probs, thresh)
+            if p_combined and p_combined > 0:
+                n_combined = int(round(1.0 / max(p_combined, 1e-12)))
+                pct_combined = p_combined * 100
+                lines.append(
+                    f"\n  Odds of finding a relic that fulfills at least {thresh} of the expected criteria:"
+                    f"  {pct_combined:.2f}%  (~1 in {n_combined:,} per relic)")
+            elif p_combined == 0.0:
+                lines.append(f"\n  Odds of finding a relic that fulfills at least {thresh} of the expected criteria: Impossible")
 
+        self._propagate_p(p_combined)
         self._odds_var.set("\n".join(lines))
+
+    def _propagate_p(self, p: float | None) -> None:
+        """Push the current per-relic probability up to RelicBuilderFrame."""
+        try:
+            nb = self.nametowidget(self.winfo_parent())
+            rb = self.nametowidget(nb.winfo_parent())
+            if hasattr(rb, "_set_p_per_relic"):
+                rb._set_p_per_relic(p)
+        except Exception:
+            pass
 
     # ── add / remove ────────────────────────────────────────────────────── #
 
@@ -1360,6 +1459,8 @@ class RelicBuilderFrame(ttk.LabelFrame):
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, text="Relic Criteria", **kwargs)
+        self._p_per_relic: float | None = None
+        self._on_odds_changed = None  # optional callback(float | None)
         self._build()
 
     def _build(self):
@@ -1390,6 +1491,24 @@ class RelicBuilderFrame(ttk.LabelFrame):
         ).pack(side="left")
 
     # ── Public API ──────────────────────────────────────────────────── #
+
+    def set_relic_context(self, relic_type: str, allowed_colors: list[str]) -> None:
+        """
+        Propagate relic type and color selection to both builder tabs.
+        Call from app.py whenever relic type or color changes.
+        """
+        self._exact.set_relic_context(relic_type, allowed_colors)
+        self._pool.set_relic_context(relic_type, allowed_colors)
+
+    def _set_p_per_relic(self, p: float | None) -> None:
+        """Called by child tabs when they recompute per-relic probability."""
+        self._p_per_relic = p
+        if self._on_odds_changed is not None:
+            self._on_odds_changed(p)
+
+    def get_current_p_per_relic(self) -> float | None:
+        """Return the most recently computed per-relic success probability."""
+        return self._p_per_relic
 
     def get_criteria_dict(self) -> dict:
         """Return structured criteria dict consumed by relic_analyzer.analyze()."""

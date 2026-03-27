@@ -99,7 +99,7 @@ POOL_2100000 = [
     "Poise +3",
     "Physical Attack Up +2",
     "Magic Attack Power Up +2",
-    "Fire Attack Power UP +2",
+    "Fire Attack Power Up +2",
     "Lightning Attack Power Up +2",
     "Holy Attack Power Up +2",
     # Damage negation (base tiers)
@@ -259,7 +259,7 @@ DEEP_CAT_1_ATTACK_POWER = [
     "Magic Attack Power Up +2",
     "Magic Attack Power Up +3",
     "Magic Attack Power Up +4",
-    "Fire Attack Power UP +2",
+    "Fire Attack Power Up +2",
     "Fire Attack Power Up +3",
     "Fire Attack Power Up +4",
     "Lightning Attack Power Up +2",

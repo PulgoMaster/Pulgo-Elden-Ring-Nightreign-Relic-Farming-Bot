@@ -5,13 +5,26 @@
 # Each table is a relic slot draw pool. The probability of drawing a passive
 # is its chanceWeight divided by the table total.
 #
-# Normal relic pools:
+# Normal relic pools (ItemTableParam 49000 → sub-tables 49010/49011/49012):
+#   Size distribution: 45% Delicate / 35% Polished / 20% Grand
+#   Confirmed via ShopLineupParam entry 10110 "Scenic Flatstone" → equipId=49000
 #   100 / 110 = Delicate (A slot / alt)
 #   200 / 210 = Polished (A slot / alt)
 #   300 / 310 = Grand    (A slot / alt)
-# Deep of Night pools:
+#
+# Deep of Night pools (ItemTableParam 49100 → sub-tables 49110/49111/49112):
+#   Size distribution: 10% Delicate / 50% Polished / 40% Grand
+#   Confirmed via ShopLineupParam entry 10111 "Deep Scenic Flatstone" → equipId=49100
+#   Bot farms Deep relics — these are the active pools for all bot calculations.
 #   2000000 = Deep exclusive (49 entries, high-tier only)
-#   2100000 / 2200000 = Deep broad (277 entries each)
+#   2100000 = Deep broad (277 entries)
+#   2200000 = Deep broad variant — confirmed NOT present in any bazaar relic
+#             (EquipParamAntique check, 2026-03-26). Defined here for reference
+#             only; never imported or used by the probability engine.
+#
+# NOTE: The math doc (Relic Draw Rate Mathematics.txt) has been updated (v1.7) to
+# use the correct 9-variant Deep model. The engine (probability_engine.py) is also
+# correct. No further correction pass is needed.
 
 # TABLE_100: Delicate slot A — 290 entries, total weight 10004
 TABLE_100: dict[str, int] = {
@@ -2566,12 +2579,13 @@ NORMAL_TOTALS: dict[int, int] = {
 }
 
 DEEP_TABLES: dict[int, dict[str, int]] = {
-    2000000: TABLE_2000000, 2100000: TABLE_2100000, 2200000: TABLE_2200000,
+    2000000: TABLE_2000000, 2100000: TABLE_2100000,
+    # NOTE: TABLE_2200000 intentionally excluded — confirmed not used in any bazaar relic.
 }
 DEEP_TOTALS: dict[int, int] = {
     2000000: 9984,
     2100000: 9977,
-    2200000: 9977,
+    # NOTE: TABLE_2200000 intentionally excluded — confirmed not used in any bazaar relic.
 }
 
 
@@ -2592,15 +2606,92 @@ def passive_prob(passive: str, table_id: int = 100) -> float | None:
     return w / all_totals[table_id]
 
 
+def delicate_prob(passive: str) -> float | None:
+    """
+    P(passive appears on a current (post-1.02) Delicate relic from the Small Jar Bazaar.
+    Delicate has 1 slot drawn from TABLE_100 (current relic pool).
+    TABLE_110 is the pre-1.02 pool — not used by the Bazaar.
+    """
+    p = passive_prob(passive, 100)
+    return p if p is not None else None
+
+
+def polished_prob(passive: str) -> float | None:
+    """
+    P(passive appears on a current (post-1.02) Polished relic from the Small Jar Bazaar.
+    Polished has 2 slots: slot1=TABLE_200, slot2=TABLE_100 (current pools only).
+    P(T appears) = 1 - P(T absent from all slots), independence approximation.
+    TABLE_210/110 are the pre-1.02 equivalents — not used by the Bazaar.
+    """
+    p1 = passive_prob(passive, 200) or 0.0
+    p2 = passive_prob(passive, 100) or 0.0
+    result = 1.0 - (1.0 - p1) * (1.0 - p2)
+    return result if result > 0.0 else None
+
+
+def grand_prob(passive: str) -> float | None:
+    """
+    P(passive appears on a current (post-1.02) Grand relic from the Small Jar Bazaar.
+    Grand has 3 slots: slot1=TABLE_300, slot2=TABLE_200, slot3=TABLE_100 (current pools only).
+    P(T appears) = 1 - P(T absent from all slots), independence approximation.
+    TABLE_310/210/110 are the pre-1.02 equivalents — not used by the Bazaar.
+    """
+    p1 = passive_prob(passive, 300) or 0.0
+    p2 = passive_prob(passive, 200) or 0.0
+    p3 = passive_prob(passive, 100) or 0.0
+    result = 1.0 - (1.0 - p1) * (1.0 - p2) * (1.0 - p3)
+    return result if result > 0.0 else None
+
+
+def delicate_prob_pre102(passive: str) -> float | None:
+    """P(passive on pre-1.02 Delicate relic). TABLE_110 pool."""
+    p = passive_prob(passive, 110)
+    return p if p is not None else None
+
+
+def polished_prob_pre102(passive: str) -> float | None:
+    """P(passive on pre-1.02 Polished relic). Slots: TABLE_210 / TABLE_110."""
+    p1 = passive_prob(passive, 210) or 0.0
+    p2 = passive_prob(passive, 110) or 0.0
+    result = 1.0 - (1.0 - p1) * (1.0 - p2)
+    return result if result > 0.0 else None
+
+
+def grand_prob_pre102(passive: str) -> float | None:
+    """P(passive on pre-1.02 Grand relic). Slots: TABLE_310 / TABLE_210 / TABLE_110."""
+    p1 = passive_prob(passive, 310) or 0.0
+    p2 = passive_prob(passive, 210) or 0.0
+    p3 = passive_prob(passive, 110) or 0.0
+    result = 1.0 - (1.0 - p1) * (1.0 - p2) * (1.0 - p3)
+    return result if result > 0.0 else None
+
+
 def normal_prob(passive: str) -> float | None:
-    """Average probability across all 6 normal relic tables, or None if absent from all."""
-    probs = [passive_prob(passive, tid) for tid in NORMAL_TABLES]
-    probs = [p for p in probs if p is not None]
-    return sum(probs) / len(probs) if probs else None
+    """Grand relic probability — best estimate for 3-passive hunting. See grand_prob()."""
+    return grand_prob(passive)
 
 
 def deep_prob(passive: str) -> float | None:
-    """Average probability across all 3 deep relic tables, or None if absent from all."""
+    """Average probability across the 2 active deep relic tables, or None if absent from all."""
     probs = [passive_prob(passive, tid) for tid in DEEP_TABLES]
     probs = [p for p in probs if p is not None]
     return sum(probs) / len(probs) if probs else None
+
+
+# ── Curse pool data ───────────────────────────────────────────────────────── #
+# TABLE_3000000: 24 entries, all weight=100, total=2400 (4.167% each).
+# Source: AttachEffectTableParam.csv, confirmed 2026-03-26.
+# All curses are perfectly uniform — no passive correlates with higher curse chance.
+# Normal relics never have curses (all curse table IDs = -1 in EquipParamAntique).
+NUM_CURSES: int = 24
+
+# Curse count distribution per relic size, from ItemTableParam sub-table chain:
+#   Delicate (49110): 49120 (0 curses, w=100) / 49121 (1 curse, w=100)
+#   Polished (49111): 49130 (0, w=300) / 49131 (1, w=500) / 49132 (2, w=200)
+#   Grand    (49112): 49140 (0, w=400) / 49141 (1, w=300) / 49142 (2, w=200) / 49143 (3, w=100)
+# Note: ~36% of purchased Deep relics draw 0 curses (curse-free variants exist).
+DEEP_CURSE_COUNT_DIST: dict[str, dict[int, float]] = {
+    "delicate": {0: 0.50, 1: 0.50},
+    "polished": {0: 0.30, 1: 0.50, 2: 0.20},
+    "grand":    {0: 0.40, 1: 0.30, 2: 0.20, 3: 0.10},
+}

@@ -904,20 +904,20 @@ _STAT_BASES: tuple = (
 
 def estimate_passive_prob(passive: str | None) -> float | None:
     """
-    Probability that a passive appears on any given single relic (per draw).
+    P(passive appears on a Grand normal relic) — best estimate for 3-passive hunters.
     Returns float in (0,1) or None if passive is None.
 
     Uses actual pool weight data from database/pool_weights.py (AttachEffectTableParam).
-    Pool weights are averaged across the 6 normal relic tables (100/110/200/210/300/310).
-    Deep-only passives use the average across the 3 deep tables (2000000/2100000/2200000).
+    Grand probability: 1 - P(absent from all 3 slots), averaged over group A/B (50/50).
+    Deep-only passives use the deep relic probability instead.
     Falls back to category-based estimates for passives not found in pool data.
     """
     if passive is None:
         return None
     try:
-        from database.pool_weights import normal_prob, deep_prob
-        # Try normal relic tables first
-        p = normal_prob(passive)
+        from database.pool_weights import grand_prob, deep_prob
+        # Try normal relic tables first (Grand = best estimate)
+        p = grand_prob(passive)
         if p is not None:
             return p
         # Try deep relic tables (deep-only passives)
@@ -948,6 +948,25 @@ def estimate_passive_prob(passive: str | None) -> float | None:
             and "Affinity" not in passive):
         return 0.003
     return 0.005
+
+
+def estimate_passive_prob_by_size(passive: str | None) -> dict[str, float | None]:
+    """
+    Return per-size probabilities for a passive on normal relics.
+    Keys: "delicate", "polished", "grand".  Values: float or None if not in that pool.
+    """
+    if passive is None:
+        return {"delicate": None, "polished": None, "grand": None}
+    try:
+        from database.pool_weights import delicate_prob, polished_prob, grand_prob
+        return {
+            "delicate": delicate_prob(passive),
+            "polished": polished_prob(passive),
+            "grand":    grand_prob(passive),
+        }
+    except ImportError:
+        p = estimate_passive_prob(passive)
+        return {"delicate": p, "polished": p, "grand": p}
 
 
 # ── UI category groupings (displayed in the criteria builder) ─────────────── #
