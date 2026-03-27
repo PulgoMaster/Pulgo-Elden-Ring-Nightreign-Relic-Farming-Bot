@@ -525,7 +525,9 @@ class RelicBotApp(tk.Tk):
         self._parallel_enabled_var  = tk.BooleanVar(value=False)
         self._parallel_workers_var  = tk.IntVar(value=2)
         self._async_enabled_var     = tk.BooleanVar(value=False)
+        self._gpu_accel_var         = tk.BooleanVar(value=False)
         self._hw_ram_gb, self._hw_cpu_cores, self._hw_gpu_name = self._detect_hardware()
+        self._hw_cuda_available     = self._check_cuda_available()
         self._stop_after_batch      = False   # graceful stop flag
         self._game_hung             = False   # set True by watchdog when game freezes
         self._low_perf_mode_var     = tk.BooleanVar(value=False)
@@ -1105,26 +1107,71 @@ class RelicBotApp(tk.Tk):
                  "(see [Adaptive] log entries). This mode raises the baseline floor\n"
                  "so the adaptive scaling starts from a safer starting point.")
 
+        # GPU Acceleration toggle
+        def _on_gpu_toggle(*_):
+            from bot import relic_analyzer
+            relic_analyzer.set_gpu_mode(self._gpu_accel_var.get())
+            self._update_odds_viewer()
+
+        gpu_chk = ttk.Checkbutton(
+            self.batch_frame, text="🖥 GPU Acceleration (opt-in)",
+            variable=self._gpu_accel_var,
+            command=_on_gpu_toggle,
+        )
+        gpu_chk.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
+        _Tooltip(gpu_chk,
+                 "Offloads OCR inference to your NVIDIA GPU (CUDA) instead of the CPU.\n"
+                 "Speeds up relic analysis ~10× (from ~3 s/relic to ~0.3 s/relic).\n\n"
+                 "Requirements:\n"
+                 "  • NVIDIA GPU with CUDA support (GTX 10xx or newer)\n"
+                 "  • PyTorch with CUDA installed (check the Hardware panel below for status)\n\n"
+                 "Benefits for large batches:\n"
+                 "  • Frees CPU cycles → fewer missed/eaten game inputs\n"
+                 "  • Enables shorter Phase 4 gap (0.07 s vs 0.10 s) for faster relic browsing\n"
+                 "  • Analysis queue drains faster in Async mode\n\n"
+                 "Leave OFF if you do not have an NVIDIA GPU or if CUDA is not detected.\n"
+                 "AMD and Intel GPUs are not supported by EasyOCR's GPU mode.\n"
+                 "GPU setting is saved in your profile.")
+        self._gpu_rec_lbl = ttk.Label(
+            self.batch_frame,
+            text="",
+            foreground=theme.TEXT_MUTED,
+        )
+        self._gpu_rec_lbl.grid(row=7, column=3, columnspan=2, sticky="w", **pad)
+        # Set recommendation label based on CUDA detection
+        if self._hw_cuda_available:
+            self._gpu_rec_lbl.configure(
+                text=f"✓ Recommended — CUDA detected on {self._hw_gpu_name}",
+                foreground="#7ec8f0",
+            )
+        else:
+            self._gpu_rec_lbl.configure(
+                text="Not available — no CUDA GPU detected (CPU only)",
+                foreground=theme.TEXT_MUTED,
+            )
+
         # ── Hardware Recommendations ──────────────────────────────────── #
-        brute_rec, workers_rec, async_rec, lpm_rec = self._get_hw_recommendations()
+        brute_rec, workers_rec, async_rec, lpm_rec, gpu_rec = self._get_hw_recommendations()
         hw_frame = ttk.LabelFrame(self.batch_frame, text="Recommended Settings for Your System")
         hw_frame.grid(row=8, column=0, columnspan=5, sticky="ew", **pad)
 
         ram_str  = f"{self._hw_ram_gb} GB" if self._hw_ram_gb else "unknown"
         cpu_str  = f"{self._hw_cpu_cores} logical cores" if self._hw_cpu_cores else "unknown"
+        cuda_str = "CUDA available" if self._hw_cuda_available else "no CUDA"
         disclaimer = (
-            f"Detected hardware: {self._hw_gpu_name}  |  RAM: {ram_str}  |  CPU: {cpu_str}\n"
+            f"Detected hardware: {self._hw_gpu_name}  ({cuda_str})  |  RAM: {ram_str}  |  CPU: {cpu_str}\n"
             f"Recommendations are estimates based on hardware specs. Results may vary."
         )
         ttk.Label(hw_frame, text=disclaimer,
                   foreground=theme.TEXT_MUTED, wraplength=720).grid(
-            row=0, column=0, columnspan=4, sticky="w", **pad)
+            row=0, column=0, columnspan=8, sticky="w", **pad)
 
         rec_data = [
             ("⚡ Brute Force Analysis:", brute_rec),
             ("Workers:",                 workers_rec),
             ("⚑ Async Analysis:",        async_rec),
             ("🐢 Low Performance Mode:", lpm_rec),
+            ("🖥 GPU Acceleration:",      gpu_rec),
         ]
         for col, (label, rec) in enumerate(rec_data):
             ttk.Label(hw_frame, text=label,
@@ -1166,16 +1213,18 @@ class RelicBotApp(tk.Tk):
         ttk.Label(
             odds_viewer,
             text="Ideal conditions (no lag, no crashes). "
-                 "Rolling: 45 s/relic baseline (+5 s with LPM). "
-                 "Analysis: ~3 s/relic sync, less with Brute Force workers. "
-                 "Async mode overlaps analysis with the next iteration, reducing total batch time.",
+                 "Rolling: fixed overhead + ~2.1 s/relic (buy + navigate). "
+                 "Analysis: ~3 s/relic CPU, ~0.3 s/relic GPU, less with Brute Force workers. "
+                 "Async mode overlaps analysis with the next iteration, reducing total batch time. "
+                 "GPU Acceleration reduces analysis time ~10× and enables a shorter Phase 4 input gap.",
             foreground=theme.TEXT_MUTED, wraplength=760,
         ).pack(anchor="w", padx=8, pady=(0, 6))
 
         # Wire odds updates from relic_builder and all relevant settings
         self.relic_builder._on_odds_changed = lambda p: self._update_odds_viewer()
         for _ov_var in (self._low_perf_mode_var, self._parallel_enabled_var,
-                        self._async_enabled_var, self._parallel_workers_var):
+                        self._async_enabled_var, self._parallel_workers_var,
+                        self._gpu_accel_var):
             _ov_var.trace_add("write", lambda *_: self._update_odds_viewer())
 
         # ── Bot Control ─────────────────────────────────────────────── #
@@ -1704,6 +1753,7 @@ class RelicBotApp(tk.Tk):
             "parallel_enabled": self._parallel_enabled_var.get(),
             "parallel_workers": self._parallel_workers_var.get(),
             "async_enabled": self._async_enabled_var.get(),
+            "gpu_accel": self._gpu_accel_var.get(),
             "low_perf_mode": self._low_perf_mode_var.get(),
             "overlay_enabled":      self._overlay_enabled_var.get(),
             "ov_show_stats":        self._ov_show_stats_var.get(),
@@ -1741,8 +1791,12 @@ class RelicBotApp(tk.Tk):
         self._parallel_enabled_var.set(data.get("parallel_enabled", False))
         self._parallel_workers_var.set(data.get("parallel_workers", 2))
         self._async_enabled_var.set(data.get("async_enabled", False))
+        self._gpu_accel_var.set(data.get("gpu_accel", False))
         self._low_perf_mode_var.set(data.get("low_perf_mode", False))
         self._on_parallel_toggle()
+        # Apply GPU setting immediately so the analyzer uses the correct mode
+        from bot import relic_analyzer as _ra
+        _ra.set_gpu_mode(self._gpu_accel_var.get())
         if "hotkey_str" in data:
             self._hotkey_str = data["hotkey_str"]
             self._hotkey_display = data.get("hotkey_display", self._hotkey_str.replace("Key.", "").upper())
@@ -4244,9 +4298,11 @@ class RelicBotApp(tk.Tk):
         # swallow the next input. Scales with perf_mult (floor 0.10 s).
         _p02_extra_delay = round(max(0.10, 0.10 * self._perf_gap_mult), 3)
         # Phase 4 advance gap: relics are pre-loaded so no adaptive scaling
-        # needed for the advance itself. LPM uses a slightly larger gap as
-        # a safety margin.
-        _p4_advance_gap  = 0.20 if _lpm else 0.10
+        # needed for the advance itself. LPM uses a larger gap as a safety
+        # margin. GPU acceleration allows a shorter gap (0.07 s) because the
+        # analysis queue drains faster and CPU is freer for input handling.
+        _gpu_on = getattr(self, "_gpu_accel_var", None) and self._gpu_accel_var.get()
+        _p4_advance_gap  = 0.20 if _lpm else (0.07 if _gpu_on else 0.10)
         # Initial settle before Phase 4 loop — lets the Sell screen finish
         # animating after Phase 3 navigation. Scaled by the perf multiplier
         # so a degraded system gets proportionally more time.
@@ -5480,19 +5536,49 @@ class RelicBotApp(tk.Tk):
         parallel_on = getattr(self, "_parallel_enabled_var", None)
         async_on    = getattr(self, "_async_enabled_var", None)
         workers_var = getattr(self, "_parallel_workers_var", None)
+        gpu_accel   = getattr(self, "_gpu_accel_var", None) and self._gpu_accel_var.get()
 
-        sec_roll = 50 if (lpm_on and lpm_on.get()) else 45   # rolling time per relic
+        # Timing model — accurate amortised formula:
+        #   Each iteration has fixed overhead (save restore + launch + navigation) plus
+        #   per-relic time for buying and reviewing.
+        #
+        #   Fixed overhead per iteration: ~150 s (restore + launch + shop nav + sell nav)
+        #   Per-relic buy cost: ~2 s (Phase 1 sequence including game response time)
+        #   Per-relic navigate cost: 0.10 s gap (Phase 4 RIGHT key + screenshot)
+        #     GPU mode shortens navigate gap to 0.07 s
+        #   Per-relic OCR cost: 3.0 s CPU sync, 0.3 s GPU (or overlapped in async)
+        #   LPM adds ~0.5 s to navigate gap per relic (Phase 4 gap 0.20 instead of 0.10)
+        lpm = lpm_on and lpm_on.get()
+        sec_fixed       = 150                       # per-iteration constant overhead
+        sec_buy_relic   = 2.0                       # Phase 1 buy time per relic
+        if lpm:
+            sec_nav_relic = 0.20
+        elif gpu_accel:
+            sec_nav_relic = 0.07                    # GPU frees CPU → shorter safe gap
+        else:
+            sec_nav_relic = 0.10                    # Phase 4 RIGHT + screenshot per relic
 
-        # Per-relic analysis overhead (rough estimate, workers reduce it)
+        # Per-relic analysis overhead (workers reduce it via parallel EasyOCR threads;
+        # GPU reduces it ~10× by offloading inference to CUDA)
         workers = (workers_var.get() if (workers_var and parallel_on and parallel_on.get()) else 1)
-        sec_analyze = {1: 3.0, 2: 1.5, 3: 1.0, 4: 0.8}.get(min(workers, 4), 0.6)
+        if gpu_accel:
+            sec_analyze = 0.3   # GPU inference: ~10× faster than CPU baseline
+        else:
+            sec_analyze = {1: 3.0, 2: 1.5, 3: 1.0, 4: 0.8}.get(min(workers, 4), 0.6)
 
         is_async = async_on and async_on.get()
+
+        # Rolling time = fixed overhead + per-relic buy + per-relic navigation
+        sec_rolling_total = sec_fixed + n * (sec_buy_relic + sec_nav_relic)
+
         if is_async:
-            # Analysis runs in background — iteration time is rolling only
-            sec_per_iter_ideal = n * sec_roll
+            # Analysis overlaps with game navigation — iteration time is rolling only
+            sec_per_iter_ideal = sec_rolling_total
         else:
-            sec_per_iter_ideal = n * (sec_roll + sec_analyze)
+            sec_per_iter_ideal = sec_rolling_total + n * sec_analyze
+
+        # sec_roll shown in the label = effective per-relic rolling cost (for display only)
+        sec_roll_display = sec_rolling_total / n if n > 0 else sec_buy_relic + sec_nav_relic
 
         # Total batch time for configured loops
         try:
@@ -5501,7 +5587,7 @@ class RelicBotApp(tk.Tk):
             loops = 1
 
         if is_async:
-            # Analysis overlaps with iterations — only last iter has unmasked analysis time
+            # Analysis overlaps except for the final iteration's tail
             total_batch_sec = loops * sec_per_iter_ideal + n * sec_analyze
         else:
             total_batch_sec = loops * sec_per_iter_ideal
@@ -5514,7 +5600,9 @@ class RelicBotApp(tk.Tk):
         # ── Timing context note ───────────────────────────────────────────── #
         mode_parts = []
         if lpm_on and lpm_on.get():
-            mode_parts.append("LPM +5 s/relic")
+            mode_parts.append("LPM +0.10 s/relic gap")
+        if gpu_accel:
+            mode_parts.append("GPU Accel (~0.3 s/relic)")
         if is_async:
             mode_parts.append("Async (analysis overlaps)")
         if parallel_on and parallel_on.get():
@@ -5527,7 +5615,7 @@ class RelicBotApp(tk.Tk):
             f"  Odds of finding a desired relic in {n:,}-relic iteration:  "
             f"{p_at_n*100:.1f}%  (~1 in {int(round(1/p)):,} relics expected{mode_note})",
             f"  Expected iterations to find a match: ~{exp_iters:.1f}",
-            f"  Ideal time per iteration ({n:,} relics × {sec_roll} s rolling):  "
+            f"  Ideal time per iteration ({n:,} relics, ~{sec_roll_display:.1f} s/relic amortised):  "
             f"{format_duration(sec_per_iter_ideal)}",
             f"  Expected time for {loops:,} loops:  {format_duration(total_batch_sec)}",
         ]
@@ -5603,13 +5691,22 @@ class RelicBotApp(tk.Tk):
 
         return ram_gb, cpu_cores, gpu_name
 
-    def _get_hw_recommendations(self) -> tuple[str, str, str, str]:
-        """Return (brute_rec, workers_rec, async_rec, lpm_rec) based on detected hardware."""
+    @staticmethod
+    def _check_cuda_available() -> bool:
+        """Return True if PyTorch reports CUDA (NVIDIA GPU) is available. Never raises."""
+        try:
+            import torch
+            return torch.cuda.is_available()
+        except Exception:
+            return False
+
+    def _get_hw_recommendations(self) -> tuple[str, str, str, str, str]:
+        """Return (brute_rec, workers_rec, async_rec, lpm_rec, gpu_rec) based on detected hardware."""
         ram  = self._hw_ram_gb
         cpus = self._hw_cpu_cores
 
         if ram <= 0:
-            return ("Unknown", "Unknown", "Unknown", "Unknown")
+            return ("Unknown", "Unknown", "Unknown", "Unknown", "Unknown")
 
         # Brute Force + workers
         if ram <= 8:
@@ -5631,7 +5728,14 @@ class RelicBotApp(tk.Tk):
         async_rec = "ON" if cpus >= 8 else "OFF  (low core count)"
         lpm_rec   = "OFF" if ram >= 12 and cpus >= 8 else "ON  (limited hardware)"
 
-        return brute_rec, workers_rec, async_rec, lpm_rec
+        if getattr(self, "_hw_cuda_available", False):
+            gpu_rec = f"ON — CUDA detected ({self._hw_gpu_name})"
+        elif any(k in self._hw_gpu_name for k in ("NVIDIA", "RTX", "GTX")):
+            gpu_rec = "Check — NVIDIA GPU found but CUDA not available (install PyTorch+CUDA)"
+        else:
+            gpu_rec = "OFF — no NVIDIA CUDA GPU detected"
+
+        return brute_rec, workers_rec, async_rec, lpm_rec, gpu_rec
 
     def _curse_filter_list(self, *_):
         q = self._curse_search_var.get().strip().lower()

@@ -23,8 +23,9 @@ from PIL import Image
 # The model is loaded lazily on the first call from each thread (~2-3 s
 # one-time cost; subsequent calls on the same thread are instant).
 
-_thread_local   = threading.local()
-_torch_threads  = 1   # set via configure_torch_threads() before workers start
+_thread_local       = threading.local()
+_torch_threads      = 1      # set via configure_torch_threads() before workers start
+_gpu_mode_enabled   = False  # set via set_gpu_mode() from the UI
 
 
 def configure_torch_threads(n: int) -> None:
@@ -44,16 +45,32 @@ def configure_torch_threads(n: int) -> None:
         pass
 
 
+def set_gpu_mode(enabled: bool) -> None:
+    """Enable or disable GPU (CUDA) inference for all subsequent OCR calls.
+
+    Each worker thread checks this flag before each call and reloads its Reader
+    if the setting has changed, so toggling mid-run takes effect on the next
+    analysis request without requiring a restart.
+    """
+    global _gpu_mode_enabled
+    _gpu_mode_enabled = bool(enabled)
+
+
 def _get_reader():
-    """Return the EasyOCR reader for the calling thread, loading it if needed."""
-    if not hasattr(_thread_local, "reader"):
+    """Return the EasyOCR reader for the calling thread, loading it if needed.
+
+    Reloads automatically if the GPU mode has changed since the reader was
+    created — each thread tracks the gpu setting its reader was built with.
+    """
+    if not hasattr(_thread_local, "reader") or getattr(_thread_local, "reader_gpu", None) != _gpu_mode_enabled:
         try:
             import torch
             torch.set_num_threads(_torch_threads)
         except Exception:
             pass
         import easyocr
-        _thread_local.reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+        _thread_local.reader     = easyocr.Reader(["en"], gpu=_gpu_mode_enabled, verbose=False)
+        _thread_local.reader_gpu = _gpu_mode_enabled
     return _thread_local.reader
 
 

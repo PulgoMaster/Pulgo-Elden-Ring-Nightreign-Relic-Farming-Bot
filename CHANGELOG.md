@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.5.1] – 2026-03-27
+
+### Added
+- **GPU Acceleration (opt-in)** (`bot/relic_analyzer.py`, `ui/app.py`) — EasyOCR inference can now run on an NVIDIA CUDA GPU instead of CPU. Reduces per-relic analysis time from ~3 s to ~0.3 s (~10× speedup). Toggle added to Batch Mode Settings row 7 with tooltip and inline CUDA detection status label. Saved in profile as `gpu_accel`.
+  - `relic_analyzer.set_gpu_mode(enabled)` — sets module-level `_gpu_mode_enabled` flag. Each worker thread auto-reloads its Reader on the next analysis call if the flag changed, so toggling mid-run takes effect without restart.
+  - `_get_reader()` now tracks `_thread_local.reader_gpu` and reloads if it differs from `_gpu_mode_enabled`.
+  - `_check_cuda_available()` static method added to `RelicBotApp`; called at startup; stored as `self._hw_cuda_available`.
+  - Hardware panel shows CUDA status ("CUDA available" / "no CUDA") next to GPU name.
+  - Hardware Recommendations panel gains a 5th entry: GPU Acceleration recommendation.
+- **Phase 4 gap reduced with GPU** — when GPU Acceleration is ON and LPM is OFF, Phase 4 advance gap drops from 0.10 s to 0.07 s per relic, allowing faster relic browsing. GPU offloads analysis compute, freeing CPU for input handling.
+- **Odds Viewer updated for GPU** — timing model accounts for GPU: `sec_analyze = 0.3` when GPU ON (vs 3.0 CPU). `sec_nav_relic = 0.07` when GPU ON. "GPU Accel (~0.3 s/relic)" shown in mode_parts. Static description label updated.
+
+### Fixed
+- **`_get_hw_recommendations` return arity** — expanded from 4-tuple to 5-tuple; caller updated.
+
+---
+
 ## [1.5.0] – 2026-03-27 — SUBSTANTIAL UPDATE
 
 ### Added

@@ -1,5 +1,17 @@
 # Relic Bot — Implementation Status
-Last updated: 2026-03-27 | Current version: v1.5.0 (in progress)
+Last updated: 2026-03-27 | Current version: v1.5.1
+
+---
+
+## COMPLETED — v1.5.1
+
+### GPU Acceleration — `bot/relic_analyzer.py` + `ui/app.py`
+- Opt-in checkbox in Batch Mode Settings row 7 with CUDA detection label
+- `set_gpu_mode(enabled)` sets module-level flag; `_get_reader()` reloads per-thread Reader if flag changed
+- `_check_cuda_available()` detects CUDA at startup; shown in hardware panel + recommendations
+- Phase 4 gap: 0.07 s when GPU ON (vs 0.10 s), LPM still overrides to 0.20 s
+- Timing model: `sec_analyze = 0.3` GPU / `3.0` CPU; `sec_nav = 0.07` GPU / `0.10` CPU
+- Profile save/load: `"gpu_accel"` key
 
 ---
 
