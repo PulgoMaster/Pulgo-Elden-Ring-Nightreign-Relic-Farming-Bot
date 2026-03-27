@@ -4,14 +4,6 @@ All notable changes to this project are documented here.
 
 ---
 
-## [1.5.2] – 2026-03-27
-
-### Fixed
-- **Smart Analyze missing from sync analysis path** — `evaluate_relic()` was only called in the async worker path (`_analyze_relic_task`). The sync pipelined path (`_run_iteration_phases` Phase 4 collection loop) had no Smart Analyze call. Added identical Smart Analyze block: calls `evaluate_relic()` on non-matching relics, saves screenshot to `smart_hits/`, appends to `smart_hits.log`, logs to overlay, increments `_ov_smart_hits` counter.
-- **Smart Analyze setting not persisted in profiles** — `smart_analyze` key was missing from `_profile_to_dict` / `_dict_to_profile`. Added with default `False`.
-
----
-
 ## [1.5.1] – 2026-03-27
 
 ### Added
@@ -23,9 +15,15 @@ All notable changes to this project are documented here.
   - Hardware Recommendations panel gains a 5th entry: GPU Acceleration recommendation.
 - **Phase 4 gap reduced with GPU** — when GPU Acceleration is ON and LPM is OFF, Phase 4 advance gap drops from 0.10 s to 0.07 s per relic, allowing faster relic browsing. GPU offloads analysis compute, freeing CPU for input handling.
 - **Odds Viewer updated for GPU** — timing model accounts for GPU: `sec_analyze = 0.3` when GPU ON (vs 3.0 CPU). `sec_nav_relic = 0.07` when GPU ON. "GPU Accel (~0.3 s/relic)" shown in mode_parts. Static description label updated.
+- **Smart Analyze fully integrated** — toggle UI already existed; modules (`smart_rules.py`, `game_knowledge.py`) were already complete. Integration now wired in both analysis paths:
+  - Async path (`_analyze_relic_task`): fires on non-matching relics, saves screenshot + log to `smart_hits/`, updates overlay counter.
+  - Sync path (`_run_iteration_phases`): same logic added — was missing before this release.
+  - Profile save/load: `"smart_analyze"` key.
 
 ### Fixed
 - **`_get_hw_recommendations` return arity** — expanded from 4-tuple to 5-tuple; caller updated.
+- **Smart Analyze sync path missing** — `evaluate_relic()` was not called in the sync pipelined Phase 4 collection loop. Now matches async path behaviour.
+- **Smart Analyze setting not persisted** — `smart_analyze` key missing from profile save/load.
 
 ---
 

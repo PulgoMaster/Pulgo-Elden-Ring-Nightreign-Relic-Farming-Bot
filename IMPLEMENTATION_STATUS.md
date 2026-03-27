@@ -1,21 +1,17 @@
 # Relic Bot — Implementation Status
-Last updated: 2026-03-27 | Current version: v1.5.2
+Last updated: 2026-03-27 | Current version: v1.5.1
 
 ---
 
-## COMPLETED — v1.5.2
+## COMPLETED — v1.5.1
 
 ### Smart Analyze — fully integrated
 - Toggle UI: Batch Mode Settings row 5, col 2
 - Modules: `bot/smart_rules.py` (8 rules), `bot/game_knowledge.py` (2,400+ lines)
 - Async path (`_analyze_relic_task`): calls `evaluate_relic()` on non-matching relics
-- **Sync path (`_run_iteration_phases`)**: now also calls `evaluate_relic()` — was missing before v1.5.2
+- Sync path (`_run_iteration_phases`): same logic, fires in Phase 4 collection loop
 - On hit: saves screenshot to `smart_hits/` subfolder, appends to `smart_hits.log`, logs to overlay, increments live `_ov_smart_hits` counter
 - Profile save/load: `"smart_analyze"` key
-
----
-
-## COMPLETED — v1.5.1
 
 ### GPU Acceleration — `bot/relic_analyzer.py` + `ui/app.py`
 - Opt-in checkbox in Batch Mode Settings row 7 with CUDA detection label
@@ -73,22 +69,6 @@ Last updated: 2026-03-27 | Current version: v1.5.2
 - Color deselect safety: restoring previous multi-color set instead of going blank
 - Hardware detection: RAM, CPU cores, GPU name shown in Batch Mode Settings
 - Batch Mode restructured: Hours mode removed, Loops only (1–1000)
-
----
-
-## PENDING — v1.5.0 (final step)
-
-### Smart Analyze Integration
-The toggle UI is already in place (Batch Mode Settings row=5, col=2).
-Modules are complete: `bot/smart_rules.py` (8 rules) and `bot/game_knowledge.py` (2,400+ lines).
-
-What still needs to happen:
-- In sync + async analysis paths: call `evaluate_relic(passives)` on relics that do NOT
-  match main criteria and are NOT excluded
-- If rules fire: copy screenshot + append findings to
-  `Recommended Unassigned Hits/smart_summary.txt` in run_dir
-- Overlay counter: "Unassigned: N" updating live
-- Profile save/load: `"smart_analyze": bool`
 
 ---
 
