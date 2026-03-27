@@ -5709,7 +5709,10 @@ class RelicBotApp(tk.Tk):
         if lpm_on and lpm_on.get():
             mode_parts.append("LPM +0.10 s/relic gap")
         if gpu_accel:
-            mode_parts.append("GPU Accel (~0.3 s/relic)")
+            if is_async:
+                mode_parts.append("GPU Accel (Async: CPU relief + faster queue)")
+            else:
+                mode_parts.append("GPU Accel (~0.3 s/relic)")
         if is_async:
             mode_parts.append("Async (analysis overlaps)")
         if parallel_on and parallel_on.get():
@@ -5726,6 +5729,11 @@ class RelicBotApp(tk.Tk):
             f"{format_duration(sec_per_iter_ideal)}",
             f"  Expected time for {loops:,} loops:  {format_duration(total_batch_sec)}",
         ]
+        if gpu_accel and is_async:
+            lines.append(
+                "  * GPU + Async: OCR analysis is overlapped with navigation — "
+                "GPU benefit is reduced CPU contention and faster queue drain, not wall-clock time."
+            )
         self._ov_result_var.set("\n".join(lines))
 
     def _toggle_color(self, color: str):
