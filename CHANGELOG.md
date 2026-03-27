@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.5.2] – 2026-03-27
+
+### Fixed
+- **Smart Analyze missing from sync analysis path** — `evaluate_relic()` was only called in the async worker path (`_analyze_relic_task`). The sync pipelined path (`_run_iteration_phases` Phase 4 collection loop) had no Smart Analyze call. Added identical Smart Analyze block: calls `evaluate_relic()` on non-matching relics, saves screenshot to `smart_hits/`, appends to `smart_hits.log`, logs to overlay, increments `_ov_smart_hits` counter.
+- **Smart Analyze setting not persisted in profiles** — `smart_analyze` key was missing from `_profile_to_dict` / `_dict_to_profile`. Added with default `False`.
+
+---
+
 ## [1.5.1] – 2026-03-27
 
 ### Added

@@ -1753,6 +1753,7 @@ class RelicBotApp(tk.Tk):
             "parallel_enabled": self._parallel_enabled_var.get(),
             "parallel_workers": self._parallel_workers_var.get(),
             "async_enabled": self._async_enabled_var.get(),
+            "smart_analyze": self._smart_analyze_var.get(),
             "gpu_accel": self._gpu_accel_var.get(),
             "low_perf_mode": self._low_perf_mode_var.get(),
             "overlay_enabled":      self._overlay_enabled_var.get(),
@@ -1791,6 +1792,7 @@ class RelicBotApp(tk.Tk):
         self._parallel_enabled_var.set(data.get("parallel_enabled", False))
         self._parallel_workers_var.set(data.get("parallel_workers", 2))
         self._async_enabled_var.set(data.get("async_enabled", False))
+        self._smart_analyze_var.set(data.get("smart_analyze", False))
         self._gpu_accel_var.set(data.get("gpu_accel", False))
         self._low_perf_mode_var.set(data.get("low_perf_mode", False))
         self._on_parallel_toggle()
@@ -5180,6 +5182,42 @@ class RelicBotApp(tk.Tk):
                         f"  WARNING: relic {step_i + 1} OCR read UI element "
                         f"('{_r0.get('name', '')}') — skipping slot.")
                     continue
+
+                # Smart Analyze: evaluate non-matching relics against curated rules
+                if (self._smart_analyze_var.get()
+                        and not result.get("match", False)):
+                    try:
+                        from bot.smart_rules import evaluate_relic as _eval_relic
+                        _r0_sa = (result.get("relics_found", [{}]) or [{}])[0]
+                        _passives_sa = (_r0_sa.get("passives", [])
+                                        if isinstance(_r0_sa, dict) else [])
+                        _smart_reasons = _eval_relic(_passives_sa)
+                        if _smart_reasons and iter_dir and img:
+                            _smart_dir = os.path.join(iter_dir, "smart_hits")
+                            os.makedirs(_smart_dir, exist_ok=True)
+                            _sa_fname = f"relic_{step_i + 1:02d}_SMART.jpg"
+                            try:
+                                with open(os.path.join(_smart_dir, _sa_fname), "wb") as _f:
+                                    _f.write(img)
+                                with open(os.path.join(_smart_dir, "smart_hits.log"), "a",
+                                          encoding="utf-8") as _f:
+                                    _f.write(
+                                        f"Iter {iteration} · Relic {step_i + 1}  [{_sa_fname}]\n"
+                                        + "".join(f"  • {r}\n" for r in _smart_reasons)
+                                    )
+                                self._log(
+                                    f"  [Smart] Relic {step_i + 1} — {'; '.join(_smart_reasons)}",
+                                    overlay=True)
+                            except Exception:
+                                pass
+                            self._ov_smart_hits += 1
+                            if self._overlay:
+                                _sh = self._ov_smart_hits
+                                self.after(0, lambda _sh=_sh:
+                                           self._overlay.update(smart_hits=_sh)
+                                           if self._overlay and self._overlay._win else None)
+                    except Exception:
+                        pass
 
                 # Save screenshot if match or near-miss; discard otherwise
                 saved_fname = ""

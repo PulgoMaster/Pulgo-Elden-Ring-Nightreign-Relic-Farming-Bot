@@ -1,5 +1,17 @@
 # Relic Bot — Implementation Status
-Last updated: 2026-03-27 | Current version: v1.5.1
+Last updated: 2026-03-27 | Current version: v1.5.2
+
+---
+
+## COMPLETED — v1.5.2
+
+### Smart Analyze — fully integrated
+- Toggle UI: Batch Mode Settings row 5, col 2
+- Modules: `bot/smart_rules.py` (8 rules), `bot/game_knowledge.py` (2,400+ lines)
+- Async path (`_analyze_relic_task`): calls `evaluate_relic()` on non-matching relics
+- **Sync path (`_run_iteration_phases`)**: now also calls `evaluate_relic()` — was missing before v1.5.2
+- On hit: saves screenshot to `smart_hits/` subfolder, appends to `smart_hits.log`, logs to overlay, increments live `_ov_smart_hits` counter
+- Profile save/load: `"smart_analyze"` key
 
 ---
 
