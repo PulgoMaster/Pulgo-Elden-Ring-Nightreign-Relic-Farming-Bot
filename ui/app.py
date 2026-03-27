@@ -486,6 +486,9 @@ class RelicBotApp(tk.Tk):
         # Overlay visibility toggle hotkey
         self._ov_hotkey_str     = "Key.f7"
         self._ov_hotkey_display = "F7"
+        # Overlay matches view toggle hotkey
+        self._matches_hotkey_str     = "Key.f8"
+        self._matches_hotkey_display = "F8"
 
         # Bot state
         self.bot_thread: threading.Thread | None = None
@@ -981,6 +984,21 @@ class RelicBotApp(tk.Tk):
                  f"Press this key (default: F7) to toggle the overlay on/off without\n"
                  "interrupting the game or the bot.\n"
                  "Stats continue updating in the background while the overlay is hidden.\n\n"
+                 "Click to record a different key.")
+
+        ttk.Label(self.batch_frame, text="Matches Hotkey:").grid(row=3, column=5, sticky="e", **pad)
+        self._matches_hotkey_btn = ttk.Button(
+            self.batch_frame,
+            text=f"Rec: {self._matches_hotkey_display}",
+            command=self._set_matches_hotkey_dialog,
+            width=10,
+        )
+        self._matches_hotkey_btn.grid(row=3, column=6, sticky="w", **pad)
+        _Tooltip(self._matches_hotkey_btn,
+                 "Press this key (default: F8) to toggle the overlay between the\n"
+                 "normal log view and the full-width Matched Relics panel.\n\n"
+                 "Use this instead of clicking 'View Matches' so you never have\n"
+                 "to move your mouse away from the game during a run.\n\n"
                  "Click to record a different key.")
 
         # Brute Force Analysis toggle
@@ -1764,6 +1782,8 @@ class RelicBotApp(tk.Tk):
             "ov_show_relic_log":    self._ov_show_relic_log_var.get(),
             "ov_hotkey_str":        self._ov_hotkey_str,
             "ov_hotkey_display":    self._ov_hotkey_display,
+            "matches_hotkey_str":   self._matches_hotkey_str,
+            "matches_hotkey_display": self._matches_hotkey_display,
         }
 
     def _dict_to_profile(self, data: dict):
@@ -1809,6 +1829,12 @@ class RelicBotApp(tk.Tk):
             self._ov_hotkey_display = data.get("ov_hotkey_display",
                                                self._ov_hotkey_str.replace("Key.", "").upper())
             self._ov_hotkey_btn.config(text=f"Rec: {self._ov_hotkey_display}")
+            self._start_global_hotkey_listener()
+        if "matches_hotkey_str" in data:
+            self._matches_hotkey_str     = data["matches_hotkey_str"]
+            self._matches_hotkey_display = data.get("matches_hotkey_display",
+                                                    self._matches_hotkey_str.replace("Key.", "").upper())
+            self._matches_hotkey_btn.config(text=f"Rec: {self._matches_hotkey_display}")
             self._start_global_hotkey_listener()
         if "blocked_curses" in data:
             self._curse_clear()
@@ -2301,8 +2327,9 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
 
-        hotkey    = self._hotkey_str
-        ov_hotkey = self._ov_hotkey_str
+        hotkey         = self._hotkey_str
+        ov_hotkey      = self._ov_hotkey_str
+        matches_hotkey = self._matches_hotkey_str
 
         def _on_press(key):
             try:
@@ -2313,6 +2340,8 @@ class RelicBotApp(tk.Tk):
                 self.after(0, self._hotkey_pressed)
             elif k == ov_hotkey and self._overlay and getattr(self._overlay, "_win", None):
                 self.after(0, self._overlay.toggle_user_visibility)
+            elif k == matches_hotkey and self._overlay and getattr(self._overlay, "_win", None):
+                self.after(0, self._overlay._toggle_matches_view)
 
         self._global_kb_listener = _kb.Listener(on_press=_on_press, daemon=True)
         self._global_kb_listener.start()
@@ -2404,6 +2433,46 @@ class RelicBotApp(tk.Tk):
             def _finish():
                 lbl.config(text=f"Set to: {display}")
                 self._ov_hotkey_btn.config(text=f"Rec: {display}")
+                self._start_global_hotkey_listener()
+                dlg.after(700, dlg.destroy)
+
+            self.after(0, _finish)
+            return False
+
+        listener = _kb.Listener(on_press=_capture, daemon=True)
+        listener.start()
+        dlg.protocol("WM_DELETE_WINDOW", lambda: (listener.stop(), dlg.destroy()))
+
+    def _set_matches_hotkey_dialog(self):
+        """Open a key-capture dialog to set the matches view toggle hotkey."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Set Matches View Hotkey")
+        dlg.geometry("290x115")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.transient(self)
+
+        tk.Label(dlg, text="Press any key to use as the\nmatches view toggle:").pack(pady=8)
+        lbl = tk.Label(dlg, text="Waiting for key…", font=("", 11, "bold"))
+        lbl.pack()
+
+        done = [False]
+
+        def _capture(key):
+            if done[0]:
+                return False
+            done[0] = True
+            try:
+                k = key.char if (hasattr(key, "char") and key.char) else str(key)
+            except Exception:
+                k = str(key)
+            display = k.replace("Key.", "").upper() if k.startswith("Key.") else k.upper()
+            self._matches_hotkey_str     = k
+            self._matches_hotkey_display = display
+
+            def _finish():
+                lbl.config(text=f"Set to: {display}")
+                self._matches_hotkey_btn.config(text=f"Rec: {display}")
                 self._start_global_hotkey_listener()
                 dlg.after(700, dlg.destroy)
 

@@ -7,6 +7,7 @@ All notable changes to this project are documented here.
 ## [1.5.1] – 2026-03-27
 
 ### Added
+- **Matches View hotkey (F8)** — press F8 (configurable) to toggle the overlay between the normal log view and the full-width Matched Relics panel without touching the mouse. "Matches Hotkey" button added to Batch Mode Settings row 3 alongside the existing overlay toggle hotkey. Saved in profile as `matches_hotkey_str` / `matches_hotkey_display`.
 - **GPU Acceleration (opt-in)** (`bot/relic_analyzer.py`, `ui/app.py`) — EasyOCR inference can now run on an NVIDIA CUDA GPU instead of CPU. Reduces per-relic analysis time from ~3 s to ~0.3 s (~10× speedup). Toggle added to Batch Mode Settings row 7 with tooltip and inline CUDA detection status label. Saved in profile as `gpu_accel`.
   - `relic_analyzer.set_gpu_mode(enabled)` — sets module-level `_gpu_mode_enabled` flag. Each worker thread auto-reloads its Reader on the next analysis call if the flag changed, so toggling mid-run takes effect without restart.
   - `_get_reader()` now tracks `_thread_local.reader_gpu` and reloads if it differs from `_gpu_mode_enabled`.
