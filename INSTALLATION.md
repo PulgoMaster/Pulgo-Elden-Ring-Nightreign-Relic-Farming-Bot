@@ -114,10 +114,11 @@ Checklist before running the bot for the first time:
 - [ ] Save file path entered and pointing to your current `NR0000.sl2`
 - [ ] Personal backup of that save file made in a separate location
 - [ ] Game executable path entered correctly
-- [ ] Relic type selected (Normal or Deep of Night) to match what you are farming
-- [ ] At least one relic criterion set (the bot needs to know what it is looking for)
+- [ ] Relic type selected (defaults to Normal — change if farming Deep of Night)
+- [ ] At least one relic criterion set in the Relic Criteria tab
 - [ ] Game is running in **Borderless Windowed** — fullscreen and windowed modes shift the capture
       area and will cause OCR to read the wrong screen region
+- [ ] Starting position: standing at Roundtable Hold with the Relic Rites merchant visible
 
 ---
 
@@ -134,13 +135,16 @@ Checklist before running the bot for the first time:
   Roundtable Hold. Make sure you are standing there, facing the Relic Rites merchant area, before
   starting the bot.
 
-- **Use Async Mode for faster farming.** In Batch Mode, enabling Async Analysis lets the bot keep
-  farming while OCR runs in the background on the previous batch. This significantly reduces idle time
-  between iterations on slower machines.
+- **Use Async Mode for faster farming.** Enabling Async Analysis lets the bot keep farming while OCR
+  runs in the background on the previous cycle. This significantly reduces idle time between
+  iterations, especially on slower CPU-only machines.
 
-- **If sequences fail, re-record them.** The pre-recorded sequences are designed for a standard
-  Nightreign setup with all shops unlocked. If your layout differs (DLC not owned, different unlock
-  state), re-record Phase 0 and Phase 2 for your specific setup. Everything else is universal.
+- **Enable GPU Acceleration if you have an NVIDIA card.** In Batch Mode Settings, click "Install GPU
+  Acceleration" to download CUDA-enabled torch. Once installed, GPU mode reduces per-relic OCR from
+  ~3 s to ~0.3 s. When GPU is on, keep parallel workers at 4 or fewer — EasyOCR serialises on GPU
+  above that and gains nothing from extra workers.
+
+- **If sequences fail, re-record them.** The pre-recorded sequences work regardless of DLC ownership or shop unlock state. If a sequence misfires on your machine due to timing differences, re-record it using the built-in recording tool.
 
 ---
 

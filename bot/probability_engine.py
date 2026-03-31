@@ -294,11 +294,13 @@ def prob_combo_on_relic(
     if relic_type == "night":
         # Iterate over all 9 Deep variants directly
         if not compat_ok(targets):
-            return 0.0
+            return 0.0   # compat conflict → truly impossible
         total = 0.0
         for p_var, slot_list in _DEEP_VARIANTS:
             total += p_var * _combo_from_slot_list(targets, slot_list)
-        return (total * p_color) if total > 1e-12 else 0.0
+        # Return None (not in pool) rather than 0.0 when passive simply isn't
+        # in any deep table — 0.0 is reserved for compat conflicts above.
+        return (total * p_color) if total > 1e-12 else None
 
     # Normal relics — existing size-based path
     total    = 0.0
@@ -377,6 +379,30 @@ def prob_at_least_k_of_pool(per_entry_probs: list[float], k: int) -> float:
         dp = new_dp
 
     return sum(dp[k:])
+
+
+# ── Pool membership sets (used by UI for mode-based filtering) ────────────── #
+# A passive is "in the deep pool" if it has a non-zero weight entry in any deep
+# table (TABLE_2000000 or TABLE_2100000).  The key prefix is "<Table> ".
+# A passive is "in the normal pool" if it has an entry in any normal table
+# (TABLE_100/200/300).  Their prefixes differ per scene level.
+
+_DEEP_PREFIX = "<Table> "
+_NORMAL_PREFIXES = ("<Delicate Scene> ", "<Polished Scene> ", "<Grand Scene> ")
+
+DEEP_POOL_PASSIVES: frozenset = frozenset(
+    k[len(_DEEP_PREFIX):]
+    for table in (TABLE_2000000, TABLE_2100000)
+    for k, v in table.items()
+    if k.startswith(_DEEP_PREFIX) and v > 0
+)
+
+NORMAL_POOL_PASSIVES: frozenset = frozenset(
+    k.split("> ", 1)[1]
+    for table in (TABLE_100, TABLE_200, TABLE_300)
+    for k, v in table.items()
+    if any(k.startswith(pfx) for pfx in _NORMAL_PREFIXES) and v > 0
+)
 
 
 def prob_passive_on_relic(

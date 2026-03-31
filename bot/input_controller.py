@@ -1,14 +1,163 @@
 """
 Records and replays keyboard/mouse input sequences for game automation.
-Uses pynput to record events and replay them with original timing.
+Uses pynput to RECORD events and ctypes SendInput (hardware scan codes) to REPLAY them.
+
+SendInput with KEYEVENTF_SCANCODE sends hardware-level scan codes, which are
+processed by the game's raw input handler and are indistinguishable from a
+physical keyboard.  pynput's default virtual-key approach can be ignored by
+games that read WM_INPUT / DirectInput directly.
 """
 
 import ctypes
 import time
 import json
+import os
 from pynput import keyboard, mouse
-from pynput.keyboard import Controller as KeyController, Key
 from pynput.mouse import Controller as MouseController, Button
+
+# ─── ctypes SendInput structures ──────────────────────────────────────────── #
+
+_user32 = ctypes.windll.user32
+
+INPUT_KEYBOARD        = 1
+KEYEVENTF_SCANCODE    = 0x0008
+KEYEVENTF_KEYUP       = 0x0002
+KEYEVENTF_EXTENDEDKEY = 0x0001
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk",         ctypes.c_ushort),
+        ("wScan",       ctypes.c_ushort),
+        ("dwFlags",     ctypes.c_ulong),
+        ("time",        ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.c_size_t),   # ULONG_PTR — pointer-sized on any platform
+    ]
+
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [
+        ("ki",   _KEYBDINPUT),
+        # MOUSEINPUT is 32 bytes on x64; pad the union to that size so
+        # ctypes computes sizeof(INPUT) == 40, matching the Windows ABI.
+        ("_pad", ctypes.c_byte * 32),
+    ]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_ulong),
+        ("_u",   _INPUT_UNION),
+    ]
+
+
+# Hardware scan codes (Set 1 make codes)
+# Extended keys additionally require KEYEVENTF_EXTENDEDKEY.
+_SCAN: dict = {
+    # ── Letters ──
+    'a': 0x1E, 'b': 0x30, 'c': 0x2E, 'd': 0x20, 'e': 0x12,
+    'f': 0x21, 'g': 0x22, 'h': 0x23, 'i': 0x17, 'j': 0x24,
+    'k': 0x25, 'l': 0x26, 'm': 0x32, 'n': 0x31, 'o': 0x18,
+    'p': 0x19, 'q': 0x10, 'r': 0x13, 's': 0x1F, 't': 0x14,
+    'u': 0x16, 'v': 0x2F, 'w': 0x11, 'x': 0x2D, 'y': 0x15,
+    'z': 0x2C,
+    # ── Number row ──
+    '1': 0x02, '2': 0x03, '3': 0x04, '4': 0x05, '5': 0x06,
+    '6': 0x07, '7': 0x08, '8': 0x09, '9': 0x0A, '0': 0x0B,
+    # ── Punctuation ──
+    '-': 0x0C, '=': 0x0D, '[': 0x1A, ']': 0x1B, '\\': 0x2B,
+    ';': 0x27, "'": 0x28, '`': 0x29, ',': 0x33, '.': 0x34, '/': 0x35,
+    # ── Special ──
+    'Key.esc':       0x01,
+    'Key.tab':       0x0F,
+    'Key.backspace': 0x0E,
+    'Key.enter':     0x1C,
+    'Key.space':     0x39,
+    'Key.caps_lock': 0x3A,
+    # ── Shift / Ctrl / Alt ──
+    'Key.shift':   0x2A, 'Key.shift_l': 0x2A, 'Key.shift_r': 0x36,
+    'Key.ctrl':    0x1D, 'Key.ctrl_l':  0x1D, 'Key.ctrl_r':  0x1D,
+    'Key.alt':     0x38, 'Key.alt_l':   0x38, 'Key.alt_r':   0x38,
+    # ── Function keys ──
+    'Key.f1':  0x3B, 'Key.f2':  0x3C, 'Key.f3':  0x3D, 'Key.f4':  0x3E,
+    'Key.f5':  0x3F, 'Key.f6':  0x40, 'Key.f7':  0x41, 'Key.f8':  0x42,
+    'Key.f9':  0x43, 'Key.f10': 0x44, 'Key.f11': 0x57, 'Key.f12': 0x58,
+    # ── Arrow keys (extended) ──
+    'Key.up':    0x48, 'Key.down':  0x50,
+    'Key.left':  0x4B, 'Key.right': 0x4D,
+    # ── Navigation cluster (extended) ──
+    'Key.home':      0x47, 'Key.end':       0x4F,
+    'Key.page_up':   0x49, 'Key.page_down': 0x51,
+    'Key.insert':    0x52, 'Key.delete':    0x53,
+    # ── Misc ──
+    'Key.print_screen': 0x37,
+    'Key.scroll_lock':  0x46,
+    # ── Numpad ──
+    'Key.num_lock': 0x45,
+    'Key.numpad0':  0x52, 'Key.numpad1': 0x4F, 'Key.numpad2': 0x50,
+    'Key.numpad3':  0x51, 'Key.numpad4': 0x4B, 'Key.numpad5': 0x4C,
+    'Key.numpad6':  0x4D, 'Key.numpad7': 0x47, 'Key.numpad8': 0x48,
+    'Key.numpad9':  0x49,
+}
+
+# Keys that need KEYEVENTF_EXTENDEDKEY in addition to KEYEVENTF_SCANCODE
+_EXTENDED = frozenset({
+    'Key.ctrl_r', 'Key.alt_r',
+    'Key.up', 'Key.down', 'Key.left', 'Key.right',
+    'Key.home', 'Key.end', 'Key.page_up', 'Key.page_down',
+    'Key.insert', 'Key.delete',
+    'Key.print_screen',
+})
+
+
+def _sc_for_key(key_str: str):
+    """
+    Return (scan_code, is_extended) for a key string.
+    Falls back to MapVirtualKeyW for characters not in the static table.
+    Returns (0, False) if the key cannot be resolved.
+    """
+    sc = _SCAN.get(key_str)
+    if sc is not None:
+        return sc, key_str in _EXTENDED
+
+    # Fallback: single character — get VK via VkKeyScanW, then scan code
+    if len(key_str) == 1:
+        vk = _user32.VkKeyScanW(ord(key_str)) & 0xFF
+        if vk:
+            sc = _user32.MapVirtualKeyW(vk, 0)  # MAPVK_VK_TO_VSC
+            if sc:
+                return sc, False
+
+    return 0, False
+
+
+def _send_key(key_str: str, key_up: bool = False) -> bool:
+    """
+    Fire a single SendInput keyboard event using a hardware scan code.
+    Returns True if Windows accepted the event (SendInput returned 1).
+    """
+    sc, extended = _sc_for_key(key_str)
+    if not sc:
+        return False
+
+    flags = KEYEVENTF_SCANCODE
+    if key_up:
+        flags |= KEYEVENTF_KEYUP
+    if extended:
+        flags |= KEYEVENTF_EXTENDEDKEY
+
+    inp = _INPUT()
+    inp.type          = INPUT_KEYBOARD
+    inp._u.ki.wVk     = 0
+    inp._u.ki.wScan   = sc
+    inp._u.ki.dwFlags = flags
+    inp._u.ki.time    = 0
+    inp._u.ki.dwExtraInfo = 0
+
+    return _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp)) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 
 
 def _game_is_foreground(exe_name: str) -> bool:
@@ -16,12 +165,10 @@ def _game_is_foreground(exe_name: str) -> bool:
     if not exe_name:
         return True  # no exe configured — don't block
     try:
-        import os
-        user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
-        hwnd = user32.GetForegroundWindow()
+        hwnd = _user32.GetForegroundWindow()
         pid = ctypes.c_ulong(0)
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         h = kernel32.OpenProcess(0x1000, False, pid.value)
         if not h:
             return True
@@ -44,13 +191,14 @@ class InputRecorder:
         self.recording = False
         self._start_time = None
         self._kb_listener = None
-        self._ms_listener = None
         # Optional callable: if set, events are only recorded when it returns True.
         # Called on the listener thread for every incoming event.
         self.filter_fn = None
         # Keys in this set are silently ignored (not recorded).  Add the
         # toggle-hotkey string here so it never appears in a recorded sequence.
         self.suppress_keys: set = set()
+        # Mouse inputs are intentionally not recorded — the bot uses keyboard
+        # only.  This prevents accidental mouse events in user-edited sequences.
 
     def start(self):
         self.events = []
@@ -61,21 +209,13 @@ class InputRecorder:
             on_press=self._on_key_press,
             on_release=self._on_key_release,
         )
-        self._ms_listener = mouse.Listener(
-            on_click=self._on_click,
-            on_move=self._on_move,
-        )
         self._kb_listener.start()
-        self._ms_listener.start()
 
     def stop(self):
         self.recording = False
         if self._kb_listener:
             self._kb_listener.stop()
             self._kb_listener = None
-        if self._ms_listener:
-            self._ms_listener.stop()
-            self._ms_listener = None
 
     def _timestamp(self):
         return round(time.time() - self._start_time, 4)
@@ -113,28 +253,6 @@ class InputRecorder:
             return
         self.events.append({"type": "key_release", "key": k, "time": self._timestamp()})
 
-    def _on_click(self, x, y, button, pressed):
-        if not self._allowed():
-            return
-        event_type = "mouse_press" if pressed else "mouse_release"
-        self.events.append({
-            "type": event_type,
-            "x": x,
-            "y": y,
-            "button": "left" if button == Button.left else "right",
-            "time": self._timestamp(),
-        })
-
-    def _on_move(self, x, y):
-        if not self._allowed():
-            return
-        # Only record moves every ~50ms to avoid flooding
-        if self.events and self.events[-1]["type"] == "mouse_move":
-            last = self.events[-1]
-            if self._timestamp() - last["time"] < 0.05:
-                return
-        self.events.append({"type": "mouse_move", "x": x, "y": y, "time": self._timestamp()})
-
     def save(self, path: str):
         with open(path, "w") as f:
             json.dump(self.events, f, indent=2)
@@ -145,15 +263,21 @@ class InputRecorder:
 
 
 class InputPlayer:
-    """Replays a recorded sequence of events."""
+    """Replays a recorded sequence of events using ctypes SendInput (keyboard)
+    and pynput (mouse).  Keyboard events use hardware scan codes so they reach
+    the game's raw-input handler regardless of which input API it uses."""
 
     def __init__(self):
-        self._kb = KeyController()
         self._ms = MouseController()
         self._stop_flag = False
         # Set this to the game exe filename (e.g. "nightreign.exe") to enable
         # focus-guard: inputs are skipped if the game is not the foreground window.
         self.game_exe: str = ""
+        # Optional DiagnosticLogger — set by app.py when a batch run starts.
+        # When set, every key press/release is logged with scan code + SendInput result.
+        self.diag = None
+        # Current iteration number for per-iteration bucketing in the diag log.
+        self._diag_iter: int = 0
 
     def stop(self):
         self._stop_flag = True
@@ -162,17 +286,29 @@ class InputPlayer:
         """Return True if the game window is currently in the foreground."""
         return _game_is_foreground(self.game_exe)
 
+    # ── low-level key helpers ──────────────────────────────────────────────── #
+
+    def _press(self, key_str: str):
+        ok = _send_key(key_str, key_up=False)
+        if self.diag is not None:
+            sc, ext = _sc_for_key(key_str)
+            self.diag.log_input(self._diag_iter, key_str, "press", sc, ok, ext)
+
+    def _release(self, key_str: str):
+        ok = _send_key(key_str, key_up=True)
+        if self.diag is not None:
+            sc, ext = _sc_for_key(key_str)
+            self.diag.log_input(self._diag_iter, key_str, "release", sc, ok, ext)
+
+    # ── public API ────────────────────────────────────────────────────────── #
+
     def tap(self, key: str, hold: float = 0.05):
         """Press and release a single key. Used for menu navigation spam."""
         if not self._game_focused():
             return
-        try:
-            k = self._parse_key(key)
-            self._kb.press(k)
-            time.sleep(hold)
-            self._kb.release(k)
-        except Exception:
-            pass
+        self._press(key)
+        time.sleep(hold)
+        self._release(key)
 
     def play_fast(self, events: list, hold: float = 0.05, gap: float = 0.0,
                   bypass_focus: bool = False):
@@ -192,13 +328,13 @@ class InputPlayer:
             etype = event["type"]
             if etype == "key_press":
                 try:
-                    self._kb.press(self._parse_key(event["key"]))
+                    self._press(event["key"])
                     time.sleep(hold)
                 except Exception:
                     pass
             elif etype == "key_release":
                 try:
-                    self._kb.release(self._parse_key(event["key"]))
+                    self._release(event["key"])
                     time.sleep(hold + gap)
                 except Exception:
                     pass
@@ -247,7 +383,7 @@ class InputPlayer:
 
             if etype == "key_press":
                 try:
-                    self._kb.press(self._parse_key(event["key"]))
+                    self._press(event["key"])
                     fired += 1
                     fired_keys.append(event["key"])
                 except Exception:
@@ -255,7 +391,7 @@ class InputPlayer:
 
             elif etype == "key_release":
                 try:
-                    self._kb.release(self._parse_key(event["key"]))
+                    self._release(event["key"])
                     if extra_delay > 0:
                         time.sleep(extra_delay)
                 except Exception:
@@ -332,14 +468,14 @@ class InputPlayer:
             etype = event["type"]
             if etype == "key_press":
                 try:
-                    self._kb.press(self._parse_key(event["key"]))
+                    self._press(event["key"])
                     fired += 1
                     fired_keys.append(event["key"])
                 except Exception:
                     pass
             elif etype == "key_release":
                 try:
-                    self._kb.release(self._parse_key(event["key"]))
+                    self._release(event["key"])
                     if extra_delay > 0:
                         time.sleep(extra_delay)
                 except Exception:
@@ -356,10 +492,3 @@ class InputPlayer:
                     time.sleep(extra_delay)
 
         return fired, fired_keys
-
-    def _parse_key(self, key_str: str):
-        """Convert stored key string back to a pynput Key or character."""
-        if key_str.startswith("Key."):
-            attr = key_str[4:]
-            return getattr(Key, attr, key_str)
-        return key_str

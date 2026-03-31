@@ -4,9 +4,11 @@ Automates relic farming in **Elden Ring Nightreign** using on-device OCR to anal
 
 Each iteration the bot:
 1. Restores a clean save file and relaunches the game
-2. Navigates to the Relic Rites merchant and buys a batch of relics
-3. Reviews each relic using local OCR and checks it against your criteria
-4. Saves the result — every iteration is kept for manual review; runs marked as HIT or GOD ROLL are renamed so they stand out
+2. Navigates to the Relic Rites merchant (Phase 0 — runs once per iteration)
+3. Buys a relic and scans the post-buy preview screen (Phase 1 — repeated per cycle)
+4. Navigates right through each relic in the Relic Rites panel and captures/analyzes each one (Phase 2)
+5. Resets back to the buy screen with a single F press (Phase 3), then repeats from Phase 1
+6. Saves every iteration — folders renamed to HIT or GOD ROLL when a relic matches your criteria
 
 Works fully offline. No internet connection required after the first launch.
 
@@ -68,14 +70,9 @@ To report a bug see **[BUG_REPORT.md](BUG_REPORT.md)**.
 
 ## Input Sequences & Compatibility
 
-The included input sequences assume:
-- You own the **Nightreign DLC**
-- **All shops in Roundtable Hold are unlocked**
+The included input sequences work regardless of DLC ownership, character, or shop unlock state. The new phase architecture navigates directly to the Relic Rites merchant and does not depend on your Roundtable Hold layout.
 
-**If you do not have the DLC or not all shops are unlocked**, the navigation in **Phase 0 (Setup)** and **Phase 2 (Relic Rites Nav)** will fail because your menu layout differs.
-Use the built-in recording tool to re-record those two phases for your setup — all other phases work universally and do not need re-recording.
-
-See [SETUP.md](SETUP.md) for step-by-step recording instructions.
+If a sequence ever fails on your machine (e.g. due to unusual timing), use the built-in recording tool to re-record it for your setup. See [SETUP.md](SETUP.md) for step-by-step recording instructions.
 
 ---
 
@@ -91,9 +88,11 @@ See [SETUP.md](SETUP.md) for step-by-step recording instructions.
 
 | Tab | Description |
 |-----|-------------|
-| **Build Exact Relic** | Specify up to 10 target passive combinations. Each target has up to 3 slots and a match threshold (e.g. ≥ 2 of 3 must be present). The bot stops when ANY target is satisfied. Incompatible passives are blocked automatically. |
+| **Build Exact Relic** | Specify up to 20 target passive combinations. Each target has up to 3 slots and a match threshold (e.g. ≥ 2 of 3 must be present). The bot stops when ANY target is satisfied. Incompatible passives are blocked automatically — selecting a passive from an exclusive compat group hides conflicting passives in the remaining slots. |
 | **Passive Pool** | Pick any number of passives; match when a relic has at least N of them simultaneously. Add **Pairings** to require two specific passives to appear together (counts as one match toward the threshold). |
 | **Combine** | Tick the checkbox at the bottom to match against either tab simultaneously. |
+
+The Relic Criteria section shows the **Scenic Flatstone** (Normal) or **Deep Scenic Flatstone** (Deep of Night) icon at the top, which updates automatically when you switch relic types. Passive lists are filtered to show only passives available in the currently selected mode.
 
 ---
 
@@ -102,8 +101,10 @@ See [SETUP.md](SETUP.md) for step-by-step recording instructions.
 | Key | Action |
 |-----|--------|
 | **F7** | Show / hide the overlay HUD (configurable in Batch Mode Settings) |
+| **F8** | Toggle overlay between the normal log view and the full Matched Relics panel (configurable) |
+| **F9** | Stop the bot after the current iteration completes (configurable) |
 
-Inputs are automatically blocked if the Nightreign window loses focus — alt-tabbing is safe.
+Both overlay hotkeys work even while the Nightreign window has focus. Inputs are automatically blocked if the Nightreign window loses focus — alt-tabbing is safe.
 
 ---
 
@@ -112,21 +113,25 @@ Inputs are automatically blocked if the Nightreign window loses focus — alt-ta
 ```
 batch_output/
 └── batch_run_2025-01-15_143022/
-    ├── run_log.txt         Full log of everything the bot printed, appended in real time
-    ├── live_log.txt        Per-relic analysis summary, appended in real time
-    ├── README.txt          Full breakdown of every iteration (hits marked with *)
-    ├── PRIORITY.txt        Quick list of saves worth reviewing first
+    ├── run_log.txt              Full log of everything the bot printed, appended in real time
+    ├── live_log.txt             Per-relic analysis summary, appended in real time
+    ├── matches_log.txt          All matched relics in one place
+    ├── README.txt               Full breakdown of every iteration (hits marked with *)
     ├── 001/
     │   ├── NR0000.sl2
     │   └── info.txt
-    ├── HIT 004/            Relic met your match threshold
+    ├── HIT 004/                 Relic met your match threshold
     │   ├── NR0000.sl2
     │   ├── info.txt
     │   └── relic_02_MATCH.jpg
-    └── GOD ROLL 007/       All passives matched
-        ├── NR0000.sl2
-        ├── info.txt
-        └── relic_05_MATCH.jpg
+    ├── GOD ROLL 007/            All passives matched
+    │   ├── NR0000.sl2
+    │   ├── info.txt
+    │   └── relic_05_MATCH.jpg
+    ├── Excluded Hits/           Relics that matched criteria but were blocked by the curse filter
+    │   ├── Excluded Hits Info.txt
+    │   └── relic_12_MATCH.jpg
+    └── Smart Analyze Hits/      Relics flagged by Smart Analyze across all iterations
 ```
 
 To use a result: copy the `NR0000.sl2` from that folder into your game save location.

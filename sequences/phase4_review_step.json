@@ -1,12 +1,1 @@
-[
-  {
-    "type": "key_press",
-    "key": "Key.right",
-    "time": 0.9348
-  },
-  {
-    "type": "key_release",
-    "key": "Key.right",
-    "time": 1.108
-  }
-]
+[]

@@ -1,0 +1,8 @@
+[
+  {"type": "key_press",   "key": "f",         "time": 0.5953},
+  {"type": "key_release", "key": "f",         "time": 0.6813},
+  {"type": "key_press",   "key": "Key.down",  "time": 0.9451},
+  {"type": "key_release", "key": "Key.down",  "time": 1.0599},
+  {"type": "key_press",   "key": "f",         "time": 1.2264},
+  {"type": "key_release", "key": "f",         "time": 1.3198}
+]

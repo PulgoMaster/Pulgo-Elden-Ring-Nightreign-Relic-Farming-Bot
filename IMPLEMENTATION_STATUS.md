@@ -1,5 +1,40 @@
 # Relic Bot — Implementation Status
-Last updated: 2026-03-27 | Current version: v1.5.1
+Last updated: 2026-03-30 | Current version: v1.6.0
+
+---
+
+## COMPLETED — v1.6.0 (2026-03-30, Session 2)
+
+### Bot Reliability
+- **Phase 1 settle redesign**: `_P1_BATCH_RETRIES = 1`, no pre-poll sleep, 3.0 s flat poll interval
+- **GPU worker cap**: max 4 workers with GPU ON, max 8 with CPU-only; `_on_gpu_toggle` clamps on switch
+- **Murk validation after ESC recovery**: validates murk is a clean multiple of relic cost; resets iteration if not; `_mval > 0` OCR-failure guard
+- **`_async_iter_abort_cleanup`**: corrects `_istate["total"]` on any early buy-loop exit so workers can finalize; fixes HIT folder rename + info.txt write failures from 200-iter test run
+- **Excluded Hits folder condition fix**: was capturing passive-excluded but not curse-blocked relics; fixed to `is_curse_blocked OR is_passive_excluded`
+
+### UI / UX
+- **Smart Throttle in all modes**: no longer gated to Async — visible and functional everywhere
+- **Curse Filter hidden in Normal mode**: shown/hidden by `_on_relic_type_change`; called on startup + profile load; default relic type changed to "normal"
+- **Scenic/Deep Scenic Flatstone icons**: two 128×128 circular PNGs in `ui/relic_icons/`; displayed across all Relic Criteria tabs via `RelicBuilderFrame`; swap on mode change
+- **Odds text selectable**: "Odds (per relic)" replaced `ttk.Label` with `tk.Text(state="disabled")` in both Exact Relic and Passive Pool tabs — text can be selected and copied
+- **Mousewheel on Curse Filter + Excluded Passives listboxes**: all four listboxes now scroll locally on hover
+
+### Relic Criteria
+- **Compat-group variant exclusion**: `_update_exclusions` now excludes tier variants of non-grouped passives via `_passive_variants()`; previously non-grouped passives had no exclusion effect on other slots
+
+---
+
+## COMPLETED — v1.6.0 (2026-03-30, Session 1)
+
+### Critical Bug Fixes
+- **Bot stall after Phase 0**: `_exclude_buy_phase` used before definition → `UnboundLocalError` killed bot thread silently in all modes; pre-initialized before retry loop
+- **`verify_shop_item` OCR hang**: was running EasyOCR on unscaled 869×936 px ROI (60–120 s); added 600 px max-dimension downscale; both call sites temporarily archived (`if False:`) pending proper testing
+- **Async grace period**: dynamic `grace = max(90, queue_size × 20)` scaling; fixes timeout on CPU-only laptop processing 112 relics
+
+### Backlog Mode
+- **Mid-cycle analysis bug fixed**: `capture_only` flag now respected in Phase 2 slot loop; returns image tuples not OCR dicts
+- **Re-processing bug fixed**: `backlog_meta_done.json` rename prevents re-scanning already-processed folders
+- **info.txt OCR crop fixed**: backlog tasks now pass `crop_left`/`crop_top` preview fractions instead of falling back to sell-screen crop
 
 ---
 
@@ -9,7 +44,7 @@ Last updated: 2026-03-27 | Current version: v1.5.1
 - Toggle UI: Batch Mode Settings row 5, col 2
 - Modules: `bot/smart_rules.py` (8 rules), `bot/game_knowledge.py` (2,400+ lines)
 - Async path (`_analyze_relic_task`): calls `evaluate_relic()` on non-matching relics
-- Sync path (`_run_iteration_phases`): same logic, fires in Phase 4 collection loop
+- Sync path (`_run_iteration_phases`): same logic, fires in Phase 2 scan loop (Phase 4 eliminated in v1.6.0)
 - On hit: saves screenshot to `smart_hits/` subfolder, appends to `smart_hits.log`, logs to overlay, increments live `_ov_smart_hits` counter
 - Profile save/load: `"smart_analyze"` key
 
@@ -74,17 +109,24 @@ Last updated: 2026-03-27 | Current version: v1.5.1
 
 ## STILL TO DO — Future Features
 
+### Pending (next up)
+- **Smart Analyze rule expansion** — same-class passive doubles, high-tier singles (Physical +4, Max HP, etc.), stat pairs for hybrid scaling (Strength+3 + Faith+3, etc.)
+- **Relic Advisor improvements** — scope TBD
+- **DiagnosticLogger toggle + debug menu** — pending decision: may keep in a separate debug branch or leave as-is in main build
+
 ### Medium Priority
 - Sound alert on GOD ROLL match
 - Discord / email notification on match
 - Per-character overlay stats
 - Color scheme / legibility improvements (green text flagged as hard to read)
+- **Compat-group filtering — Pair & Exact Relic cross-mode impossible** — detect when a pair spans deep-only and normal-only passives and show "Impossible — passives from different modes" (may already be fixed — needs a failing example to confirm)
 
 ### Low Priority / Future
 - Hotkeys tab: configurable start/stop/reset hotkeys (currently hardcoded)
-- Phase 3 debug mode: log tab brightness values, standalone tab detection test
 - Non-16:9 aspect ratio support (currently blocked + warned)
 - Faster OCR (Tesseract or tighter pre-crop to reduce EasyOCR input size)
+- **Collector Signboard farming mode** — dedicated bot mode for farming Collector Signboard relics. Requires its own navigation sequence and potentially different phase logic since the source and purchase flow differ from the standard Relic Rites bazaar. Signboard has different pool tables (see math doc Section 11B note — Signboard mechanics still partially unverified).
+- **1.02 relic farming mode + odds comparison** — support farming version 1.02 relics across all modes (Normal, Deep, Signboard). The Odds Viewer / Relic Builder should compare expected odds across all available sources and recommend which farming mode gives the best probability for the requested combo.
 
 ---
 

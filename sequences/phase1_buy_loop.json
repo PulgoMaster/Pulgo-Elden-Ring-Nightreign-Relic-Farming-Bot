@@ -1,52 +1,10 @@
 [
-  {
-    "type": "key_press",
-    "key": "f",
-    "time": 0.7351
-  },
-  {
-    "type": "key_release",
-    "key": "f",
-    "time": 0.8621
-  },
-  {
-    "type": "key_press",
-    "key": "Key.down",
-    "time": 1.239
-  },
-  {
-    "type": "key_release",
-    "key": "Key.down",
-    "time": 1.3689
-  },
-  {
-    "type": "key_press",
-    "key": "f",
-    "time": 1.6233
-  },
-  {
-    "type": "key_release",
-    "key": "f",
-    "time": 1.7983
-  },
-  {
-    "type": "key_press",
-    "key": "f",
-    "time": 2.2906
-  },
-  {
-    "type": "key_release",
-    "key": "f",
-    "time": 2.4471
-  },
-  {
-    "type": "key_press",
-    "key": "f",
-    "time": 2.8468
-  },
-  {
-    "type": "key_release",
-    "key": "f",
-    "time": 3.0017
-  }
+  {"type": "key_press",   "key": "f",         "time": 0.57},
+  {"type": "key_release", "key": "f",         "time": 0.6808},
+  {"type": "key_press",   "key": "Key.down",  "time": 0.8748},
+  {"type": "key_release", "key": "Key.down",  "time": 1.0054},
+  {"type": "key_press",   "key": "f",         "time": 1.184},
+  {"type": "key_release", "key": "f",         "time": 1.2902},
+  {"type": "key_press",   "key": "f",         "time": 1.6395},
+  {"type": "key_release", "key": "f",         "time": 1.77}
 ]

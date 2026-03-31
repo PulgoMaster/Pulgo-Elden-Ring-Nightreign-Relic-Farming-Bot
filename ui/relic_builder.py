@@ -15,14 +15,31 @@ import re
 import tkinter as tk
 from tkinter import ttk
 
+
+def _fmt_pct(pct: float) -> str:
+    """Format a percentage value (already ×100) with adaptive decimal places.
+    Shows at least 2 decimal places; extends until the first non-zero digit
+    appears, so very small odds like 0.0003% are not rounded away to 0.00%."""
+    decimals = 2
+    while decimals < 12 and round(pct, decimals) == 0.0:
+        decimals += 1
+    return f"{pct:.{decimals}f}"
+
 from ui import theme, relic_images
 from bot.passives import (
     ALL_PASSIVES_SORTED, CATEGORIES, UI_CATEGORIES,
-    COMPAT_GROUPS, get_compat_violations,
+    COMPAT_GROUPS, get_compat_violations, DEBUFFS,
 )
 from bot.probability_engine import (
-    prob_combo_on_relic,
+    prob_combo_on_relic, prob_any_combo_on_relic,
     prob_passive_on_relic, prob_at_least_k_of_pool,
+    compat_ok,
+    DEEP_POOL_PASSIVES, NORMAL_POOL_PASSIVES,
+)
+
+_DEBUFFS_SET: frozenset = frozenset(DEBUFFS)
+_CURSE_CATS: frozenset = frozenset(
+    {"Demerits (Attributes)", "Demerits (Damage Negation)", "Demerits (Action)"}
 )
 
 
@@ -83,6 +100,10 @@ class _SearchableListbox(ttk.Frame):
         self._lb.configure(yscrollcommand=sb.set)
         self._lb.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+
+        # Consume mousewheel events so they scroll this listbox, not the main canvas
+        self._lb.bind("<MouseWheel>",
+                      lambda e: (self._lb.yview_scroll(int(-1 * (e.delta / 120)), "units"), "break")[1])
 
         self._refresh(self._all)
 
@@ -161,7 +182,13 @@ class _SlotSelector(ttk.LabelFrame):
 
     def _on_cat_change(self, _event=None):
         cat = self._cat_var.get()
-        items = ALL_PASSIVES_SORTED if cat == "(all)" else sorted(UI_CATEGORIES.get(cat, []), key=str.casefold)
+        pool = getattr(self, "_mode_pool", None)
+        if cat == "(all)":
+            items = ([p for p in ALL_PASSIVES_SORTED if p in pool]
+                     if pool is not None else ALL_PASSIVES_SORTED)
+        else:
+            base = sorted(UI_CATEGORIES.get(cat, []), key=str.casefold)
+            items = [p for p in base if p in pool] if pool is not None else base
         self._lb.set_items(items)
         self._lb.clear_search()
 
@@ -186,6 +213,11 @@ class _SlotSelector(ttk.LabelFrame):
         """Programmatically set the slot value (None → '(any)')."""
         self._chosen.set(value if value is not None else self._ANY)
         self._lb.clear_search()
+
+    def set_mode_passives(self, relic_type: str):
+        """Replace the listbox item pool with passives available in the given mode."""
+        self._mode_pool = DEEP_POOL_PASSIVES if relic_type == "night" else NORMAL_POOL_PASSIVES
+        self._on_cat_change()
 
     def set_excluded(self, excluded: set):
         """Delegate exclusion update to the inner listbox."""
@@ -219,10 +251,12 @@ class _ExactRelicTab(ttk.Frame):
 
     # ── construction ─────────────────────────────────────────────────── #
 
-    def _load_blank_gem(self):
-        photo = relic_images.get_blank_gem()
-        self._blank_gem_lbl.configure(image=photo)
-        self._blank_gem_lbl.image = photo   # keep reference
+    def _set_odds_text(self, text: str) -> None:
+        """Update the read-only odds display."""
+        self._odds_txt.config(state="normal")
+        self._odds_txt.delete("1.0", "end")
+        self._odds_txt.insert("1.0", text)
+        self._odds_txt.config(state="disabled")
 
     @staticmethod
     def _new_target() -> dict:
@@ -231,11 +265,6 @@ class _ExactRelicTab(ttk.Frame):
     def _build(self):
         header = ttk.Frame(self)
         header.pack(fill="x", padx=8, pady=(6, 0))
-
-        # Blank relic gem — represents "any relic" / the slot you're crafting
-        self._blank_gem_lbl = tk.Label(header, bg=theme.SURFACE)
-        self._blank_gem_lbl.pack(side="left", padx=(0, 8))
-        self.after(0, self._load_blank_gem)
 
         ttk.Label(
             header,
@@ -264,6 +293,8 @@ class _ExactRelicTab(ttk.Frame):
         theme.style_listbox(self._target_lb)
         self._target_lb.pack(fill="both", expand=True, padx=4, pady=4)
         self._target_lb.bind("<<ListboxSelect>>", self._on_target_select)
+        self._target_lb.bind("<MouseWheel>",
+            lambda e: (self._target_lb.yview_scroll(int(-1*(e.delta/120)), "units"), "break")[1])
 
         btn_row = ttk.Frame(left)
         btn_row.pack(fill="x", padx=4, pady=(0, 4))
@@ -304,16 +335,21 @@ class _ExactRelicTab(ttk.Frame):
         odds_frame = ttk.LabelFrame(right, text="Odds  (per relic)")
         odds_frame.pack(fill="x", padx=6, pady=(2, 6))
 
-        self._odds_var = tk.StringVar(value="Select passives above to see odds.")
-        ttk.Label(
-            odds_frame, textvariable=self._odds_var,
-            foreground="#90c890", wraplength=620, justify="left",
-        ).pack(anchor="w", padx=6, pady=(4, 2))
+        from ui import theme as _theme
+        self._odds_txt = tk.Text(
+            odds_frame, height=5, wrap="word", state="disabled",
+            bg=_theme.INPUT_BG, fg="#90c890",
+            relief="flat", bd=0, highlightthickness=0,
+            font=("TkDefaultFont", 9),
+        )
+        self._odds_txt.pack(fill="x", padx=6, pady=(4, 2))
+        self._odds_txt.bind("<1>", lambda e: self._odds_txt.focus_set())
+        self._set_odds_text("Select passives above to see odds.")
         self._odds_disclaimer_var = tk.StringVar(
             value="Odds from AttachEffectTableParam. Per-relic rate accounts for size distribution and color filter.")
         ttk.Label(
             odds_frame, textvariable=self._odds_disclaimer_var,
-            foreground=theme.TEXT_MUTED, wraplength=620,
+            foreground=theme.TEXT_MUTED, wraplength=860,
         ).pack(anchor="w", padx=6, pady=(0, 4))
 
         # Populate initial state
@@ -421,6 +457,9 @@ class _ExactRelicTab(ttk.Frame):
         self._odds_disclaimer_var.set(
             f"Odds from AttachEffectTableParam ({pool_label} pools, {color_note}). "
             f"Per-relic rate accounts for size distribution and color filter.")
+        # Update slot listboxes to show only passives available in the current mode
+        for slot in self._slots:
+            slot.set_mode_passives(relic_type)
         self._update_odds()
 
     def _on_threshold_change(self):
@@ -430,8 +469,16 @@ class _ExactRelicTab(ttk.Frame):
     def _update_exclusions(self):
         """
         For each slot, compute the set of passives it must NOT show
-        (those sharing an exclusive compat group with any other slot's value)
         and push that set into the slot's listbox.
+
+        Two exclusion rules:
+          • Compat group  — if passive belongs to an exclusive compat group,
+            hide every other member of that group in all other slots.
+          • Variant family — if passive has no compat group (or belongs to
+            the "special" tier-variant families), hide all passives that share
+            the same base name (e.g. selecting "Stamina Recovery upon Landing
+            Attacks" hides the "+1" variant and vice-versa).  This prevents
+            duplicate-family passives from appearing on the same relic.
         """
         slot_vals = [s.get() for s in self._slots]
         for i, slot in enumerate(self._slots):
@@ -441,8 +488,12 @@ class _ExactRelicTab(ttk.Frame):
                     continue
                 gj = COMPAT_GROUPS.get(val)
                 if gj is None:
+                    # No exclusive compat group — still block tier variants of
+                    # this passive (same base name, e.g. base ↔ +1 ↔ +2 …).
+                    for p in _passive_variants(val):
+                        excluded.add(p)
                     continue
-                # Hide every passive that shares this group
+                # Hide every passive that shares this compat group
                 for passive, g in COMPAT_GROUPS.items():
                     if g == gj:
                         excluded.add(passive)
@@ -485,13 +536,13 @@ class _ExactRelicTab(ttk.Frame):
         filled = [(i, p) for i, p in enumerate(slots) if p]
 
         if not filled:
-            self._odds_var.set("Select passives above to see odds.")
+            self._set_odds_text("Select passives above to see odds.")
             self._propagate_p(None)
             return
 
         violations = get_compat_violations(slots)
         if violations:
-            self._odds_var.set("Cannot calculate — incompatible passives selected.")
+            self._set_odds_text("Cannot calculate — incompatible passives selected.")
             self._propagate_p(None)
             return
 
@@ -502,16 +553,15 @@ class _ExactRelicTab(ttk.Frame):
         # ── Per-passive odds (per-relic, color-filtered) ─────────────────────
         pool_name = "Deep of Night" if rtype == "night" else "Normal"
         for i, p in filled:
-            label = p[:42] + ("…" if len(p) > 42 else "")
             p_relic = prob_passive_on_relic(p, rtype, colors)
             if p_relic and p_relic > 0:
                 n_r = int(round(1.0 / p_relic))
                 pct = p_relic * 100
-                lines.append(f"  {label}  →  {pct:.2f}%  (~1 in {n_r:,} per relic)")
+                lines.append(f"  {p}  →  {_fmt_pct(pct)}%  (~1 in {n_r:,} per relic)")
             elif p_relic == 0.0:
-                lines.append(f"  {label}  →  Impossible — not available on {pool_name} Relics")
+                lines.append(f"  {p}  →  Impossible — not available on {pool_name} Relics")
             else:
-                lines.append(f"  {label}  →  not in {pool_name} pool")
+                lines.append(f"  {p}  →  not in {pool_name} pool")
 
         # ── This target probability (color-filtered, size-weighted) ─────────
         lines.append("")
@@ -523,7 +573,7 @@ class _ExactRelicTab(ttk.Frame):
             if p_this and p_this > 0:
                 n = int(round(1.0 / p_this))
                 pct = p_this * 100
-                lines.append(f"  This target (all {n_filled}): {pct:.2f}%  (~1 in {n:,} per relic)")
+                lines.append(f"  This target (all {n_filled}): {_fmt_pct(pct)}%  (~1 in {n:,} per relic)")
             elif p_this == 0.0:
                 lines.append(f"  Impossible Combo — can't be rolled on {pool_name} Relics")
             else:
@@ -536,11 +586,11 @@ class _ExactRelicTab(ttk.Frame):
             if p_thresh > 0:
                 n_thresh = int(round(1.0 / max(p_thresh, 1e-12)))
                 pct_thresh = p_thresh * 100
-                lines.append(f"  This target (≥{thresh} of {n_filled}): {pct_thresh:.2f}%  (~1 in {n_thresh:,} per relic)")
+                lines.append(f"  This target (≥{thresh} of {n_filled}): {_fmt_pct(pct_thresh)}%  (~1 in {n_thresh:,} per relic)")
             if p_all and p_all > 0:
                 n_all = int(round(1.0 / max(p_all, 1e-12)))
                 pct_all = p_all * 100
-                lines.append(f"  This target (all {n_filled}): {pct_all:.2f}%  (~1 in {n_all:,} per relic)")
+                lines.append(f"  This target (all {n_filled}): {_fmt_pct(pct_all)}%  (~1 in {n_all:,} per relic)")
 
         # ── All defined targets combined (any target matches) ────────────────
         self._save_current()
@@ -570,10 +620,10 @@ class _ExactRelicTab(ttk.Frame):
                 if p_combined > 0:
                     n_any = int(round(1.0 / max(p_combined, 1e-12)))
                     pct_any = p_combined * 100
-                    lines.append(f"  Odds of meeting any of {len(all_valid)} targets: {pct_any:.2f}%  (~1 in {n_any:,} per relic)")
+                    lines.append(f"  Odds of meeting any of {len(all_valid)} targets: {_fmt_pct(pct_any)}%  (~1 in {n_any:,} per relic)")
 
         self._propagate_p(p_combined if p_combined is not None else p_this)
-        self._odds_var.set("\n".join(lines))
+        self._set_odds_text("\n".join(lines))
 
     def _propagate_p(self, p: float | None) -> None:
         """Push the current per-relic probability up to RelicBuilderFrame."""
@@ -766,7 +816,12 @@ class _CreatePairingDialog(tk.Toplevel):
         # ── Left picker ──────────────────────────────────────────────── #
         left_frame = ttk.LabelFrame(cols, text="Left Passive")
         left_frame.grid(row=0, column=0, sticky="nsew")
-        self._left_lb = _SearchableListbox(left_frame, ALL_PASSIVES_SORTED, height=13)
+        _pair_mode_passives = (
+            sorted(DEEP_POOL_PASSIVES, key=str.casefold)
+            if getattr(parent, "_relic_type", "night") == "night"
+            else sorted(NORMAL_POOL_PASSIVES, key=str.casefold)
+        )
+        self._left_lb = _SearchableListbox(left_frame, _pair_mode_passives, height=13)
         self._left_lb.pack(fill="both", expand=True, padx=4, pady=(4, 2))
         ttk.Button(left_frame, text="✔ Select for Left",
                    command=self._select_left).pack(padx=4, pady=(0, 4))
@@ -778,7 +833,7 @@ class _CreatePairingDialog(tk.Toplevel):
         # ── Right picker ─────────────────────────────────────────────── #
         right_frame = ttk.LabelFrame(cols, text="Right Passive")
         right_frame.grid(row=0, column=2, sticky="nsew")
-        self._right_lb = _SearchableListbox(right_frame, ALL_PASSIVES_SORTED, height=13)
+        self._right_lb = _SearchableListbox(right_frame, _pair_mode_passives, height=13)
         self._right_lb.pack(fill="both", expand=True, padx=4, pady=(4, 2))
         ttk.Button(right_frame, text="✔ Select for Right",
                    command=self._select_right).pack(padx=4, pady=(0, 4))
@@ -869,6 +924,13 @@ class _PassivePoolTab(ttk.Frame):
         self._allowed_colors: list[str] = ["Red", "Blue", "Green", "Yellow"]
         self._build()
 
+    def _set_odds_text(self, text: str) -> None:
+        """Update the read-only odds display."""
+        self._odds_txt.config(state="normal")
+        self._odds_txt.delete("1.0", "end")
+        self._odds_txt.insert("1.0", text)
+        self._odds_txt.config(state="disabled")
+
     def _build(self):
         note = ttk.Label(
             self,
@@ -895,7 +957,9 @@ class _PassivePoolTab(ttk.Frame):
         cat_row.pack(fill="x", padx=4, pady=(4, 0))
         ttk.Label(cat_row, text="Category:").pack(side="left")
         self._cat_var = tk.StringVar(value="(all)")
-        cats = ["(all)"] + list(CATEGORIES.keys())
+        # Exclude Demerit (curse) categories — curses are not selectable as passives
+        _non_curse_cats = [c for c in CATEGORIES.keys() if c not in _CURSE_CATS]
+        cats = ["(all)"] + _non_curse_cats
         cat_cb = ttk.Combobox(cat_row, textvariable=self._cat_var, values=cats,
                                state="readonly", width=34)
         cat_cb.pack(side="left", padx=4)
@@ -930,6 +994,8 @@ class _PassivePoolTab(ttk.Frame):
         self._sel_lb.configure(yscrollcommand=sb_r.set)
         self._sel_lb.pack(side="left", fill="both", expand=True)
         sb_r.pack(side="right", fill="y")
+        self._sel_lb.bind("<MouseWheel>",
+            lambda e: (self._sel_lb.yview_scroll(int(-1*(e.delta/120)), "units"), "break")[1])
 
         # Pairings — independent of My Pool; each pair counts as 1 match when both present
         pair_frame = ttk.LabelFrame(right, text="Pairings  (both must be present → counts as 1 match)")
@@ -948,6 +1014,8 @@ class _PassivePoolTab(ttk.Frame):
         self._pair_lb.configure(yscrollcommand=sb_p.set)
         self._pair_lb.pack(side="left", fill="both", expand=True)
         sb_p.pack(side="right", fill="y")
+        self._pair_lb.bind("<MouseWheel>",
+            lambda e: (self._pair_lb.yview_scroll(int(-1*(e.delta/120)), "units"), "break")[1])
 
         pair_btns = ttk.Frame(pair_frame)
         pair_btns.pack(fill="x", padx=4, pady=(0, 4))
@@ -969,23 +1037,36 @@ class _PassivePoolTab(ttk.Frame):
         odds_frame = ttk.LabelFrame(self, text="Odds  (per relic)")
         odds_frame.pack(fill="x", padx=8, pady=(0, 6))
 
-        self._odds_var = tk.StringVar(value="Add passives to your pool to see odds.")
-        ttk.Label(
-            odds_frame, textvariable=self._odds_var,
-            foreground="#90c890", wraplength=680, justify="left",
-        ).pack(anchor="w", padx=6, pady=(4, 2))
+        from ui import theme as _theme
+        self._odds_txt = tk.Text(
+            odds_frame, height=5, wrap="word", state="disabled",
+            bg=_theme.INPUT_BG, fg="#90c890",
+            relief="flat", bd=0, highlightthickness=0,
+            font=("TkDefaultFont", 9),
+        )
+        self._odds_txt.pack(fill="x", padx=6, pady=(4, 2))
+        self._odds_txt.bind("<1>", lambda e: self._odds_txt.focus_set())
+        self._set_odds_text("Add passives to your pool to see odds.")
         self._odds_disclaimer_var = tk.StringVar(
             value="Odds from AttachEffectTableParam. Per-relic rate accounts for size distribution and color filter.")
         ttk.Label(
             odds_frame, textvariable=self._odds_disclaimer_var,
-            foreground=theme.TEXT_MUTED, wraplength=680,
+            foreground=theme.TEXT_MUTED, wraplength=860,
         ).pack(anchor="w", padx=6, pady=(0, 4))
 
     # ── category filter ─────────────────────────────────────────────────── #
 
     def _on_cat_change(self, _event=None):
         cat = self._cat_var.get()
-        items = ALL_PASSIVES_SORTED if cat == "(all)" else sorted(CATEGORIES.get(cat, []), key=str.casefold)
+        pool = NORMAL_POOL_PASSIVES if self._relic_type != "night" else DEEP_POOL_PASSIVES
+        if cat == "(all)":
+            items = [p for p in ALL_PASSIVES_SORTED if p in pool]
+        else:
+            items = sorted(
+                [p for p in CATEGORIES.get(cat, [])
+                 if p not in _DEBUFFS_SET and p in pool],
+                key=str.casefold,
+            )
         self._left_lb._all = items
         self._left_lb._refresh(items)
         self._left_lb.clear_search()
@@ -1000,6 +1081,8 @@ class _PassivePoolTab(ttk.Frame):
         self._odds_disclaimer_var.set(
             f"Odds from AttachEffectTableParam ({pool_label} pools, {color_note}). "
             f"Per-relic rate accounts for size distribution and color filter.")
+        # Refresh listbox to show only passives available in the current mode
+        self._on_cat_change()
         self._update_odds()
 
     def _on_threshold_change(self):
@@ -1013,7 +1096,7 @@ class _PassivePoolTab(ttk.Frame):
         thresh = self._threshold.get()
 
         if n_pool == 0:
-            self._odds_var.set("Add passives to your pool to see odds.")
+            self._set_odds_text("Add passives to your pool to see odds.")
             self._propagate_p(None)
             return
 
@@ -1024,36 +1107,46 @@ class _PassivePoolTab(ttk.Frame):
 
         # ── Single-entry odds ────────────────────────────────────────────────
         for entry in self._entries:
-            rep_passive = entry["accepted"][0]
+            accepted = entry["accepted"]
             label = _entry_label(entry)
-            short = label[:40] + ("…" if len(label) > 40 else "")
-            p_relic = prob_passive_on_relic(rep_passive, rtype, colors)
+            # P(any of the accepted variants appears) — use complement product
+            # so multi-variant entries (e.g. Physical +3 OR +4) are handled correctly.
+            p_relic = prob_any_combo_on_relic([[p] for p in accepted], rtype, colors)
             if p_relic and p_relic > 0:
                 n_r = int(round(1.0 / p_relic))
                 pct = p_relic * 100
-                lines.append(f"  {short}  →  {pct:.2f}%  (~1 in {n_r:,} per relic)")
+                lines.append(f"  {label}  →  {_fmt_pct(pct)}%  (~1 in {n_r:,} per relic)")
                 per_relic_probs.append(p_relic)
             elif p_relic == 0.0:
-                lines.append(f"  {short}  →  Impossible Combo, can't be rolled on {pool_name} Relics")
+                lines.append(f"  {label}  →  Impossible Combo — passives are from the same exclusive group")
             else:
-                lines.append(f"  {short}  →  not in {pool_name} pool")
+                lines.append(f"  {label}  →  not in {pool_name} pool")
 
         # ── Pairing odds ─────────────────────────────────────────────────────
         for pair in self._pairings:
-            p1 = pair["left"][0]
-            p2 = pair["right"][0]
             ll = _entry_label({"accepted": pair["left"]})
             rl = _entry_label({"accepted": pair["right"]})
-            pair_p = prob_combo_on_relic([p1, p2], rtype, colors)
-            if pair_p and pair_p > 0:
+            # Sum over all compat-valid (left, right) combinations.
+            # When left/right variants are mutually exclusive (same compat group),
+            # the sum is the exact P(any_left AND any_right).
+            pair_p = 0.0
+            any_compat = False
+            for lp in pair["left"]:
+                for rp in pair["right"]:
+                    if compat_ok([lp, rp]):
+                        any_compat = True
+                        p_lr = prob_combo_on_relic([lp, rp], rtype, colors)
+                        if p_lr:
+                            pair_p += p_lr
+            if pair_p > 0:
                 n = int(round(1.0 / pair_p))
                 pct = pair_p * 100
-                lines.append(f"  PAIR {ll[:22]}+{rl[:22]}  →  {pct:.2f}%  (~1 in {n:,} per relic)")
+                lines.append(f"  PAIR {ll} + {rl}  →  {_fmt_pct(pct)}%  (~1 in {n:,} per relic)")
                 per_relic_probs.append(pair_p)
-            elif pair_p == 0.0:
-                lines.append(f"  PAIR {ll[:22]}+{rl[:22]}  →  Impossible Combo, can't be rolled on {pool_name} Relics")
+            elif not any_compat:
+                lines.append(f"  PAIR {ll} + {rl}  →  Impossible Combo — passives are from the same exclusive group")
             else:
-                lines.append(f"  PAIR {ll[:22]}+{rl[:22]}  →  not available in {pool_name} pool")
+                lines.append(f"  PAIR {ll} + {rl}  →  not available in {pool_name} pool")
 
         # ── Combined P(≥ thresh of pool) ─────────────────────────────────────
         p_combined: float | None = None
@@ -1064,12 +1157,12 @@ class _PassivePoolTab(ttk.Frame):
                 pct_combined = p_combined * 100
                 lines.append(
                     f"\n  Odds of finding a relic that fulfills at least {thresh} of the expected criteria:"
-                    f"  {pct_combined:.2f}%  (~1 in {n_combined:,} per relic)")
+                    f"  {_fmt_pct(pct_combined)}%  (~1 in {n_combined:,} per relic)")
             elif p_combined == 0.0:
                 lines.append(f"\n  Odds of finding a relic that fulfills at least {thresh} of the expected criteria: Impossible")
 
         self._propagate_p(p_combined)
-        self._odds_var.set("\n".join(lines))
+        self._set_odds_text("\n".join(lines))
 
     def _propagate_p(self, p: float | None) -> None:
         """Push the current per-relic probability up to RelicBuilderFrame."""
@@ -1461,10 +1554,18 @@ class RelicBuilderFrame(ttk.LabelFrame):
         super().__init__(parent, text="Relic Criteria", **kwargs)
         self._p_per_relic: float | None = None
         self._on_odds_changed = None  # optional callback(float | None)
+        self._relic_type: str = "night"
         self._build()
 
     def _build(self):
-        # ── Notebook (2 modes) ───────────────────────────────────────── #
+        # ── Flatstone icon header (swaps with relic type) ────────────── #
+        _icon_row = ttk.Frame(self)
+        _icon_row.pack(fill="x", padx=8, pady=(6, 0))
+        self._flatstone_lbl = tk.Label(_icon_row, bg=theme.SURFACE)
+        self._flatstone_lbl.pack(side="left")
+        self.after(0, self._refresh_flatstone_icon)
+
+        # ── Notebook (3 tabs) ────────────────────────────────────────── #
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill="both", expand=True, padx=8, pady=6)
 
@@ -1492,13 +1593,24 @@ class RelicBuilderFrame(ttk.LabelFrame):
 
     # ── Public API ──────────────────────────────────────────────────── #
 
+    def _refresh_flatstone_icon(self):
+        """Load and display the mode-appropriate flatstone icon."""
+        if not hasattr(self, "_flatstone_lbl"):
+            return
+        don   = self._relic_type == "night"
+        photo = relic_images.get_flatstone(don)
+        self._flatstone_lbl.configure(image=photo)
+        self._flatstone_lbl.image = photo   # keep reference
+
     def set_relic_context(self, relic_type: str, allowed_colors: list[str]) -> None:
         """
         Propagate relic type and color selection to both builder tabs.
         Call from app.py whenever relic type or color changes.
         """
+        self._relic_type = relic_type
         self._exact.set_relic_context(relic_type, allowed_colors)
         self._pool.set_relic_context(relic_type, allowed_colors)
+        self._refresh_flatstone_icon()
 
     def _set_p_per_relic(self, p: float | None) -> None:
         """Called by child tabs when they recompute per-relic probability."""

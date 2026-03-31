@@ -14,7 +14,7 @@ Check the window title or the release you downloaded. Example: `v1.3.0`
 
 ### 2. What happened
 Describe what the bot did wrong. Be specific:
-- Which phase did it fail on? (Phase 0 Setup / Phase 1 Buy / Phase 2 Nav / Phase 3 Tab / Phase 4 Review)
+- Which phase did it fail on? (Phase 0 Setup / Phase 1 Buy+Preview / Phase 2 Scan / Phase 3 Reset)
 - Did the bot log any error messages? Copy the relevant lines from the log panel.
 - Did the bot stop, loop, or do something unexpected?
 
@@ -27,9 +27,12 @@ List the steps that cause the issue to happen. If it happens consistently, say s
 ### 5. Your setup
 - **Relic type:** Normal or Deep of Night
 - **Async Analysis:** enabled or disabled
-- **Number of workers** (if Brute Force Analysis is on)
+- **Backlog Mode:** enabled or disabled
+- **GPU Acceleration:** enabled or disabled
+- **Smart Throttle:** enabled or disabled
+- **Number of workers** (if Brute Force or Async Analysis is on)
 - **Low Performance Mode:** enabled or disabled
-- **PC specs (optional but helpful):** CPU, RAM, SSD or HDD — relevant if timing-related
+- **PC specs (optional but helpful):** CPU, RAM, GPU, SSD or HDD — relevant if timing-related
 
 ### 6. Screenshot or log (if possible)
 - A screenshot of the bot UI showing the error or the unexpected state
@@ -40,7 +43,7 @@ List the steps that cause the issue to happen. If it happens consistently, say s
 ## Tips Before Reporting
 
 - **Timing issues:** If the bot consistently ends up on the wrong screen or misfires inputs, try enabling **Low Performance Mode** in Batch Mode Settings before reporting. This widens input gaps across all phases and resolves most timing-related failures.
-- **Sequence issues:** If the bot navigates incorrectly, check that your Phase 0 and Phase 2 sequences match your in-game shop layout. If shops are in different positions (DLC not owned, different unlock state), re-recording those phases may fix the issue without needing a bug report.
+- **Sequence issues:** If the bot navigates incorrectly, try re-recording the affected phase using the built-in recording tool. The sequences are not dependent on DLC ownership or shop unlock state, so timing is the most likely culprit — enable Low Performance Mode first before re-recording.
 - **OCR failures:** If relics are not being read correctly, make sure the game is running in **Borderless Windowed** mode — fullscreen and standard windowed both shift the capture area.
 
 ---

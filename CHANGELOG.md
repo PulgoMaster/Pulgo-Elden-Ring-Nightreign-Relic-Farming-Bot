@@ -4,6 +4,229 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.6.0] — 2026-03-30 — SESSION 2 FIXES + RELIC CRITERIA POLISH
+
+### 2026-03-30 Session 2 Changes
+
+#### Bot Reliability — Phase 1 Settle Redesign
+- `_P1_BATCH_RETRIES` reduced from 2 to 1 — one retry is sufficient; extra retries added latency without benefit.
+- Pre-poll sleep before the settle loop removed — the loop itself provides the delay via its 3.0 s poll interval.
+- Settle poll interval changed from variable to a flat 3.0 s per attempt (up to 30 s total).
+
+#### Bot Reliability — GPU Worker Cap
+- When GPU Acceleration is ON, parallel worker count is capped at 4 (EasyOCR serialises on GPU above this, causing severe throughput loss).
+- When GPU is OFF (CPU mode), cap remains at 8.
+- Recommendations panel and spinbox tooltip updated to document the GPU/CPU distinction.
+- `_on_gpu_toggle` now clamps the current worker count to the new cap on toggle.
+
+#### Bot Reliability — Murk Validation After ESC Recovery
+- After a failed Phase 1 settle triggers ESC + Phase 0 recovery, the bot re-reads the murk total and validates it is a clean multiple of the relic cost (600 or 1800).
+- If murk is not a multiple, the iteration is reset immediately — guards against cases where the ESC recovery landed on the wrong screen and the murk read is garbage.
+- Guarded by `_mval > 0` to skip the check if OCR fails to read murk at all.
+
+#### Bot Reliability — Async Iteration Abort Cleanup
+- New `_async_iter_abort_cleanup(iteration, p2_submitted)` method: corrects `_istate["total"]` to `_p2_submitted` on any early exit from the buy loop, ensuring workers can still trigger `_finalize_async_iter_state`.
+- Called at three early-return points: top-of-loop bot stop, Phase 1 all-retries-exhausted abort, Phase 3 bot stop.
+- **Fixes HIT folder rename bug** from the 200-iter test run (iters 114, 177): `_finalize_async_iter_state` was never called on early exit, so neither `info.txt` nor the folder rename fired.
+
+#### Bot Reliability — Excluded Hits Folder Condition Fix
+- `_excl_match_results` filter was using `not self._is_curse_blocked(...)` — this captured passives-excluded relics but NOT curse-blocked ones.
+- Fixed to `self._is_curse_blocked(...) or self._is_passive_excluded(...)` in both sync and async finalization paths.
+
+#### UI — Smart Throttle Available in All Modes
+- Smart Throttle checkbox is no longer gated to Async mode — it is now visible and functional in Brute Force and all other modes.
+- Recommendations panel and `_apply_recommended_settings` also updated to apply Smart Throttle regardless of async state.
+
+#### UI — Curse Filter Visibility
+- Curse Filter section is now hidden when relic type is set to Normal (curses only appear on Deep of Night relics).
+- Automatically shown/hidden on mode switch via `_on_relic_type_change`.
+- Called on profile load and app startup so initial state is always correct.
+- Default relic type changed from "night" to "normal".
+
+#### Relic Criteria — Compat-Group Variant Exclusion (Exact Relic tab)
+- `_update_exclusions` in `relic_builder.py` extended with a second exclusion path for passives not in any exclusive compat group.
+- Previously: non-grouped passives were silently skipped — selecting "Stamina Recovery upon Landing Attacks" had no effect on other slots.
+- Now: uses `_passive_variants(val)` to exclude all tier variants sharing the same base name (e.g. base ↔ +1 ↔ +2), preventing duplicate-family passives on the same relic.
+- Per-mode filtering is handled by the existing `set_mode_passives()` pool filter — no separate per-mode compat logic needed.
+
+#### Relic Criteria — Scenic Flatstone Icons
+- Scenic Flatstone (Normal) and Deep Scenic Flatstone (Deep of Night) PNG icons added to `ui/relic_icons/` (128×128 circular crop, centered on the stone).
+- `relic_images.get_flatstone(don)` added — loads and caches the mode-appropriate icon at 64 px.
+- Icon displayed in `RelicBuilderFrame` above the notebook tab bar — visible across all three tabs (Build Exact Relic, Passive Pool, Build Advisor).
+- Swaps automatically when relic type is toggled between Normal and Deep of Night.
+- Replaced the procedural blank gem that was previously only shown in the Build Exact Relic header.
+
+#### UI — Odds Text Now Selectable
+- "Odds (per relic)" display in both the Build Exact Relic and Passive Pool tabs replaced `ttk.Label` with `tk.Text(state="disabled")`.
+- Text is now selectable and copyable (click to focus, click-drag or Ctrl+A / Ctrl+C) while remaining non-editable.
+
+#### UI — Mousewheel on Curse Filter and Excluded Passives Listboxes
+- `_curse_src_lb`, `_blocked_curses_lb`, `_excl_src_lb`, and `_excluded_lb` now bind `<MouseWheel>` and return `"break"` so scrolling over them scrolls the listbox instead of the main window.
+
+---
+
+### 2026-03-30 Changes
+
+#### Backlog Mode — Mid-Cycle Analysis Bug Fixed
+- **Root cause**: `capture_only=True` was never checked inside the Phase 2 slot loop. Phase 2 ran full inline analysis even in backlog mode, returned dicts instead of image tuples, and the batch loop silently discarded them — no screenshots were ever saved to the backlog folder.
+- **Fix**: Phase 2 now detects `capture_only and not _p2_async` and short-circuits per slot: appends `(step_i, img, "")` to `_bl_captures` and continues without running OCR. Returns `_bl_captures` at the end of `_run_iteration_phases` instead of relic dicts.
+- **Note**: Brute-force mode (no backlog, no async) is unaffected — the new path only activates when `capture_only=True`.
+
+#### Backlog Mode — Re-processing Bug Fixed
+- **Root cause**: `_process_backlog_run` scanned all `iter*/backlog/` directories every time it was called. In Intermittent Backlog mode, every drain re-processed all previously processed folders.
+- **Fix**: After successfully processing a backlog folder, `backlog_meta.json` is renamed to `backlog_meta_done.json`. On subsequent drains, folders containing `backlog_meta_done.json` are skipped immediately.
+
+#### Exclude Analysis While Operations Are Happening — Full Hard Gate
+- Redesigned from a throttle tweak into a true hard gate. When enabled (requires Async mode), worker threads are completely stopped for the entire period from the start of Phase -0.5 (game close triggered) through to Phase -0.5 concluding its inputs. Workers are free to run from `_close_game()` firing through to the end of Phase -0.5 game-load inputs.
+- `_excl_ops_mode` flag managed entirely at the batch loop level — Phase 0/1/2/3 throttle releases are suppressed when the mode is active.
+- Checkbox label renamed from "Exclude Buy Phase" to "⏸ Exclude Analysis While Operations Are Happening" for clarity.
+
+#### Overlay — Mode Tag
+- Overlay header now shows the active run configuration as a compact tag (e.g. `Async · Excl.Ops · SmartAnalyze`, `Backlog · Intermittent/5`, `Brute Force`). Updates at the start of each run.
+
+#### Diagnostics — Terminology & Settings Update (`bot/diagnostic.py`)
+- Phase labels corrected: `Phase 2 (relic nav)` → `Phase 2 (scan)`, `Phase 4 (sell)` → `Phase 3 (reset)`.
+- Log headers: `=== ITERATION {n} START/END` → `=== BATCH {n} START/END`; `OCR_DUMP iter=` → `OCR_DUMP batch=`.
+- Session summary line: `Iterations :` → `Batches    :`.
+- `log_settings()` now logs 6 additional settings: Smart Throttle, Excl. Analysis (Ops), Smart Analyze, Backlog Mode, Intermittent Backlog, Low Perf Mode.
+
+#### Export Diagnostics — Expanded Settings
+- Export now includes 14 settings (was 4): added Smart Analyze, Smart Throttle, Excl. Analysis (Ops), Backlog Mode, Intermittent Backlog, Perf gap multiplier, and Phase 0–3 configured-flag presence.
+
+#### Update.ps1 — GPU Preservation Fix
+- GPU torch detection now checks for **both** `cudart64_12.dll` and `torch_cuda.dll` (previously only checked one). Either DLL present triggers GPU-preserve mode.
+- `gpu_upgrade_ready` and `gpu_upgrade.log` files are now protected from deletion during update.
+- Post-install verification: checks for RelicBot.exe, both GPU DLLs (if GPU was detected), and profiles folder. Prints a red warning block if CUDA DLLs are missing after update.
+- Verbose output at every step — mode used, file counts, protected items.
+
+---
+
+### New Phase Architecture — Buy-Phase Scanning
+
+Completely replaces the old Phase 2/3/4 relic review loop with a faster, more reliable scanning approach.
+
+**Old flow**: Buy batch → navigate sell screen → RIGHT × N through relics → scan each → reset cursor
+**New flow**: Buy batch → scan post-buy preview screen → RIGHT × N through preview → single F back to shop
+
+- **Phase 0** (navigate to shop) runs once per run; **Phase 1** (buy + preview) → **Phase 2** (scan relics) → **Phase 3** (reset to shop) repeat per batch. Phase 4 is eliminated entirely.
+- **Phase 1** always plays the safe alt sequence (F → DOWN → F) with a settle poll of up to 25 attempts (10 s max). Removed fast/safe path distinction for reliability.
+- **Phase 2 RIGHT press** replaced `player.play(phase_events[2])` (had 0.914 s baked-in recording gap) with `player.tap("Key.right", hold=0.05)` + a 0.15–0.25 s settle — approximately **6× faster** per relic.
+- **Phase 3 F press** replaced `player.play(phase_events[3])` (1.0 s gap) with `player.tap("f", hold=0.05)` — saves ~1 s per batch.
+- **Settle check** after Phase 1: polls `analyze()` on preview crop until a relic with passives is confirmed; reuses the confirming capture as slot 0 (no duplicate screenshot). Rejects Scenic/Deep Scenic Flatstone false positives by requiring at least one PASSIVE token or non-empty `passives` list.
+- **No-passive guard**: if slot 0 has no passives, calls `verify_shop_item`; retries Phase 1 in-place (up to `_MAX_P2_SETTLE_SKIPS = 4`) then falls through to ESC + Phase 0 recovery.
+- **Per-cycle game focus**: window focus fires before each F burst (previously only once at run start) — eliminates missed inputs from focus loss between cycles.
+- **ESC recovery**: all failure paths run `_esc_to_game_screen` before returning so Phase 0 always starts from a clean game world.
+- **Preview OCR crop**: fraction-based region (`left=0.28`, `top=0.42` of frame) derived from 2560×1440; adapts to any 16:9 resolution. Captures relic name, passives, and curse slots while excluding the shop panel.
+- **`analyze()` new params**: `crop_left`, `crop_top` for region cropping; `relic_type="night"` prepends "Deep " to relic name (OCR drops it due to low confidence on that token).
+- **OCR downscale**: crop capped at 1000 px wide before EasyOCR; ~2–3× faster on CPU-only machines.
+- **`check_text_visible()` downscale** + 50 px minimum height guard — fixes silent failure on high-resolution screens where small `top_fraction` values produced images too short for OCR.
+- **Terminology rename**: "Batch" (one outer loop) → "Iteration"; inner buy/scan/reset cycles → "Cycle N". Updated in status bar, log lines, overlay stats, overlay stop dialog, INI section headers.
+
+**Sequence files** (in `sequences/`):
+- `phase1_buy_alt.json` — F → DOWN → F (safe buy sequence)
+- `phase2_relic_rites_nav.json` — single RIGHT press
+- `phase3_navigate_to_sell.json` — single F press
+- `phase4_review_step.json` — empty (`[]`), Phase 4 never runs
+
+---
+
+### Relic Criteria Tab — Passive Filtering & Odds Fixes
+
+#### Mode-based passive filtering
+- **Deep of Night mode** now shows only passives available in the deep pool (TABLE_2000000 / TABLE_2100000). **Normal mode** shows only passives from the normal pool (TABLE_100 / TABLE_200 / TABLE_300). Passives that can never appear in the selected mode are hidden from all listboxes — Exact Relic slots, Pool tab, and Pairing dialog.
+- New `DEEP_POOL_PASSIVES` and `NORMAL_POOL_PASSIVES` frozensets in `probability_engine.py`, derived at module load from actual pool weight tables (326 deep, 290 normal passives).
+- Mode propagates automatically: the relic type selected in the "Choose Relic Type" tab filters all subsequent Relic Criteria tabs — no redundant mode prompt.
+
+#### Curse passives removed from selectable lists
+- Curse/demerit categories (`Demerits (Attributes)`, `Demerits (Damage Negation)`, `Demerits (Action)`) are no longer shown in the category dropdown or passive listboxes anywhere in the Relic Criteria tab. Curses cannot be added as passive targets.
+
+#### "Impossible Combo" false positive fix
+- `prob_combo_on_relic` was returning `0.0` for passives not in the deep pool, causing the odds display to show "Impossible Combo" for valid deep relics whose specific passive simply isn't in the deep pool. Fixed: returns `None` ("unknown/not applicable") instead of `0.0` for pool-miss cases; compat violations still return `0.0` (truly impossible).
+
+#### Pair odds now account for all accepted variants
+- Pool tab pairing odds were using only the first variant (`pair["left"][0]`, `pair["right"][0]`). When a passive has multiple accepted variants (e.g. "Physical Attack Up +3" OR "Physical Attack Up +4"), only one variant's probability was reflected. Fixed: sums `prob_combo_on_relic(l, r)` over all compat-valid (left × right) combinations — exact because variants in the same compat group are mutually exclusive.
+
+#### Single-entry odds now account for all accepted variants
+- Same fix for single pool entries: uses `prob_any_combo_on_relic([[p] for p in accepted], ...)` to compute P(any accepted variant appears), instead of only using `accepted[0]`.
+
+#### Full passive names in odds panels
+- Passive names in odds readouts are no longer truncated (`[:40]`, `[:42]`, `[:22]` cuts removed). `wraplength` on both exact and pool odds labels increased to 860 px so long names wrap instead of being cut off.
+
+#### Mousewheel scrolling in passive listboxes
+- Scrolling with the mouse wheel while hovering over passive listboxes (All Passives picker, My Pool, Pairings, Target list) now scrolls the listbox itself instead of the main window. Binds `<MouseWheel>` on each `tk.Listbox` and returns `"break"` to stop event propagation.
+
+---
+
+### Overlay Settings Reorganisation
+
+- **Toggle Hotkey** and **Matches Hotkey** moved from Batch Mode Settings row 3 into the **Overlay Elements** LabelFrame. These settings are logically tied to the overlay, so they now live alongside the other overlay element toggles.
+- Both hotkey controls are **disabled** when the Overlay is toggled off — matching the behaviour of other overlay sub-settings. Neither hotkey does anything at runtime when the overlay is disabled.
+- Overlay Elements LabelFrame widened (`columnspan 7 → 8`) to accommodate both new rows neatly.
+
+---
+
+### HIT Info Files — Rarity Display
+
+- Hit info files and README files now include a rarity line in the HITS FOUND block: `Rarity: ~1 in X relics (Y.YY%)`.
+- Computed from the probability engine's per-relic combined passive probability.
+
+---
+
+### Profile — Auto-load Last Used
+
+- On startup, RelicBot automatically loads the last profile that was saved or loaded. No prompt — runs silently and sets the profile combobox to show the loaded name.
+- Implementation: `.last_profile` file in the profiles folder stores the profile name as plain text. Written whenever a profile is saved (`_write_profile`) or loaded (`_load_profile`). Read at startup in `_auto_load_last_profile()`.
+
+---
+
+### GPU Acceleration Improvements
+
+- **4-phase install UI**: Phase 1 (pip dry-run to resolve wheel URL, 30–90 s) → Phase 2 (urllib live download with MB/s + ETA) → Phase 3 (pip local install) → Phase 4 (strip non-essential folders). Progress shown live in the install dialog.
+- **Download resume + auto-retry**: Phase 2 retries up to 3× on connection errors. Sends `Range: bytes=X-` to resume a partial download. Between retries: "Connection interrupted — Resuming automatically in 3 s…". After 3 failures: "Unstable Connection — reconnect and try again."
+- **Connection error classification**: `ssl.SSLError`, `urllib.error.URLError`, `ConnectionResetError` and similar show a friendly message instead of a raw traceback.
+- **Staging approach**: GPU torch installs to `gpu_torch_staging/`; a `gpu_upgrade_ready` flag is written; `_apply_gpu_upgrade()` in `main.py` swaps the staged folder into `_internal/` at next startup before any torch DLLs load. Eliminates the `PermissionError` on `c10.dll` that occurred when trying to overwrite a loaded DLL.
+- **`_apply_gpu_upgrade()` retry + log**: 3-attempt `shutil.rmtree` with 1.5 s waits between tries (Windows Defender may briefly lock DLLs). Writes `gpu_upgrade.log` next to the EXE on every startup.
+- **No DLL stripping**: `_STRIP_DLLS` removed entirely. Phase 4 now only removes `torch/test/` and `torch/distributed/` (Python folder trees with no DLL dependencies). Never strip files from `torch/lib/` — Windows resolves the full static import chain at load time and any missing DLL causes WinError 126.
+- **CUDA torch installed detection**: `_cuda_torch_installed()` checks for `cudart64_12.dll` in `_internal/torch/lib/`. New label state: "GPU torch installed — CUDA init failed: [error]". New button state: "Reinstall GPU Acceleration" when torch is present but CUDA still failing.
+- **`os.add_dll_directory` fix** (`main.py`): adds `_internal/torch/lib/` to Windows DLL search path before importing `ui.app`. Fixes CUDA unavailable even when all files are present — PyInstaller's bootloader only registers `_internal/`, not nested subdirectories.
+- **CUDA binary filter in build spec**: both `relic_bot.spec` files strip CUDA/GPU DLLs at build time so the distributed ZIP is CPU-only (~256 MB) regardless of what is installed on the build machine.
+- **`pip._vendor.distlib` hidden import fix**: both spec files now include `collect_submodules('pip._vendor.distlib')` to fix "Unable to locate finder" crash during GPU install on fresh machines.
+
+---
+
+### Bot Reliability
+
+- **Signboard accidental-purchase fix**: Phase 2 adds `_p2_success` flag; if the relic screen is never confirmed after 3 attempts, aborts before Phase 3. Phase 3 now gates on `check_text_visible("relic rites")` before sending any inputs; if Signboard text is detected instead, exits with ESC only (no F2/confirm keys pressed). Confirmed safe across 200 test iterations.
+- **CPU core management**: bot thread runs with `ABOVE_NORMAL` priority. Input events pinned to CPU core 0 via `SetThreadAffinityMask`. OCR worker threads pinned to all cores except core 0. Low-Power Mode halves the OCR worker core count. `configure_torch_threads` also sets `torch.set_num_interop_threads(1)`.
+- **ctypes SendInput input reliability**: 55,584/55,584 inputs confirmed successful (100%) across a 200-iteration test run. 
+
+---
+
+### Analysis & Run Features
+
+- **Backlog Analysis**: new checkbox in Batch Mode Settings. When enabled, the bot captures screenshots during the run but defers all OCR to after the batch completes. `_process_backlog_run` spawns a worker pool over the saved screenshots and runs the full pipeline (hits, Smart Analyze, All Hits, near misses). Useful for fast machines where maximising game-loop speed matters more than real-time feedback.
+- **System Test + Calibration**: "🔬 System Test" button runs an OCR benchmark (7 passes on a blank image; first pass discarded as JIT warm-up). Results saved to `relicbot_calibration.json` next to the EXE. On startup and at the start of each run, calibration is loaded and used to pre-seed `_first_load_elapsed` and `_perf_gap_mult` so adaptive timing starts calibrated from iteration 1. Auto-saves when baseline is first measured or when the performance multiplier shifts ≥0.05.
+- **Excluded Hits folder**: relics that match passive criteria but are blocked by the curse filter are saved to `Excluded Hits/` with screenshots and a summary file.
+- **Smart Analyze Hits folder**: `Smart Analyze Hits/` at the batch level consolidates all smart-analyze finds across iterations for easy review.
+
+---
+
+### Data Fixes
+
+- **`pool_weights.py` hyphen fix**: 32 lines corrected — character stat passives (e.g. `[Duchess] Improved Vigor and Strength, Reduced Mind`) had hyphens in their key names instead of commas, causing zero weight → "Impossible" in Relic Builder. All 16 character stat passives across 8 characters now resolve correctly.
+
+---
+
+### UI / UX
+
+- **Real relic icons**: colour-select row now shows actual in-game relic images instead of procedurally drawn diamonds. 8 PNGs (Normal + Deep of Night variants of Red/Blue/Green/Yellow) processed to 128 × 128 circular crops with brightness-weighted centring and sharpening. Bundled in `ui/relic_icons/` in both spec files.
+- **Export Diagnostics button**: static button in the Profile row (right of "Restore Defaults"). Exports system info, GPU/CUDA status, key file sizes, `gpu_upgrade.log`, current settings, and the most recent `.diag` file to a timestamped `.txt` next to the EXE. Opens the folder automatically.
+- **Mousewheel fix**: main window scroll handler ignores events from dialogs and the overlay window. Overlay Text widgets bind their own `<MouseWheel>` returning `"break"`. Previously, scrolling inside any child window scrolled the main window instead.
+- **UI expansion on resize**: inner canvas frame, profile combobox, and save entry fields now stretch horizontally with the window.
+- **`.diag` encoding fix**: `read_text(encoding="utf-8", errors="replace")` used everywhere `.diag` and `gpu_upgrade.log` files are read. Fixes `UnicodeDecodeError` on Windows codepage 1252 machines where `.diag` files contain non-UTF-8 bytes.
+
+---
+
 ## [1.5.1] – 2026-03-27
 
 ### Added

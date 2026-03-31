@@ -106,10 +106,10 @@ CATEGORIES: "OrderedDict[str, list[str]]" = OrderedDict([
         "Improved Throwing Pot Damage +1",
         "Improved Throwing Knife Damage",
         "Improved Throwing Knife Damage +1",
-        "Improved Glinstone and Gravity Stone Damage",
-        "Improved Glinstone and Gravity Stone Damage +1",
-        "Improved Performing Arts",
-        "Improved Performing Arts +1",
+        "Improved Glintstone and Gravity Stone Damage",
+        "Improved Glintstone and Gravity Stone Damage +1",
+        "Improved Perfuming Arts",
+        "Improved Perfuming Arts +1",
     ]),
 
     ("Character Skills & Art", [
@@ -587,7 +587,7 @@ CATEGORIES: "OrderedDict[str, list[str]]" = OrderedDict([
         "Poisonbone Darts in possession at start of expedition",
         "Crystal Darts in possession at start of expedition",
         "Throwing Daggers in possession at start of expedition",
-        "Glinstone Scraps in possession at start of expedition",
+        "Glintstone Scraps in possession at start of expedition",
         "Gravity Stone Chunks in possession at start of expedition",
         "Bewitching Branches in possession at start of expedition",
         "Spark Aromatic in possession at start of expedition",

@@ -196,12 +196,14 @@ class BotOverlay:
 
     def build(self, screen_w: int, screen_h: int,
               async_mode: bool = False,
+              backlog_mode: bool = False,
               settings: dict | None = None) -> None:
         """Create the overlay window, positioned bottom-left of the screen."""
         if self._win:
             return
 
-        self._async_mode = async_mode
+        self._async_mode   = async_mode
+        self._backlog_mode = backlog_mode
 
         if settings:
             for key in self._section_visible:
@@ -248,6 +250,8 @@ class BotOverlay:
                  font=("Consolas", 10, "bold"), cursor="fleur").pack(side="left")
         tk.Label(hdr, textvariable=sv("batch", "—"),
                  bg=_BG, fg=_DIM, font=("Consolas", 9), cursor="fleur").pack(side="right")
+        tk.Label(hdr, textvariable=sv("mode_tag", ""),
+                 bg=_BG, fg="#5588aa", font=("Consolas", 8), cursor="fleur").pack(side="right", padx=(0, 8))
 
         for widget in (hdr,) + tuple(hdr.winfo_children()):
             widget.bind("<ButtonPress-1>", self._on_drag_start)
@@ -290,7 +294,7 @@ class BotOverlay:
             cell.grid(row=0, column=col, sticky="n", pady=2)
             tk.Label(cell, text=label, bg=_BG, fg=_DIM,
                      font=("Consolas", 8)).pack()
-            if not self._async_mode:
+            if not self._async_mode and not self._backlog_mode:
                 tk.Label(cell, text="this run", bg=_BG, fg=_DIM,
                          font=("Consolas", 7)).pack()
                 tk.Label(cell, textvariable=sv(key_run, "0"), bg=_BG, fg=color,
@@ -377,10 +381,10 @@ class BotOverlay:
             lambda _: self._reset_iter_cb() if self._reset_iter_cb else None,
         )
         _Tooltip(self._reset_iter_btn,
-                 "Reset Iteration\n\n"
-                 "Closes the game, deletes this iteration's output folder,\n"
+                 "Reset Batch\n\n"
+                 "Closes the game, deletes this batch's output folder,\n"
                  "restores your save to a clean state, and re-runs the\n"
-                 "current iteration as if it never happened.\n\n"
+                 "current batch as if it never happened.\n\n"
                  "Use this if you notice the bot is lost or stuck mid-run.")
 
         self._abort_btn = tk.Label(
@@ -467,6 +471,18 @@ class BotOverlay:
         self._matches_log_box.configure(yscrollcommand=msb.set)
         self._matches_log_box.grid(row=1, column=0, sticky="nsew")
         msb.grid(row=1, column=1, sticky="ns")
+
+        # Mousewheel scrolling for each log panel — bind explicitly so the main
+        # window's bind_all handler doesn't steal the event.  Returning "break"
+        # stops propagation after the local scroll is applied.
+        def _scroll(box):
+            def _handler(event):
+                box.yview_scroll(int(-1 * (event.delta / 120)) * 3, "units")
+                return "break"
+            box.bind("<MouseWheel>", _handler)
+        _scroll(self._log_box)
+        _scroll(self._relic_log_box)
+        _scroll(self._matches_log_box)
 
         # Initial pack of all sections + log layout
         self._repack_sections()

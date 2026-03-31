@@ -84,34 +84,36 @@ python main.py
 
 ### 3. Select Relic Type
 
-Under **Sequence Phases**, select the relic type **before** loading sequences:
-- **Deep of Night** — 1800 murk each (uses `phase0_navigate_to_relic_buy_screen.json`)
-- **Normal** — 600 murk each (uses `phase0_normal.json`)
+Under **Choose Relic Type**, select your farming mode:
+- **Deep of Night** — 1800 murk each (uses `phase0_setup_don.json`)
+- **Normal** — 600 murk each (uses `phase0_setup_normal.json`)
 
-Switching relic type automatically swaps the Phase 0 sequence.
+Switching relic type automatically swaps the Phase 0 sequence and updates the Relic Criteria passive pool.
 
-### 4. Load the Standard Input Sequences
+### 4. Input Sequences
 
 The `sequences/` folder contains pre-recorded input sequences for each phase.
-They are loaded automatically on startup, but you can reload them manually using the **Load** button inside each Phase tab:
+They are loaded automatically on startup. The active bot loop is:
 
-| Phase tab | Auto-loaded file |
-|-----------|-----------------|
-| **Phase 0 — Setup** | `phase0_navigate_to_relic_buy_screen.json` (Deep of Night) or `phase0_normal.json` |
-| **Phase 1 — Buy Loop** | `phase1_buy_one_batch_of_10_relics.json` |
-| **Phase 2 — Relic Rites Nav** | `phase3_review_setup.json` |
-| **Phase 3 — Navigate to Sell** | `phase2_navigate_to_sell.json` |
-| **Phase 4 — Review Step** | `phase4_review_step.json` |
+| Phase | Purpose | Auto-loaded file |
+|-------|---------|-----------------|
+| **Phase 0 — Setup** | Navigate from Roundtable Hold to the Relic Rites buy screen (runs once per iteration) | `phase0_setup_don.json` or `phase0_setup_normal.json` |
+| **Phase 1 — Buy + Preview** | Buy one relic and hold on the post-buy preview screen | `phase1_buy_alt.json` |
+| **Phase 2 — Scan** | Single RIGHT press to navigate to the next relic in the Relic Rites panel | `phase2_relic_rites_nav.json` |
+| **Phase 3 — Reset** | Single F press to return to the buy screen | `phase3_navigate_to_sell.json` |
 
+> Phase 4 is no longer used — the old sell/review loop has been replaced by buy-phase scanning.
 > These sequences assume you start from **Roundtable Hold** with the Relic Rites merchant visible.
 
 ### 5. Set Relic Criteria
 
 Use the **Relic Criteria** tabs to define what you are looking for:
 
-- **Build Exact Relic** — specify up to 10 target passive combinations; each target has up to 3 passive slots and a match threshold (e.g. ≥ 2 of 3 must be present). The bot stops when ANY target is satisfied. Incompatible passive combinations are detected and blocked automatically.
+- **Build Exact Relic** — specify up to 20 target passive combinations; each target has up to 3 passive slots and a match threshold (e.g. ≥ 2 of 3 must be present). The bot stops when ANY target is satisfied. Incompatible passive combinations are blocked automatically — the listboxes hide conflicting passives as you make selections.
 - **Passive Pool** — pick any number of passives; the bot matches when a relic has at least N of them simultaneously. Add **Pairings** to require two specific passives to appear together (counts as one match).
 - **Combine** — tick the checkbox at the bottom to match against either tab simultaneously.
+
+Passive lists are automatically filtered to show only passives available in the selected relic mode (Normal or Deep of Night).
 
 ### 6. Set Relic Color Filter
 
@@ -139,7 +141,9 @@ Click **Save As…** in the Profile section to save all your settings (save path
 
 | Key | Action |
 |-----|--------|
-| **F7** | Show / hide the overlay HUD (configurable in Batch Mode Settings) |
+| **F7** | Show / hide the overlay HUD (configurable) |
+| **F8** | Toggle overlay between log view and full Matched Relics panel (configurable) |
+| **F9** | Stop bot after current iteration (configurable) |
 
 The bot will automatically stop sending inputs if the Nightreign window loses focus, so alt-tabbing is safe.
 
@@ -165,16 +169,24 @@ Each batch run creates a timestamped folder inside your output directory:
 ```
 batch_output/
 └── batch_run_2025-01-15_143022/
-    ├── README.txt          Full breakdown of every iteration (hits marked with *)
-    ├── PRIORITY.txt        Quick list of saves worth opening
+    ├── run_log.txt              Full bot log, appended in real time
+    ├── live_log.txt             Per-relic summary, appended in real time
+    ├── matches_log.txt          All matched relics in one file
+    ├── README.txt               Full iteration breakdown (hits marked with *)
     ├── 001/
-    │   ├── NR0000.sl2      Save file for this iteration
-    │   └── info.txt        Relics found this iteration
-    ├── HIT 004/            Renamed when a relic meets your threshold
+    │   ├── NR0000.sl2           Save file for this iteration
+    │   └── info.txt             Relics found this iteration
+    ├── HIT 004/                 Renamed when a relic meets your threshold
     │   ├── NR0000.sl2
     │   ├── info.txt
     │   └── relic_02_MATCH.jpg
-    └── GOD ROLL 007/       Renamed when all passives match
+    ├── GOD ROLL 007/            Renamed when all passives match
+    │   ├── NR0000.sl2
+    │   ├── info.txt
+    │   └── relic_05_MATCH.jpg
+    └── Excluded Hits/           Relics that matched criteria but were curse-filtered
+        ├── Excluded Hits Info.txt
+        └── relic_12_MATCH.jpg
 ```
 
 To use a result: copy the `NR0000.sl2` from that folder to your game save location.
