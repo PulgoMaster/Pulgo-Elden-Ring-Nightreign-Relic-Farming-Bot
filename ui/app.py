@@ -721,8 +721,8 @@ class RelicBotApp(tk.Tk):
         _export_diag_btn.grid(row=0, column=7, **pad)
         _Tooltip(_export_diag_btn,
                  "Generates a small diagnostics text file with system info, GPU status,\n"
-                 "install logs, and recent run data. Send this file to Claude for help\n"
-                 "diagnosing issues without transferring the full bot folder.")
+                 "install logs, and recent run data. Useful for diagnosing issues without\n"
+                 "transferring the full bot folder.")
 
         # Pre-initialize vars that are referenced by multiple sections below
         self.batch_output_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "batch_output"))
@@ -7777,7 +7777,7 @@ class RelicBotApp(tk.Tk):
     def _export_diagnostics(self):
         """
         Collect system/GPU/file diagnostics into a small text file and open it.
-        The user can then transfer this file to Claude for remote diagnosis without
+        The user can then share this file for remote diagnosis without
         needing to copy the entire bot folder.
         """
         import datetime
@@ -7901,7 +7901,7 @@ class RelicBotApp(tk.Tk):
             _sp.Popen(["explorer", "/select,", str(_out_path)])
             tk.messagebox.showinfo(
                 "Diagnostics Exported",
-                f"Saved to:\n{_out_path}\n\nThe folder has been opened with the file selected.\nSend this file to Claude."
+                f"Saved to:\n{_out_path}\n\nThe folder has been opened with the file selected."
             )
         except Exception as e:
             tk.messagebox.showerror("Export Failed", f"Could not write diagnostics file:\n{e}")
