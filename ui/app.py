@@ -362,9 +362,10 @@ def generate_priority_summary(output_dir: str, results: list) -> None:
 
 class _Tooltip:
     """Lightweight hover tooltip for tkinter widgets."""
-    def __init__(self, widget, text: str):
+    def __init__(self, widget, text: str, wraplength: int = 280):
         self._widget = widget
         self._text = text
+        self._wraplength = wraplength
         self._win = None
         widget.bind("<Enter>", self._show, add="+")
         widget.bind("<Leave>", self._hide, add="+")
@@ -380,7 +381,7 @@ class _Tooltip:
         tk.Label(
             tw, text=self._text, background="#2a2a2a", foreground="#dddddd",
             relief="solid", borderwidth=1, font=("Segoe UI", 8),
-            wraplength=280, justify="left", padx=6, pady=4,
+            wraplength=self._wraplength, justify="left", padx=6, pady=4,
         ).pack()
 
     def _hide(self, _event=None):
@@ -488,7 +489,16 @@ class RelicBotApp(tk.Tk):
         self.title("Elden Ring Nightreign – Relic Bot v1.6.0  |  Made by Pulgo")
         self.resizable(True, True)
 
-        # App icon
+        # Tell Windows to treat this process as its own app (not a Python child),
+        # so the taskbar button uses the EXE's embedded icon instead of python.exe's.
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "PulgoMaster.RelicBot.v1.6.0"
+            )
+        except Exception:
+            pass
+
+        # App icon (title-bar + alt-tab thumbnail)
         _icon_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "assets", "icon.ico",
@@ -600,6 +610,8 @@ class RelicBotApp(tk.Tk):
         self._backlog_mode_var           = tk.BooleanVar(value=False)
         self._intermittent_backlog_var   = tk.BooleanVar(value=False)
         self._intermittent_every_n_var   = tk.IntVar(value=5)
+        self._hybrid_var                 = tk.BooleanVar(value=False)
+        self._gpu_always_analyze_var     = tk.BooleanVar(value=False)
         self._prev_colors: set = {"Red", "Blue", "Green", "Yellow"}
         self._color_warn_job = None   # after() job for warning auto-dismiss
         self._mouse_blocker_hook   = None   # WH_MOUSE_LL hook handle
@@ -1074,13 +1086,13 @@ class RelicBotApp(tk.Tk):
         )
         bf_chk.grid(row=4, column=0, columnspan=2, sticky="w", **pad)
         _Tooltip(bf_chk,
-                 "Runs multiple OCR workers in parallel to speed up relic analysis.\n"
+                 "Runs multiple CPU workers in parallel to speed up relic analysis.\n"
                  "Each worker loads its own OCR model into RAM (~200 MB each).\n"
                  "CPU cores are shared evenly so workers don't fight each other.\n\n"
                  "── With GPU Acceleration ON ─────────────────────\n"
-                 "Workers cap at 4. CUDA uses one shared GPU context — workers\n"
-                 "above 4 serialize on the GPU and hurt throughput instead.\n"
-                 "Recommended: 2–3 workers (GPU handles the heavy lifting).\n\n"
+                 "Brute Force is locked unless Hybrid GPU+CPU mode is also enabled.\n"
+                 "GPU Acceleration already adds 1 fast GPU worker on its own.\n"
+                 "Enable Hybrid to add CPU workers alongside it.\n\n"
                  "── Without GPU Acceleration (CPU mode) ──────────\n"
                  "Workers run truly in parallel on separate CPU cores.\n"
                  "Recommended workers by system RAM:\n"
@@ -1099,18 +1111,14 @@ class RelicBotApp(tk.Tk):
         )
         self._parallel_spin.grid(row=4, column=3, sticky="w", **pad)
         _Tooltip(self._parallel_spin,
-                 f"Number of parallel OCR workers (2–{_worker_max}).\n"
+                 f"Number of parallel CPU workers (2–{_worker_max}).\n"
                  "Each worker uses ~200 MB RAM and ~1 CPU core for OCR inference.\n\n"
-                 "── GPU Acceleration ON ──────────────────────────\n"
-                 "Max 4 workers. CUDA serializes all GPU calls through one context,\n"
-                 "so extra workers above 4 fight each other instead of helping.\n"
-                 "Sweet spot: 2–3 workers. RTX 4070+ → 2; mid-range GPU → 3.\n\n"
-                 "── GPU Acceleration OFF (CPU mode) ──────────────\n"
-                 "Workers run truly in parallel across CPU cores.\n"
-                 f"Max {_worker_max} (your CPU core count).\n"
-                 "8 GB RAM   →  2 workers max\n"
-                 "16 GB RAM  →  2–3 workers safe\n"
-                 "32 GB RAM  →  4–6 workers\n\n"
+                 "Only active when Hybrid GPU+CPU mode is enabled (with GPU Accel),\n"
+                 "or when running in CPU-only mode (GPU Accel off).\n\n"
+                 "Recommended by system RAM:\n"
+                 "  8 GB  →  2 workers max\n"
+                 " 16 GB  →  2–3 workers safe\n"
+                 " 32 GB  →  4–6 workers\n\n"
                  "⚠ 4+ workers on 8 GB RAM: will exhaust RAM and cause crashes.\n"
                  "Workers automatically pause when system RAM is critically low.")
         self._ram_label_var = tk.StringVar(value="")
@@ -1186,17 +1194,120 @@ class RelicBotApp(tk.Tk):
                  "while still using Async Analysis for background processing.\n\n"
                  "Only has effect with Async Analysis enabled.")
 
+        # Unified Hybrid GPU+CPU — works with Async and Backlog modes
+        _hyb_chk = ttk.Checkbutton(
+            self.batch_frame, text="⚡ Hybrid GPU+CPU Analysis",
+            variable=self._hybrid_var,
+        )
+        _hyb_chk.grid(row=6, column=3, columnspan=2, sticky="w",
+                      padx=(4, 4), pady=(0, 2))
+        _Tooltip(_hyb_chk,
+                 "Runs one dedicated GPU worker alongside the CPU worker pool.\n"
+                 "Both pull from the same queue in parallel — throughput ≈ GPU + CPU speed.\n\n"
+                 "Works with both Async Analysis and Backlog Analysis.\n\n"
+                 "Requirements:\n"
+                 "  • GPU Acceleration must be installed\n"
+                 "  • Brute Force Analysis must be enabled (for CPU workers)\n\n"
+                 "GPU worker uses CUDA; CPU workers use the processor.\n"
+                 "CPU workers are capped at 4 in Hybrid mode.")
+
+        # GPU Always Analyze — sub-option of Hybrid mode only
+        _gpu_aa_chk = ttk.Checkbutton(
+            self.batch_frame, text="🔓 GPU: Always Analyze",
+            variable=self._gpu_always_analyze_var,
+        )
+        _gpu_aa_chk.grid(row=6, column=5, columnspan=3, sticky="w",
+                         padx=(4, 4), pady=(0, 2))
+        _Tooltip(_gpu_aa_chk,
+                 "Allows the GPU worker to keep analyzing relics even while CPU workers are paused for game inputs.\n"
+                 "GPU inference runs on the graphics card and does not compete for the CPU time inputs need.\n"
+                 "Input timing and stability are unaffected.\n\n"
+                 "── WHEN IT HELPS ──────────────────────────────────────────────────────────────────────────────\n"
+                 "Best with 'Exclude Analysis While Operations Are Happening' — that mode pauses all workers for\n"
+                 "the entire buy+scan window (up to 90s/cycle). This keeps the GPU draining the queue the whole\n"
+                 "time. Without Excl.Ops the throttle gates are only a few seconds wide — minimal benefit.\n\n"
+                 "Applies to Backlog Hybrid too. GPU backlog worker respects the gate by default; this bypasses it.\n\n"
+                 "── HARDWARE GUIDANCE ──────────────────────────────────────────────────────────────────────────\n"
+                 "RTX 3070+ / RX 6800+: Recommended — compute and graphics pipelines run independently.\n"
+                 "RTX 3060 / GTX 1660 etc.: Caution — brief game frame drops during Phase 1 are possible.\n"
+                 "Laptop GPU: Not recommended — combined load risks thermal throttling (slower OCR + game stutter).\n\n"
+                 "── NOTE ───────────────────────────────────────────────────────────────────────────────────────\n"
+                 "Enabling Hybrid GPU+CPU Analysis automatically disables Smart Throttle.\n"
+                 "Requires: Hybrid GPU+CPU Analysis must be enabled.",
+                 wraplength=560)
+
+        def _update_bf_gpu_lock(*_):
+            """Lock Brute Force + spinbox when GPU is on but Hybrid is not active.
+
+            GPU on alone = exactly 1 GPU worker, no CPU workers.
+            CPU workers only activate via Hybrid mode alongside the GPU worker.
+            In Hybrid mode CPU workers are capped at 4 to prevent over-saturation.
+            """
+            _gpu = self._gpu_accel_var.get()
+            _hyb = self._hybrid_var.get()
+            if _gpu and not _hyb:
+                bf_chk.config(state="disabled")
+                self._parallel_spin.configure(state="disabled")
+            else:
+                bf_chk.config(state="normal")
+                # Cap CPU workers at 4 in Hybrid mode
+                _cap = min(4, _worker_max) if _hyb else _worker_max
+                self._parallel_spin.configure(to=_cap)
+                if self._parallel_workers_var.get() > _cap:
+                    self._parallel_workers_var.set(_cap)
+                if self._parallel_enabled_var.get():
+                    self._parallel_spin.configure(state="normal")
+                else:
+                    self._parallel_spin.configure(state="disabled")
+
+        _async_sub_updating = [False]
+
         def _update_async_sub_state(*_):
-            _on    = self._async_enabled_var.get()
-            _state = "normal" if _on else "disabled"
-            st_chk.config(state=_state)
-            _ebp_chk.config(state=_state)
+            if _async_sub_updating[0]:
+                return
+            _async_sub_updating[0] = True
+            try:
+                _on = self._async_enabled_var.get()
+
+                # Excl.Ops is async-only
+                _ebp_chk.config(state="normal" if _on else "disabled")
+
+                # Unified Hybrid: requires GPU Accel + Brute Force — not mode-dependent
+                _hyb_ok = (self._gpu_accel_var.get()
+                           and self._parallel_enabled_var.get())
+                _hyb_chk.config(state="normal" if _hyb_ok else "disabled")
+                if not _hyb_ok:
+                    self._hybrid_var.set(False)
+                _hybrid_on = self._hybrid_var.get()
+
+                # Smart Throttle: only valid when Async is on AND Hybrid is off.
+                # Enabling Hybrid clears and disables Smart Throttle automatically.
+                _st_ok = _on and not _hybrid_on
+                if not _st_ok and self._smart_throttle_var.get():
+                    self._smart_throttle_var.set(False)
+                st_chk.config(state="normal" if _st_ok else "disabled")
+
+                # GPU Always Analyze: available whenever Hybrid is on.
+                # Smart Throttle is already cleared when Hybrid is on — no extra check needed.
+                _gpu_aa_chk.config(state="normal" if _hybrid_on else "disabled")
+                if not _hybrid_on:
+                    self._gpu_always_analyze_var.set(False)
+
+                _update_bf_gpu_lock()
+            finally:
+                _async_sub_updating[0] = False
+
         self._async_enabled_var.trace_add("write", _update_async_sub_state)
+        self._gpu_accel_var.trace_add("write", _update_async_sub_state)
+        self._parallel_enabled_var.trace_add("write", _update_async_sub_state)
+        self._hybrid_var.trace_add("write", _update_async_sub_state)
+        self._gpu_always_analyze_var.trace_add("write", _update_async_sub_state)
+        self._smart_throttle_var.trace_add("write", _update_async_sub_state)
         _update_async_sub_state()
 
         # ── Overlay Elements sub-section ────────────────────────────── #
         ov_elem_lf = ttk.LabelFrame(self.batch_frame, text="Overlay Elements")
-        ov_elem_lf.grid(row=10, column=0, columnspan=8, sticky="ew", **pad)
+        ov_elem_lf.grid(row=11, column=0, columnspan=8, sticky="ew", **pad)
 
         # Show HUD toggle lives here as the parent of all element settings
         ov_chk = ttk.Checkbutton(
@@ -1404,43 +1515,60 @@ class RelicBotApp(tk.Tk):
         self._backlog_mode_var.trace_add("write", _update_ibl_state)
         _update_ibl_state()   # initialise to current state
 
+        # Hybrid GPU+CPU Backlog — sub-setting of Backlog Mode
         # GPU Acceleration toggle
         def _on_gpu_toggle(*_):
             from bot import relic_analyzer
             relic_analyzer.set_gpu_mode(self._gpu_accel_var.get())
             self._update_odds_viewer()
-            # Enforce worker cap: GPU mode caps at 4 (CUDA serializes above that)
-            _gpu_now = self._gpu_accel_var.get()
-            _new_max = 4 if _gpu_now else min(8, max(2, self._hw_cpu_cores or 8))
-            self._parallel_spin.configure(to=_new_max)
-            if self._parallel_workers_var.get() > _new_max:
-                self._parallel_workers_var.set(_new_max)
+            _update_bf_gpu_lock()
+            # Show/hide the "+1 GPU Worker" badge
+            if self._gpu_accel_var.get():
+                self._gpu_worker_lbl.grid()
+            else:
+                self._gpu_worker_lbl.grid_remove()
 
         gpu_chk = ttk.Checkbutton(
             self.batch_frame, text="🖥 GPU Acceleration (opt-in)",
             variable=self._gpu_accel_var,
             command=_on_gpu_toggle,
         )
-        gpu_chk.grid(row=9, column=0, columnspan=2, sticky="w", **pad)
+        gpu_chk.grid(row=10, column=0, columnspan=2, sticky="w", **pad)
         _Tooltip(gpu_chk,
                  "Offloads OCR inference to your NVIDIA GPU (CUDA) instead of the CPU.\n"
-                 "Speeds up relic analysis ~10× (from ~3 s/relic to ~0.3 s/relic).\n\n"
+                 "Adds exactly 1 dedicated GPU worker — CUDA inference does not benefit\n"
+                 "from multiple workers competing for the same GPU context.\n\n"
+                 "Speed: ~0.3 s/relic (GPU) vs ~3 s/relic (CPU) — ~10× faster.\n\n"
+                 "When GPU Acceleration is on without Hybrid mode:\n"
+                 "  • Only the GPU worker runs — Brute Force workers are ignored\n"
+                 "  • Enable Hybrid GPU+CPU to run CPU workers alongside the GPU worker\n\n"
                  "Requirements:\n"
                  "  • NVIDIA GPU with CUDA support (GTX 10xx or newer)\n"
-                 "  • PyTorch with CUDA installed (check the Hardware panel below for status)\n\n"
-                 "Benefits for large batches:\n"
-                 "  • Frees CPU cycles → fewer missed/eaten game inputs\n"
-                 "  • Enables shorter Phase 4 gap (0.07 s vs 0.10 s) for faster relic browsing\n"
-                 "  • Analysis queue drains faster in Async mode\n\n"
-                 "Leave OFF if you do not have an NVIDIA GPU or if CUDA is not detected.\n"
-                 "AMD and Intel GPUs are not supported by EasyOCR's GPU mode.\n"
+                 "  • PyTorch with CUDA installed (see Hardware panel below)\n\n"
+                 "Leave OFF if you do not have an NVIDIA GPU or CUDA is not detected.\n"
+                 "AMD and Intel GPUs are not supported.\n"
                  "GPU setting is saved in your profile.")
+
+        # "+1 GPU Worker" badge — shown only when GPU Accel is enabled
+        self._gpu_worker_lbl = ttk.Label(
+            self.batch_frame, text="+1 GPU Worker",
+            foreground="#7ec8f0",
+        )
+        self._gpu_worker_lbl.grid(row=10, column=2, columnspan=2, sticky="w", **pad)
+        _Tooltip(self._gpu_worker_lbl,
+                 "GPU Acceleration adds exactly 1 dedicated GPU worker to the pool.\n\n"
+                 "EasyOCR CUDA inference serializes within one GPU context — extra\n"
+                 "GPU workers fight over VRAM and slow each other down rather than\n"
+                 "improving throughput.  1 GPU worker at ~0.3 s/relic is optimal.\n\n"
+                 "To also run CPU workers alongside it, enable Hybrid GPU+CPU mode.")
+        if not self._gpu_accel_var.get():
+            self._gpu_worker_lbl.grid_remove()
         self._gpu_rec_lbl = ttk.Label(
             self.batch_frame,
             text="",
             foreground=theme.TEXT_MUTED,
         )
-        self._gpu_rec_lbl.grid(row=9, column=5, columnspan=2, sticky="w", **pad)
+        self._gpu_rec_lbl.grid(row=10, column=4, columnspan=3, sticky="w", **pad)
         # Set recommendation label based on CUDA detection
         if self._hw_cuda_available:
             self._gpu_rec_lbl.configure(
@@ -2186,8 +2314,17 @@ class RelicBotApp(tk.Tk):
             self._log("[Low Performance Mode] OFF — standard timing.")
 
     def _on_parallel_toggle(self):
-        """Enable/disable the workers spinbox based on the Brute Force checkbox."""
-        state = "normal" if self._parallel_enabled_var.get() else "disabled"
+        """Enable/disable the workers spinbox based on the Brute Force checkbox.
+
+        Spinbox is always disabled when GPU is on without Hybrid — in that mode
+        the GPU worker runs alone and CPU worker count is ignored.
+        """
+        _gpu_locked = (self._gpu_accel_var.get()
+                       and not self._hybrid_var.get())
+        if _gpu_locked:
+            state = "disabled"
+        else:
+            state = "normal" if self._parallel_enabled_var.get() else "disabled"
         self._parallel_spin.config(state=state)
         self._update_ram_label()
 
@@ -2264,6 +2401,8 @@ class RelicBotApp(tk.Tk):
             "backlog_mode":              self._backlog_mode_var.get(),
             "intermittent_backlog":      self._intermittent_backlog_var.get(),
             "intermittent_every_n":      self._intermittent_every_n_var.get(),
+            "hybrid":                    self._hybrid_var.get(),
+            "gpu_always_analyze":        self._gpu_always_analyze_var.get(),
             "overlay_enabled":      self._overlay_enabled_var.get(),
             "ov_show_stats":        self._ov_show_stats_var.get(),
             "ov_show_rolls":        self._ov_show_rolls_var.get(),
@@ -2301,6 +2440,12 @@ class RelicBotApp(tk.Tk):
         self._backlog_mode_var.set(data.get("backlog_mode", False))
         self._intermittent_backlog_var.set(data.get("intermittent_backlog", False))
         self._intermittent_every_n_var.set(data.get("intermittent_every_n", 5))
+        # "hybrid" supersedes the old per-mode keys; fall back for old profiles
+        _hybrid_val = data.get("hybrid",
+                               data.get("async_hybrid", False)
+                               or data.get("backlog_hybrid", False))
+        self._hybrid_var.set(_hybrid_val)
+        self._gpu_always_analyze_var.set(data.get("gpu_always_analyze", False))
         self._on_parallel_toggle()
         # Apply GPU setting immediately so the analyzer uses the correct mode
         from bot import relic_analyzer as _ra
@@ -2620,7 +2765,7 @@ class RelicBotApp(tk.Tk):
         """Phase -0.5: adaptive game-load wait and in-game confirmation.
 
         Replaces the fixed Game Load Time wait. Each cycle:
-          1. Spam F for 9 s at 0.15 s intervals (~60 presses) to advance through
+          1. Spam F for 7 s at 0.15 s intervals (~47 presses) to advance through
              all title/splash/offline screens.
           2. Wait 1 s to let the game settle.
           3. Press ESC.
@@ -2631,7 +2776,7 @@ class RelicBotApp(tk.Tk):
         Hard timeout: 150 s. Returns (True, elapsed_seconds) on success,
         (False, 0.0) on timeout.
         """
-        _F_BURST    = 9.0    # seconds of F spam per cycle
+        _F_BURST    = 7.0    # seconds of F spam per cycle
         _F_INTERVAL = 0.15   # gap between F presses (seconds)
         _PRE_ESC    = 1.0    # settle after F burst before pressing ESC
         _POST_ESC   = 1.0    # settle after ESC before OCR check
@@ -3335,9 +3480,15 @@ class RelicBotApp(tk.Tk):
             # OCR throttle: cleared before input phases, set before Phase 2 scan
             self._ocr_go_event = threading.Event()
             self._ocr_go_event.set()
-            _gpu_worker_cap = 4 if self._gpu_accel_var.get() else 8
-            _async_workers = (max(1, min(_gpu_worker_cap, self._parallel_workers_var.get()))
-                              if self._parallel_enabled_var.get() else 1)
+            _gpu_on          = self._gpu_accel_var.get()
+            _async_hybrid    = (_gpu_on
+                                and self._hybrid_var.get()
+                                and self._parallel_enabled_var.get())
+            _worker_max      = min(8, max(2, self._hw_cpu_cores or 8))
+            # CPU worker count — only used when Hybrid is on or GPU is off.
+            # When GPU is on without Hybrid, the GPU worker runs alone.
+            _async_workers   = (max(1, min(_worker_max, self._parallel_workers_var.get()))
+                                if self._parallel_enabled_var.get() else 1)
 
             # CPU core allocation:
             #   Core 0 is reserved as the "input core" — the bot thread runs
@@ -3348,7 +3499,9 @@ class RelicBotApp(tk.Tk):
             _cpu_cores   = os.cpu_count() or 4
             _lpm_active  = self._low_perf_mode_var.get()
             _ocr_cores   = max(1, (_cpu_cores // 2) if _lpm_active else (_cpu_cores - 1))
-            _torch_t     = max(1, _ocr_cores // _async_workers)
+            # GPU-only: 1 GPU worker uses CUDA, CPU thread count is less relevant
+            _effective_cpu_workers = _async_workers if (not _gpu_on or _async_hybrid) else 1
+            _torch_t     = max(1, _ocr_cores // _effective_cpu_workers)
             relic_analyzer.configure_torch_threads(_torch_t)
 
             # Pin OCR worker threads to all cores except core 0 (input core).
@@ -3359,73 +3512,127 @@ class RelicBotApp(tk.Tk):
                 relic_analyzer.configure_ocr_affinity(_ocr_mask)
 
             _mode_tag = "LPM" if _lpm_active else "normal"
+            if _async_hybrid:
+                _worker_desc  = f"1 GPU + {_async_workers} CPU worker(s) [Hybrid]"
+                _total_workers = _async_workers + 1
+            elif _gpu_on:
+                _worker_desc  = "1 GPU worker"
+                _total_workers = 1
+            else:
+                _worker_desc  = f"{_async_workers} CPU worker(s)"
+                _total_workers = _async_workers
+            _gpu_aa_active = _async_hybrid and self._gpu_always_analyze_var.get()
             self._log(
-                f"Async Analysis enabled — {_async_workers} worker(s); "
-                f"OCR cores: {_ocr_cores}/{_cpu_cores} ({_mode_tag}); "
+                f"Async Analysis enabled — {_worker_desc}; "
+                + f"OCR cores: {_ocr_cores}/{_cpu_cores} ({_mode_tag}); "
                 f"PyTorch threads per inference: {_torch_t}; "
                 f"input core 0 reserved."
+                + ("; GPU worker: always analyze (throttle bypass active)" if _gpu_aa_active else "")
             )
 
-            def _relic_worker():  # noqa: E306
-                while True:
-                    _prio, _task = _async_relic_q.get()
-                    if _task is None:   # sentinel
-                        _async_relic_q.task_done()
-                        break
-                    # Throttle during input phases: wait until the main thread
-                    # clears the gate (set=go, clear=inputs active).
-                    # Workers finish their current task first; only the *next*
-                    # task is held. This keeps inputs free without killing throughput.
-                    # Loop with 1 s polls so the wait is indefinite — no timeout
-                    # escape that would let workers slip through during long phases
-                    # (Phase -0.5 + Phase 0 together can exceed 70 s).
-                    _go_ev = self._ocr_go_event
-                    if _go_ev is not None and not _go_ev.is_set():
-                        while not _go_ev.wait(timeout=1.0):
-                            pass
-                    # Overflow tasks embed their own state so main workers can
-                    # handle them without extra threads.
-                    _ovf = _task.pop("_ovf_state", None)
-                    _w_state, _w_lock, _w_dmap, _w_res = (
-                        _ovf if _ovf
-                        else (_async_iter_state, _async_state_lock,
-                              _async_dir_map, results)
-                    )
-                    try:
-                        _rt = threading.Thread(
-                            target=self._analyze_relic_task,
-                            args=(_task, _w_state, _w_lock, _w_dmap, _w_res),
-                            daemon=True,
-                        )
-                        _rt.start()
-                        _rt.join(timeout=_ASYNC_TASK_TIMEOUT)
-                        if _rt.is_alive():
-                            _retries = _task.get("_retries", 0)
-                            if _retries < 2:
-                                self._log(
-                                    f"[Async] Iter {_task['iteration']} relic "
-                                    f"{_task['step_i'] + 1} timed out — "
-                                    f"requeueing (attempt {_retries + 2}/3)."
-                                )
-                                _async_relic_q.put(
-                                    (_prio, {**_task, "_retries": _retries + 1}))
-                            else:
-                                self._log(
-                                    f"[Async] Iter {_task['iteration']} relic "
-                                    f"{_task['step_i'] + 1} timed out permanently."
-                                )
-                                self._mark_relic_failed(
-                                    _task, _w_state, _w_lock, _w_dmap, _w_res)
-                    except Exception as _re:
-                        self._log(f"ERROR in async relic worker: {_re}")
-                        self._mark_relic_failed(
-                            _task, _w_state, _w_lock, _w_dmap, _w_res)
-                    finally:
-                        _async_relic_q.task_done()
+            def _make_relic_worker(use_gpu):  # noqa: E306
+                """Return an async worker function pinned to the given device.
 
-            for _wn in range(_async_workers):
-                threading.Thread(target=_relic_worker, daemon=True,
-                                 name=f"async-relic-worker-{_wn}").start()
+                use_gpu=True  → GPU reader (CUDA); use_gpu=None → global flag.
+
+                The outer (long-lived) worker thread pre-warms its EasyOCR Reader
+                once on first task.  Each inner _rt analysis thread is primed with
+                that cached reader via prime_thread_reader() so the ~2-3s per-thread
+                model reload is skipped for every subsequent relic.
+                """
+                from bot import relic_analyzer as _ra
+                _cached_reader = [None]   # reader warmed once in the outer thread
+
+                def _worker():
+                    while True:
+                        _prio, _task = _async_relic_q.get()
+                        if _task is None:   # sentinel
+                            _async_relic_q.task_done()
+                            break
+                        # Throttle during input phases: wait until the main thread
+                        # clears the gate (set=go, clear=inputs active).
+                        # Workers finish their current task first; only the *next*
+                        # task is held. This keeps inputs free without killing throughput.
+                        # Loop with 1 s polls so the wait is indefinite — no timeout
+                        # escape that would let workers slip through during long phases
+                        # (Phase -0.5 + Phase 0 together can exceed 70 s).
+                        # Exception: if this is the GPU worker and "GPU: Always Analyze"
+                        # is enabled, skip the gate entirely — GPU inference runs on the
+                        # graphics card and does not compete for CPU time with inputs.
+                        _go_ev = self._ocr_go_event
+                        if _go_ev is not None and not _go_ev.is_set():
+                            if use_gpu and self._gpu_always_analyze_var.get():
+                                pass  # GPU always-analyze: bypass throttle gate
+                            else:
+                                while not _go_ev.wait(timeout=1.0):
+                                    pass
+                        # Pre-warm the EasyOCR reader in this (outer) worker thread
+                        # the first time a task is dequeued.  Subsequent tasks reuse it.
+                        if _cached_reader[0] is None:
+                            _ra.set_thread_device(use_gpu)
+                            _cached_reader[0] = _ra._get_reader()
+                        # Overflow tasks embed their own state so main workers can
+                        # handle them without extra threads.
+                        _ovf = _task.pop("_ovf_state", None)
+                        _w_state, _w_lock, _w_dmap, _w_res = (
+                            _ovf if _ovf
+                            else (_async_iter_state, _async_state_lock,
+                                  _async_dir_map, results)
+                        )
+                        try:
+                            _reader = _cached_reader[0]
+                            def _inner(_t=_task, _ws=_w_state, _wl=_w_lock,
+                                       _wd=_w_dmap, _wr=_w_res, _rdr=_reader):
+                                # Prime this inner thread with the pre-warmed reader so
+                                # _get_reader() returns immediately without reloading.
+                                _ra.prime_thread_reader(_rdr, use_gpu)
+                                self._analyze_relic_task(_t, _ws, _wl, _wd, _wr)
+                            _rt = threading.Thread(target=_inner, daemon=True)
+                            _rt.start()
+                            _rt.join(timeout=_ASYNC_TASK_TIMEOUT)
+                            if _rt.is_alive():
+                                _retries = _task.get("_retries", 0)
+                                if _retries < 2:
+                                    self._log(
+                                        f"[Async] Iter {_task['iteration']} relic "
+                                        f"{_task['step_i'] + 1} timed out — "
+                                        f"requeueing (attempt {_retries + 2}/3)."
+                                    )
+                                    _async_relic_q.put(
+                                        (_prio, {**_task, "_retries": _retries + 1}))
+                                else:
+                                    self._log(
+                                        f"[Async] Iter {_task['iteration']} relic "
+                                        f"{_task['step_i'] + 1} timed out permanently."
+                                    )
+                                    self._mark_relic_failed(
+                                        _task, _w_state, _w_lock, _w_dmap, _w_res)
+                        except Exception as _re:
+                            self._log(f"ERROR in async relic worker: {_re}")
+                            self._mark_relic_failed(
+                                _task, _w_state, _w_lock, _w_dmap, _w_res)
+                        finally:
+                            _async_relic_q.task_done()
+                return _worker
+
+            if _async_hybrid:
+                # 1 GPU worker + N CPU workers — all pull from the same queue.
+                # CPU workers explicitly pass False (not None) so they build a
+                # CPU reader even though _gpu_mode_enabled is True globally.
+                threading.Thread(target=_make_relic_worker(True), daemon=True,
+                                 name="async-relic-worker-gpu").start()
+                for _wn in range(_async_workers):
+                    threading.Thread(target=_make_relic_worker(False), daemon=True,
+                                     name=f"async-relic-worker-cpu-{_wn}").start()
+            elif _gpu_on:
+                # GPU only — 1 dedicated GPU worker, no CPU workers.
+                threading.Thread(target=_make_relic_worker(True), daemon=True,
+                                 name="async-relic-worker-gpu").start()
+            else:
+                # CPU only — N workers from the Brute Force spinbox (or 1 if off).
+                for _wn in range(_async_workers):
+                    threading.Thread(target=_make_relic_worker(None), daemon=True,
+                                     name=f"async-relic-worker-{_wn}").start()
 
             def _shutdown_async_workers():
                 if not _async_shutdown_done[0]:
@@ -3433,7 +3640,7 @@ class RelicBotApp(tk.Tk):
                     # Unblock any waiting workers so sentinels can be received
                     if self._ocr_go_event is not None:
                         self._ocr_go_event.set()
-                    for _ in range(_async_workers):
+                    for _ in range(_total_workers):
                         _async_relic_q.put(
                             ((float("inf"), float("inf")), None))
 
@@ -3570,10 +3777,14 @@ class RelicBotApp(tk.Tk):
                 _mode_parts.append("Backlog")
                 if _intermittent_mode:
                     _mode_parts.append(f"Intermittent/{_intermittent_every_n}")
+                if self._gpu_always_analyze_var.get():
+                    _mode_parts.append("GPU.Always")
             elif _async_mode:
                 _mode_parts.append("Async")
                 if _excl_ops_mode:
                     _mode_parts.append("Excl.Ops")
+                if self._gpu_always_analyze_var.get():
+                    _mode_parts.append("GPU.Always")
             else:
                 _mode_parts.append("Brute Force")
             if self._smart_throttle_var.get():
@@ -4698,33 +4909,87 @@ class RelicBotApp(tk.Tk):
             _bl_dmap[iteration] = meta.get("iter_dir", "")
 
         # ── Worker pool: process images from disk ───────────────────── #
-        _gpu_worker_cap = 4 if self._gpu_accel_var.get() else 8
-        _workers = (max(2, min(_gpu_worker_cap, self._parallel_workers_var.get()))
-                    if self._parallel_enabled_var.get() else 1)
+        _bl_gpu_on  = self._gpu_accel_var.get()
+        _worker_max = min(8, max(2, self._hw_cpu_cores or 8))
+        _workers    = (max(2, min(_worker_max, self._parallel_workers_var.get()))
+                       if self._parallel_enabled_var.get() else 1)
+        _hybrid     = (_bl_gpu_on
+                       and self._hybrid_var.get()
+                       and self._parallel_enabled_var.get())
+        # Sync global GPU mode with the backlog run's intended device so
+        # the retry-pass (which runs on the bot thread without a thread-local
+        # override) falls back to the correct device rather than whatever the
+        # last UI toggle left behind.
+        relic_analyzer.set_gpu_mode(_bl_gpu_on)
         _bl_q    = queue.PriorityQueue()
         _done_ev = threading.Event()
 
-        def _bl_worker():
-            while True:
-                try:
-                    _prio, _task = _bl_q.get(timeout=0.3)
-                except queue.Empty:
-                    if _done_ev.is_set() and _bl_q.empty():
-                        break
-                    continue
-                try:
-                    self._analyze_relic_task(
-                        _task, _bl_state, _bl_lock, _bl_dmap, results)
-                except Exception as _we:
-                    self._log(f"  [Backlog] Worker error: {_we}")
-                finally:
-                    _bl_q.task_done()
+        def _make_bl_worker(use_gpu):
+            from bot import relic_analyzer as _ra
+            def _worker():
+                _ra.set_thread_device(use_gpu)   # pin this thread's device before first analyze()
+                while True:
+                    try:
+                        _prio, _task = _bl_q.get(timeout=0.3)
+                    except queue.Empty:
+                        if _done_ev.is_set() and _bl_q.empty():
+                            break
+                        continue
+                    # Respect the shared throttle gate during input phases.
+                    # GPU worker bypasses this only when "GPU: Always Analyze" is enabled.
+                    _go_ev = self._ocr_go_event
+                    if _go_ev is not None and not _go_ev.is_set():
+                        if use_gpu and self._gpu_always_analyze_var.get():
+                            pass  # GPU always-analyze: bypass throttle gate
+                        else:
+                            while not _go_ev.wait(timeout=1.0):
+                                pass
+                    try:
+                        self._analyze_relic_task(
+                            _task, _bl_state, _bl_lock, _bl_dmap, results)
+                    except Exception as _we:
+                        self._log(f"  [Backlog] Worker error: {_we}")
+                    finally:
+                        _bl_q.task_done()
+            return _worker
 
-        _bl_threads = [
-            threading.Thread(target=_bl_worker, daemon=True,
-                             name=f"backlog-worker-{_n}")
-            for _n in range(_workers)
-        ]
+        if _hybrid:
+            _gpu_aa_bl = self._gpu_always_analyze_var.get()
+            if _gpu_aa_bl:
+                # GPU Always Analyze on: GPU worker handles all tasks alone.
+                # In backlog mode there is no throttle gate to bypass (unlike
+                # async), so "Always Analyze" is implemented by suppressing the
+                # CPU workers entirely — GPU does 100% of the analysis.
+                self._log("  [Backlog] Hybrid GPU+CPU + GPU Always Analyze: GPU worker only (CPU suppressed).")
+                _bl_threads = [
+                    threading.Thread(target=_make_bl_worker(True), daemon=True,
+                                     name="backlog-worker-gpu"),
+                ]
+            else:
+                # 1 GPU worker + N CPU workers — both pull from the same queue.
+                self._log(f"  [Backlog] Hybrid GPU+CPU: 1 GPU worker + {_workers} CPU worker(s).")
+                _bl_threads = [
+                    threading.Thread(target=_make_bl_worker(True), daemon=True,
+                                     name="backlog-worker-gpu"),
+                ] + [
+                    threading.Thread(target=_make_bl_worker(False), daemon=True,
+                                     name=f"backlog-worker-cpu-{_n}")
+                    for _n in range(_workers)
+                ]
+        elif _bl_gpu_on:
+            # GPU only — 1 dedicated GPU worker, no CPU workers.
+            self._log("  [Backlog] GPU mode: 1 GPU worker.")
+            _bl_threads = [
+                threading.Thread(target=_make_bl_worker(True), daemon=True,
+                                 name="backlog-worker-gpu"),
+            ]
+        else:
+            # CPU only — N workers from the Brute Force spinbox (or 1 if off).
+            _bl_threads = [
+                threading.Thread(target=_make_bl_worker(None), daemon=True,
+                                 name=f"backlog-worker-{_n}")
+                for _n in range(_workers)
+            ]
         for _t in _bl_threads:
             _t.start()
 
@@ -4828,51 +5093,60 @@ class RelicBotApp(tk.Tk):
                 self._set_status("Backlog: retry pass…", "#0066cc")
 
                 def _run_retry_pass(retry_entries, pass_label):
-                    """Process one list of (iter, si, path) retry entries."""
-                    for _r_iter, _r_si, _r_path in retry_entries:
-                        if not os.path.exists(_r_path):
-                            continue   # already handled somehow
-                        _r_istate   = _bl_state[_r_iter]
-                        _r_iter_dir = _bl_dmap.get(_r_iter, _r_istate.get("iter_dir", ""))
-                        _r_meta     = backlog_by_iter.get(_r_iter, {}).get("meta", {})
-                        try:
-                            with open(_r_path, "rb") as _f:
-                                _r_img = _f.read()
-                        except Exception as _rle:
-                            self._log(
-                                f"  [{pass_label}] Could not load"
-                                f" Iter {_r_iter} Relic {_r_si + 1}: {_rle}")
-                            continue
-                        # Build a fresh task dict — img_bytes is zeroed by
-                        # _analyze_relic_task on completion.
-                        _retry_task = {
-                            "iteration":         _r_iter,
-                            "step_i":            _r_si,
-                            "img_bytes":         _r_img,
-                            "pending_path":      "",
-                            "_backlog_img_path": _r_path,
-                            "_retry_pass":       True,
-                            "iter_dir":          _r_iter_dir,
-                            "criteria":          _r_meta.get("criteria", criteria),
-                            "hit_min":           _r_istate["hit_min"],
-                            "live_log_path":     _r_istate["live_log_path"],
-                            "matches_log_path":  _r_istate["matches_log_path"],
-                            "run_dir":           run_dir,
-                            "criteria_summary":  _r_istate["criteria_summary"],
-                            "mode_desc":         _r_istate["mode_desc"],
-                            "limit_value":       _r_istate["limit_value"],
-                            "save_filename":     _r_istate["save_filename"],
-                            "batch_id":          _r_istate["batch_id"],
-                            "_run_log_path":     _r_istate["_run_log_path"],
-                            "_retries":          0,
-                        }
-                        try:
-                            self._analyze_relic_task(
-                                _retry_task, _bl_state, _bl_lock, _bl_dmap, results)
-                        except Exception as _rte:
-                            self._log(
-                                f"  [{pass_label}] Unexpected error"
-                                f" Iter {_r_iter} Relic {_r_si + 1}: {_rte}")
+                    """Process one list of (iter, si, path) retry entries.
+
+                    Retries always run on CPU regardless of the global GPU mode.
+                    Tasks that reached retry staging already failed once (possibly
+                    due to GPU init / CUDA issues); CPU is the reliable fallback.
+                    """
+                    relic_analyzer.set_thread_device(False)   # pin retry pass to CPU
+                    try:
+                        for _r_iter, _r_si, _r_path in retry_entries:
+                            if not os.path.exists(_r_path):
+                                continue   # already handled somehow
+                            _r_istate   = _bl_state[_r_iter]
+                            _r_iter_dir = _bl_dmap.get(_r_iter, _r_istate.get("iter_dir", ""))
+                            _r_meta     = backlog_by_iter.get(_r_iter, {}).get("meta", {})
+                            try:
+                                with open(_r_path, "rb") as _f:
+                                    _r_img = _f.read()
+                            except Exception as _rle:
+                                self._log(
+                                    f"  [{pass_label}] Could not load"
+                                    f" Iter {_r_iter} Relic {_r_si + 1}: {_rle}")
+                                continue
+                            # Build a fresh task dict — img_bytes is zeroed by
+                            # _analyze_relic_task on completion.
+                            _retry_task = {
+                                "iteration":         _r_iter,
+                                "step_i":            _r_si,
+                                "img_bytes":         _r_img,
+                                "pending_path":      "",
+                                "_backlog_img_path": _r_path,
+                                "_retry_pass":       True,
+                                "iter_dir":          _r_iter_dir,
+                                "criteria":          _r_meta.get("criteria", criteria),
+                                "hit_min":           _r_istate["hit_min"],
+                                "live_log_path":     _r_istate["live_log_path"],
+                                "matches_log_path":  _r_istate["matches_log_path"],
+                                "run_dir":           run_dir,
+                                "criteria_summary":  _r_istate["criteria_summary"],
+                                "mode_desc":         _r_istate["mode_desc"],
+                                "limit_value":       _r_istate["limit_value"],
+                                "save_filename":     _r_istate["save_filename"],
+                                "batch_id":          _r_istate["batch_id"],
+                                "_run_log_path":     _r_istate["_run_log_path"],
+                                "_retries":          0,
+                            }
+                            try:
+                                self._analyze_relic_task(
+                                    _retry_task, _bl_state, _bl_lock, _bl_dmap, results)
+                            except Exception as _rte:
+                                self._log(
+                                    f"  [{pass_label}] Unexpected error"
+                                    f" Iter {_r_iter} Relic {_r_si + 1}: {_rte}")
+                    finally:
+                        relic_analyzer.set_thread_device(None)   # restore thread-local state
 
                 # ── Pass 1: files in _retry_staging/ ────────────────────── #
                 _run_retry_pass(_valid_retries, "Backlog Retry")
@@ -4993,6 +5267,7 @@ class RelicBotApp(tk.Tk):
                                    # two copies of the screenshot while OCR is running
         pending_path       = task["pending_path"]
         iter_dir           = task["iter_dir"]
+        run_dir            = task.get("run_dir", os.path.dirname(iter_dir))
         # Backlog mode: path of the on-disk file that was pre-saved during capture.
         # When set, file management (rename/move/delete) replaces in-memory writes.
         _backlog_img_path  = task.get("_backlog_img_path", "")
@@ -5227,18 +5502,36 @@ class RelicBotApp(tk.Tk):
                 self.after(0, lambda at33=at33, at23=at23, atd=atd, tot=tot, sto=sto:
                            ov.update(at_33=at33, at_23=at23, at_duds=atd, stored=sto, analyzed=tot)
                            if ov._win else None)
-            if r_g3 > 0:
-                self._log(
-                    f"★★★ Match Found!  Batch {iteration} · Relic {step_i + 1} — 3/3")
-                self._write_match_log(
-                    task.get("matches_log_path", ""),
-                    iteration, step_i + 1, "★★★ GOD ROLL (3/3)", result)
-            elif r_g2 > 0:
-                self._log(
-                    f"★★ Match Found!  Batch {iteration} · Relic {step_i + 1} — 2/3")
-                self._write_match_log(
-                    task.get("matches_log_path", ""),
-                    iteration, step_i + 1, "★★  HIT (2/3)", result)
+            if r_g3 > 0 or r_g2 > 0:
+                # Check if this relic would be excluded at finalization so the
+                # per-relic log message correctly labels it rather than announcing
+                # a full match that will later be moved to Excluded Hits.
+                _excl_passives = self._get_excluded_passives()
+                _excl_incl     = self._get_explicitly_included_passives()
+                _is_excl       = (self._is_passive_excluded(result, _excl_passives, _excl_incl)
+                                  or self._is_curse_blocked(result, self._get_blocked_curses()))
+                if r_g3 > 0:
+                    if _is_excl:
+                        self._log(
+                            f"  [EXCL] Batch {iteration} · Relic {step_i + 1} — 3/3 match"
+                            f" but has excluded passive — saved to Excluded Hits folder.")
+                    else:
+                        self._log(
+                            f"★★★ Match Found!  Batch {iteration} · Relic {step_i + 1} — 3/3")
+                        self._write_match_log(
+                            task.get("matches_log_path", ""),
+                            iteration, step_i + 1, "★★★ GOD ROLL (3/3)", result)
+                elif r_g2 > 0:
+                    if _is_excl:
+                        self._log(
+                            f"  [EXCL] Batch {iteration} · Relic {step_i + 1} — 2/3 match"
+                            f" but has excluded passive — saved to Excluded Hits folder.")
+                    else:
+                        self._log(
+                            f"★★ Match Found!  Batch {iteration} · Relic {step_i + 1} — 2/3")
+                        self._write_match_log(
+                            task.get("matches_log_path", ""),
+                            iteration, step_i + 1, "★★  HIT (2/3)", result)
 
         if task.get("_retry_pass"):
             # Retry pass: iteration already finalized during the main pass.
@@ -6237,15 +6530,14 @@ class RelicBotApp(tk.Tk):
                     # capture a blank/partial frame; that's fine — it will not pass
                     # the passive-token check and we'll retry after 3 s.
 
-                    # Poll for relic inspect screen — up to 30 s.
-                    # 30 s is very generous; most cycles settle within 1-3 s.
+                    # Poll for relic inspect screen — up to 15 s.
                     # analyze() with preview crop doubles as slot-0 capture.
                     # Require at least one PASSIVE token or relics_found with passives
                     # to avoid accepting a Scenic Flatstone shop-tooltip as confirmation.
                     _settle_ok               = False
                     _settle_no_passives      = False   # relic name seen but zero passives
                     _settle_insufficient_murk = False  # buy failed — no murk left
-                    _settle_deadline = time.monotonic() + 30.0
+                    _settle_deadline = time.monotonic() + 15.0
                     _sc = 0
                     while time.monotonic() < _settle_deadline:
                         if not self.bot_running or self._reset_iter_requested:
@@ -6290,7 +6582,7 @@ class RelicBotApp(tk.Tk):
                                 _settle_no_passives = True
                         except Exception as _se:
                             self._log(f"  Cycle {_batch_i+1}: settle check err: {_se}")
-                        time.sleep(3.0)
+                        time.sleep(1.0)
                         _sc += 1
 
                     # Settle loop done.
@@ -6313,6 +6605,16 @@ class RelicBotApp(tk.Tk):
                         if _exclude_buy_phase:
                             self._set_ocr_throttle(False)
                         break   # break _p1_try loop
+
+                    # If the relic name was seen during polling but passives never
+                    # confirmed (OCR miss or fast tooltip), accept it as settled rather
+                    # than ESC-recovering — Phase 2 will do the proper passive scan.
+                    if not _settle_ok and _settle_no_passives:
+                        _settle_ok = True
+                        self._log(
+                            f"  Cycle {_batch_i + 1}: settle accepted — relic name"
+                            f" detected but no passives in {_sc} poll(s); proceeding"
+                            f" to Phase 2.")
 
                     if _settle_ok:
                         self._log(
@@ -6425,12 +6727,11 @@ class RelicBotApp(tk.Tk):
                             try:
                                 _mval_img = screen_capture.capture(region)
                                 _mval, _ = relic_analyzer.read_murk(_mval_img)
-                                if _mval > 0 and _mval % murk_cost != 0:
+                                if _mval <= 0:
                                     self._log(
                                         f"  Cycle {_batch_i + 1}: murk validation"
-                                        f" failed after ESC recovery — {_mval:,} is"
-                                        f" not a multiple of {murk_cost} — resetting"
-                                        f" iteration.")
+                                        f" failed after ESC recovery — OCR returned"
+                                        f" {_mval:,} — resetting iteration.")
                                     if _exclude_buy_phase:
                                         self._set_ocr_throttle(False)
                                     if _p2_async:
@@ -6738,18 +7039,34 @@ class RelicBotApp(tk.Tk):
                             self._ov_duds         += _r_dud
                             self._ov_at_duds      += _r_dud
                             self._ov_total_relics += _r_g3 + _r_g2 + _r_dud
-                            if _r_g3 > 0:
-                                self._log(
-                                    f"★★★ Match Found!  Batch {iteration} · "
-                                    f"Relic {_relic_num} — 3/3")
-                                _write_match_entry(iteration, _relic_num,
-                                                   "★★★ GOD ROLL (3/3)", result)
-                            elif _r_g2 > 0:
-                                self._log(
-                                    f"★★ Match Found!  Batch {iteration} · "
-                                    f"Relic {_relic_num} — 2/3")
-                                _write_match_entry(iteration, _relic_num,
-                                                   "★★  HIT (2/3)", result)
+                            if _r_g3 > 0 or _r_g2 > 0:
+                                _excl_p  = self._get_excluded_passives()
+                                _excl_i  = self._get_explicitly_included_passives()
+                                _is_excl = (
+                                    self._is_passive_excluded(result, _excl_p, _excl_i)
+                                    or self._is_curse_blocked(result, self._get_blocked_curses()))
+                                if _r_g3 > 0:
+                                    if _is_excl:
+                                        self._log(
+                                            f"  [EXCL] Batch {iteration} · Relic {_relic_num}"
+                                            f" — 3/3 match but has excluded passive.")
+                                    else:
+                                        self._log(
+                                            f"★★★ Match Found!  Batch {iteration} · "
+                                            f"Relic {_relic_num} — 3/3")
+                                        _write_match_entry(iteration, _relic_num,
+                                                           "★★★ GOD ROLL (3/3)", result)
+                                elif _r_g2 > 0:
+                                    if _is_excl:
+                                        self._log(
+                                            f"  [EXCL] Batch {iteration} · Relic {_relic_num}"
+                                            f" — 2/3 match but has excluded passive.")
+                                    else:
+                                        self._log(
+                                            f"★★ Match Found!  Batch {iteration} · "
+                                            f"Relic {_relic_num} — 2/3")
+                                        _write_match_entry(iteration, _relic_num,
+                                                           "★★  HIT (2/3)", result)
                             if iteration:
                                 with self._iter_contrib_lock:
                                     c = self._iter_contributions.setdefault(iteration, {})

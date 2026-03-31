@@ -336,14 +336,22 @@ class _ExactRelicTab(ttk.Frame):
         odds_frame.pack(fill="x", padx=6, pady=(2, 6))
 
         from ui import theme as _theme
+        _odds_container = ttk.Frame(odds_frame)
+        _odds_container.pack(fill="x", padx=6, pady=(4, 2))
+        _odds_sb = ttk.Scrollbar(_odds_container, orient="vertical")
+        _odds_sb.pack(side="right", fill="y")
         self._odds_txt = tk.Text(
-            odds_frame, height=5, wrap="word", state="disabled",
+            _odds_container, height=8, wrap="word", state="disabled",
             bg=_theme.INPUT_BG, fg="#90c890",
             relief="flat", bd=0, highlightthickness=0,
             font=("TkDefaultFont", 9),
+            yscrollcommand=_odds_sb.set,
         )
-        self._odds_txt.pack(fill="x", padx=6, pady=(4, 2))
+        self._odds_txt.pack(side="left", fill="x", expand=True)
+        _odds_sb.config(command=self._odds_txt.yview)
         self._odds_txt.bind("<1>", lambda e: self._odds_txt.focus_set())
+        self._odds_txt.bind("<MouseWheel>",
+            lambda e: (self._odds_txt.yview_scroll(int(-1*(e.delta/120)), "units"), "break")[1])
         self._set_odds_text("Select passives above to see odds.")
         self._odds_disclaimer_var = tk.StringVar(
             value="Odds from AttachEffectTableParam. Per-relic rate accounts for size distribution and color filter.")
@@ -1038,14 +1046,22 @@ class _PassivePoolTab(ttk.Frame):
         odds_frame.pack(fill="x", padx=8, pady=(0, 6))
 
         from ui import theme as _theme
+        _odds_container = ttk.Frame(odds_frame)
+        _odds_container.pack(fill="x", padx=6, pady=(4, 2))
+        _odds_sb = ttk.Scrollbar(_odds_container, orient="vertical")
+        _odds_sb.pack(side="right", fill="y")
         self._odds_txt = tk.Text(
-            odds_frame, height=5, wrap="word", state="disabled",
+            _odds_container, height=8, wrap="word", state="disabled",
             bg=_theme.INPUT_BG, fg="#90c890",
             relief="flat", bd=0, highlightthickness=0,
             font=("TkDefaultFont", 9),
+            yscrollcommand=_odds_sb.set,
         )
-        self._odds_txt.pack(fill="x", padx=6, pady=(4, 2))
+        self._odds_txt.pack(side="left", fill="x", expand=True)
+        _odds_sb.config(command=self._odds_txt.yview)
         self._odds_txt.bind("<1>", lambda e: self._odds_txt.focus_set())
+        self._odds_txt.bind("<MouseWheel>",
+            lambda e: (self._odds_txt.yview_scroll(int(-1*(e.delta/120)), "units"), "break")[1])
         self._set_odds_text("Add passives to your pool to see odds.")
         self._odds_disclaimer_var = tk.StringVar(
             value="Odds from AttachEffectTableParam. Per-relic rate accounts for size distribution and color filter.")

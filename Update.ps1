@@ -174,6 +174,27 @@ if ($hasGpuTorch) {
 
 Write-Host ""
 
+# ── Refresh default sequences ─────────────────────────────────────────────── #
+# The app only seeds sequences from _internal/ if they don't already exist, so
+# old sequences survive an in-place update and can break changed phase logic.
+# Force-overwrite the default sequences from the newly installed _internal/ here.
+Write-Host "--- Refreshing default sequences ---" -ForegroundColor Cyan
+$newSeqSrc = Join-Path $scriptDir "_internal\sequences"
+$seqDst    = Join-Path $scriptDir "sequences"
+if (Test-Path $newSeqSrc) {
+    New-Item -ItemType Directory -Path $seqDst -Force | Out-Null
+    $seqCount = 0
+    Get-ChildItem -Path $newSeqSrc -Filter "*.json" | ForEach-Object {
+        Copy-Item $_.FullName (Join-Path $seqDst $_.Name) -Force
+        $seqCount++
+    }
+    Write-Host "  Refreshed $seqCount default sequence file(s)." -ForegroundColor Green
+    Write-Host "  NOTE: If you have custom re-recorded sequences, re-record them again." -ForegroundColor Yellow
+} else {
+    Write-Host "  WARNING: _internal\sequences not found — sequences not refreshed." -ForegroundColor Yellow
+}
+Write-Host ""
+
 # ── Cleanup ───────────────────────────────────────────────────────────────── #
 Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
 

@@ -23,10 +23,11 @@ from PIL import Image
 # The model is loaded lazily on the first call from each thread (~2-3 s
 # one-time cost; subsequent calls on the same thread are instant).
 
-_thread_local       = threading.local()
-_torch_threads      = 1      # set via configure_torch_threads() before workers start
-_gpu_mode_enabled   = False  # set via set_gpu_mode() from the UI
-_ocr_affinity_mask  = 0      # set via configure_ocr_affinity(); 0 = no restriction
+_thread_local        = threading.local()
+_thread_device_local = threading.local()   # per-thread GPU override (True/False/None)
+_torch_threads       = 1      # set via configure_torch_threads() before workers start
+_gpu_mode_enabled    = False  # set via set_gpu_mode() from the UI
+_ocr_affinity_mask   = 0      # set via configure_ocr_affinity(); 0 = no restriction
 
 
 def _apply_thread_affinity(mask: int) -> None:
@@ -77,6 +78,34 @@ def configure_torch_threads(n: int) -> None:
         pass
 
 
+def set_thread_device(gpu) -> None:
+    """Force the calling thread to use GPU (True) or CPU (False).
+
+    Pass None to clear the override and fall back to the global gpu_mode flag.
+    Call this at thread startup — before the first analyze() call — so the
+    correct Reader is created from the start.
+    """
+    _thread_device_local.use_gpu = gpu
+
+
+def prime_thread_reader(reader, use_gpu) -> None:
+    """Inject a pre-warmed EasyOCR Reader into this thread's local storage.
+
+    Avoids the ~2-3s model reload that happens when a new thread calls
+    _get_reader() for the first time.  Call this at the start of a short-lived
+    inner thread (e.g. the _rt analysis thread in async workers) so it reuses
+    the reader already loaded by the long-lived outer worker thread.
+
+    reader   — the EasyOCR Reader object to cache for this thread.
+    use_gpu  — True/False/None: the device the reader was built for.
+               None = inherit global _gpu_mode_enabled.
+    """
+    _thread_local.reader = reader
+    _resolved = use_gpu if use_gpu is not None else _gpu_mode_enabled
+    _thread_local.reader_gpu = _resolved
+    _thread_device_local.use_gpu = use_gpu
+
+
 def set_gpu_mode(enabled: bool) -> None:
     """Enable or disable GPU (CUDA) inference for all subsequent OCR calls.
 
@@ -95,8 +124,14 @@ def _get_reader():
     created — each thread tracks the gpu setting its reader was built with.
     Applies the OCR affinity mask on first load so the calling thread (an
     async worker) is pinned to OCR-only cores, keeping the input core free.
+
+    Per-thread device override (set via set_thread_device()) takes priority
+    over the global _gpu_mode_enabled flag — used by hybrid GPU+CPU backlog
+    workers so each thread runs on its designated device.
     """
-    if not hasattr(_thread_local, "reader") or getattr(_thread_local, "reader_gpu", None) != _gpu_mode_enabled:
+    _override = getattr(_thread_device_local, "use_gpu", None)
+    _use_gpu  = _override if _override is not None else _gpu_mode_enabled
+    if not hasattr(_thread_local, "reader") or getattr(_thread_local, "reader_gpu", None) != _use_gpu:
         _apply_thread_affinity(_ocr_affinity_mask)
         try:
             import torch
@@ -105,8 +140,8 @@ def _get_reader():
         except Exception:
             pass
         import easyocr
-        _thread_local.reader     = easyocr.Reader(["en"], gpu=_gpu_mode_enabled, verbose=False)
-        _thread_local.reader_gpu = _gpu_mode_enabled
+        _thread_local.reader     = easyocr.Reader(["en"], gpu=_use_gpu, verbose=False)
+        _thread_local.reader_gpu = _use_gpu
     return _thread_local.reader
 
 
@@ -130,11 +165,17 @@ _CROP_TOP_FRAC  = 0.65   # fraction of image height to skip from the top
 # Geometry for the post-buy preview screen (bazaar inspect view):
 #   The info sub-box (relic icon + name + passives) is centred in the modal.
 #   At 2560×1440 the relic name starts at ~y=46%, text at ~x=46%.
-#   Cropping from left=0.28 / top=0.42 captures the full info panel while
+#   Cropping from left=0.28 / top=0.38 captures the full info panel while
 #   excluding the shop items column on the far left.
+#
+#   Top was lowered from 0.42 → 0.38 to give a larger margin above the relic
+#   name.  Delicate relics (1 passive) have their only passive line just below
+#   the name; at 0.42 it could land right at the crop boundary and be missed.
+#   0.38 keeps the passive well within the captured area at all tested
+#   resolutions without meaningfully increasing OCR area.
 
 _PREVIEW_CROP_LEFT_FRAC = 0.28   # fraction of width  to skip (preview screen)
-_PREVIEW_CROP_TOP_FRAC  = 0.42   # fraction of height to skip (preview screen)
+_PREVIEW_CROP_TOP_FRAC  = 0.38   # fraction of height to skip (preview screen)
 
 # Maximum width (px) fed to the OCR engine after cropping.
 # OCR time scales with pixel count — capping at 1000 px gives ~2-3× speed
@@ -567,6 +608,26 @@ def analyze(
                     "reason": None,
                     "matched": None,
                 })
+
+    # ── Passive-rescue pass ──────────────────────────────────────────────── #
+    # Retry low-confidence tokens against ALL_PASSIVES_SORTED.  Motivated by
+    # Delicate relics (1 passive): the single passive line can land at the top
+    # of the cropped region with slightly reduced contrast, pushing its OCR
+    # confidence below the 0.35 floor even though the text is correct.  A
+    # lower fuzzy cutoff (0.78) recovers these while staying well above random-
+    # noise.  Tokens already matched as passives or with conf < 0.05 are skipped.
+    for _lct, _lcc, _lcy in _low_conf_tokens:
+        if _lcc < 0.05 or _lct in passives:
+            continue
+        _rescue_passive = _match_passive(_lct, ALL_PASSIVES_SORTED, cutoff=0.78)
+        if _rescue_passive and _rescue_passive not in passives:
+            passives.append(_rescue_passive)
+            for _dt in reversed(_dbg_tokens):
+                if _dt["text"] == _lct and _dt["status"] == "DROPPED":
+                    _dt["status"]  = "PASSIVE"
+                    _dt["reason"]  = "low_conf_rescue"
+                    _dt["matched"] = _rescue_passive
+                    break
 
     # ── Curse-rescue pass ────────────────────────────────────────────────── #
     # Retry low-confidence tokens against ALL_CURSES only.  The 0.82 fuzzy
