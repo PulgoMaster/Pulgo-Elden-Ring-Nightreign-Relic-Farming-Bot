@@ -18,7 +18,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from database.pool_weights import (
-    TABLE_100, TABLE_200, TABLE_300,
+    TABLE_100, TABLE_110, TABLE_200, TABLE_210, TABLE_300, TABLE_310,
     TABLE_2000000, TABLE_2100000,
     TABLE_100_TOTAL, TABLE_200_TOTAL, TABLE_300_TOTAL,
     TABLE_2000000_TOTAL, TABLE_2100000_TOTAL,
@@ -398,7 +398,7 @@ DEEP_POOL_PASSIVES: frozenset = frozenset(
 
 NORMAL_POOL_PASSIVES: frozenset = frozenset(
     k.split("> ", 1)[1]
-    for table in (TABLE_100, TABLE_200, TABLE_300)
+    for table in (TABLE_100, TABLE_110, TABLE_200, TABLE_210, TABLE_300, TABLE_310)
     for k, v in table.items()
     if any(k.startswith(pfx) for pfx in _NORMAL_PREFIXES) and v > 0
 )
