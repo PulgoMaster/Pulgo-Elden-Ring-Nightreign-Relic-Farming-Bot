@@ -14,8 +14,9 @@
         powershell -ExecutionPolicy Bypass -File Update.ps1
 #>
 
-$ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+try {
 
 Write-Host ""
 Write-Host "=== RelicBot Updater ===" -ForegroundColor Cyan
@@ -40,7 +41,7 @@ Write-Host ""
 
 # ── Extract to temp ───────────────────────────────────────────────────────── #
 $tempDir = Join-Path $env:TEMP ("RelicBotUpd_" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
-New-Item -ItemType Directory -Path $tempDir | Out-Null
+New-Item -ItemType Directory -Path $tempDir -ErrorAction Stop | Out-Null
 
 Write-Host "Extracting ZIP..." -ForegroundColor Yellow
 try {
@@ -77,7 +78,7 @@ Write-Host ""
 Write-Host "--- Backing up user data ---" -ForegroundColor Cyan
 
 $backupDir = Join-Path $env:TEMP ("RelicBotBackup_" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
-New-Item -ItemType Directory -Path $backupDir | Out-Null
+New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop | Out-Null
 
 # User data to preserve across updates
 $preserveItems = @(
@@ -128,19 +129,27 @@ Write-Host "--- Installing new version (clean replacement) ---" -ForegroundColor
 
 # Delete all old items
 $removed = 0
-Get-ChildItem -Path $scriptDir | Where-Object {
+Get-ChildItem -Path $scriptDir -ErrorAction SilentlyContinue | Where-Object {
     $_.Name -ne "Update.ps1" -and $_.Name -notlike "RelicBot*.zip"
 } | ForEach-Object {
-    Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
-    $removed++
+    try {
+        Remove-Item -Recurse -Force $_.FullName
+        $removed++
+    } catch {
+        Write-Host "  WARNING: Could not remove $($_.Name): $_" -ForegroundColor Yellow
+    }
 }
 Write-Host "  Removed $removed old item(s)."
 
 # Copy all new items (including the new Update.ps1 — self-update)
 $copied = 0
-Get-ChildItem -Path $newDir | ForEach-Object {
-    Copy-Item -Recurse $_.FullName (Join-Path $scriptDir $_.Name) -Force
-    $copied++
+Get-ChildItem -Path $newDir -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+        Copy-Item -Recurse $_.FullName (Join-Path $scriptDir $_.Name) -Force
+        $copied++
+    } catch {
+        Write-Host "  WARNING: Could not copy $($_.Name): $_" -ForegroundColor Yellow
+    }
 }
 Write-Host "  Copied $copied new item(s)."
 Write-Host ""
@@ -188,7 +197,7 @@ $seqDst    = Join-Path $scriptDir "sequences"
 if (Test-Path $newSeqSrc) {
     New-Item -ItemType Directory -Path $seqDst -Force | Out-Null
     $seqCount = 0
-    Get-ChildItem -Path $newSeqSrc -Filter "*.json" | ForEach-Object {
+    Get-ChildItem -Path $newSeqSrc -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
         Copy-Item $_.FullName (Join-Path $seqDst $_.Name) -Force
         $seqCount++
     }
@@ -238,6 +247,16 @@ if ($gpuLost) {
         Write-Host " No reinstall needed." -ForegroundColor Green
     }
     Write-Host "==============================" -ForegroundColor Cyan
+}
+
+} catch {
+    Write-Host ""
+    Write-Host "==============================" -ForegroundColor Red
+    Write-Host " UPDATE FAILED" -ForegroundColor Red
+    Write-Host " Error: $_" -ForegroundColor Red
+    Write-Host "==============================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Please report this error." -ForegroundColor Yellow
 }
 
 Write-Host ""
