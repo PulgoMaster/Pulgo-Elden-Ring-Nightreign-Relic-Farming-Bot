@@ -3545,27 +3545,32 @@ class RelicBotApp(tk.Tk):
 
                 def _worker():
                     while True:
+                        _gpu_aa = self._gpu_always_analyze_var.get()
+                        if _gpu_aa and not use_gpu:
+                            # GPU AA on, CPU worker: wait for gate BEFORE dequeuing.
+                            # Post-dequeue waiting would hold the task, preventing the
+                            # GPU worker (which bypasses the gate) from reaching it.
+                            # Pre-checking keeps the task in the queue where GPU can grab it.
+                            # Loop with 1 s polls — indefinite, no escape (Phase -0.5 +
+                            # Phase 0 together can exceed 70 s).
+                            _go_ev = self._ocr_go_event
+                            if _go_ev is not None and not _go_ev.is_set():
+                                while not _go_ev.wait(timeout=1.0):
+                                    pass
                         _prio, _task = _async_relic_q.get()
                         if _task is None:   # sentinel
                             _async_relic_q.task_done()
                             break
-                        # Throttle during input phases: wait until the main thread
-                        # clears the gate (set=go, clear=inputs active).
-                        # Workers finish their current task first; only the *next*
-                        # task is held. This keeps inputs free without killing throughput.
-                        # Loop with 1 s polls so the wait is indefinite — no timeout
-                        # escape that would let workers slip through during long phases
-                        # (Phase -0.5 + Phase 0 together can exceed 70 s).
-                        # Exception: if this is the GPU worker and "GPU: Always Analyze"
-                        # is enabled, skip the gate entirely — GPU inference runs on the
-                        # graphics card and does not compete for CPU time with inputs.
-                        _go_ev = self._ocr_go_event
-                        if _go_ev is not None and not _go_ev.is_set():
-                            if use_gpu and self._gpu_always_analyze_var.get():
-                                pass  # GPU always-analyze: bypass throttle gate
-                            else:
+                        if not _gpu_aa:
+                            # GPU AA off: all workers use post-dequeue gate check
+                            # (original behavior — workers finish current task first,
+                            # only the next task is held while gate is closed).
+                            _go_ev = self._ocr_go_event
+                            if _go_ev is not None and not _go_ev.is_set():
                                 while not _go_ev.wait(timeout=1.0):
                                     pass
+                        # GPU AA on: GPU worker bypasses gate entirely; CPU workers
+                        # already waited before dequeue above — no post-check needed.
                         # Pre-warm the EasyOCR reader in this (outer) worker thread
                         # the first time a task is dequeued.  Subsequent tasks reuse it.
                         if _cached_reader[0] is None:
@@ -4935,13 +4940,13 @@ class RelicBotApp(tk.Tk):
                         if _done_ev.is_set() and _bl_q.empty():
                             break
                         continue
-                    # Respect the shared throttle gate during input phases.
-                    # GPU worker bypasses this only when "GPU: Always Analyze" is enabled.
-                    _go_ev = self._ocr_go_event
-                    if _go_ev is not None and not _go_ev.is_set():
-                        if use_gpu and self._gpu_always_analyze_var.get():
-                            pass  # GPU always-analyze: bypass throttle gate
-                        else:
+                    # When GPU Always Analyze is on, the GPU worker skips the
+                    # gate entirely — GPU inference doesn't compete for CPU time.
+                    # All other workers (CPU workers, or GPU worker with AA off)
+                    # respect the shared gate as normal.
+                    if not (use_gpu and self._gpu_always_analyze_var.get()):
+                        _go_ev = self._ocr_go_event
+                        if _go_ev is not None and not _go_ev.is_set():
                             while not _go_ev.wait(timeout=1.0):
                                 pass
                     try:
