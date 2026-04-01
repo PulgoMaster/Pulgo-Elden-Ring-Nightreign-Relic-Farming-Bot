@@ -3457,6 +3457,87 @@ class RelicBotApp(tk.Tk):
         _intermittent_every_n = max(1, self._intermittent_every_n_var.get())
         _iters_since_drain    = 0   # how many iterations since last intermittent drain
 
+        # GPU Always Analyze + Intermittent: persistent GPU worker runs throughout
+        # the entire capture phase — enqueued immediately after each iteration,
+        # no game-close needed for GPU.  CPU workers are gated: released every N
+        # iterations to handle any remainder the GPU hasn't reached yet.
+        _gpu_aa_bl = (self._gpu_always_analyze_var.get()
+                      and self._hybrid_var.get()
+                      and self._gpu_accel_var.get()
+                      and self._parallel_enabled_var.get())
+        _bg_gpu_active  = _backlog_mode and _intermittent_mode and _gpu_aa_bl
+        _bg_gpu_q       = queue.PriorityQueue() if _bg_gpu_active else None
+        _bg_bl_state: dict = {}
+        _bg_bl_lock     = threading.Lock()
+        _bg_bl_dmap: dict = {}
+        _bg_done_ev     = threading.Event()
+        _bg_cpu_go_ev   = threading.Event()   # CPU gate: set when N iters reached
+        _bg_worker      = None
+        _bg_cpu_threads: list = []
+
+        if _bg_gpu_active:
+            from bot import relic_analyzer as _bg_ra
+            _bg_ra.set_gpu_mode(True)
+
+            def _make_bg_worker(use_gpu, gate_ev=None):
+                from bot import relic_analyzer as _bra
+                _cached_rdr = [None]
+                def _worker():
+                    _bra.set_thread_device(use_gpu)
+                    while True:
+                        if gate_ev is not None:
+                            # CPU worker: wait for gate before each task
+                            while not gate_ev.is_set():
+                                if _bg_done_ev.is_set() and _bg_gpu_q.empty():
+                                    return
+                                gate_ev.wait(timeout=1.0)
+                        if _bg_done_ev.is_set() and _bg_gpu_q.empty():
+                            break
+                        try:
+                            _prio, _task = _bg_gpu_q.get(timeout=0.3)
+                        except queue.Empty:
+                            if gate_ev is not None and _bg_gpu_q.empty():
+                                # Queue drained — re-block until next N-iter gate open
+                                gate_ev.clear()
+                            continue
+                        if _cached_rdr[0] is None:
+                            _cached_rdr[0] = _bra._get_reader()
+                        try:
+                            _rdr = _cached_rdr[0]
+                            def _inner(_t=_task, _r=_rdr):
+                                _bra.prime_thread_reader(_r, use_gpu)
+                                self._analyze_relic_task(
+                                    _t, _bg_bl_state, _bg_bl_lock, _bg_bl_dmap, results)
+                            _rt = threading.Thread(target=_inner, daemon=True)
+                            _rt.start()
+                            _rt.join(timeout=90)
+                            if _rt.is_alive():
+                                self._log("  [BG-GPU] Relic analysis timed out — skipping.")
+                        except Exception as _bge:
+                            self._log(f"  [BG-GPU] Worker error: {_bge}")
+                        finally:
+                            _bg_gpu_q.task_done()
+                return _worker
+
+            _bg_worker = threading.Thread(
+                target=_make_bg_worker(True), daemon=True, name="bg-gpu-worker")
+            _bg_worker.start()
+
+            _bg_w_max = min(8, max(2, self._hw_cpu_cores or 8))
+            _bg_n_cpu = (max(2, min(_bg_w_max, self._parallel_workers_var.get()))
+                         if self._parallel_enabled_var.get() else 1)
+            _bg_cpu_threads = [
+                threading.Thread(target=_make_bg_worker(False, _bg_cpu_go_ev),
+                                 daemon=True, name=f"bg-cpu-worker-{_n}")
+                for _n in range(_bg_n_cpu)
+            ]
+            for _t in _bg_cpu_threads:
+                _t.start()
+            self._log(
+                f"  [BG-GPU] Persistent GPU+CPU workers started "
+                f"(GPU always on, {_bg_n_cpu} CPU worker(s) gated every "
+                f"{_intermittent_every_n} iteration(s)).")
+
         # ── Async mode setup ──────────────────────────────────────────── #
         # Backlog mode takes priority — skip async workers during the run.
         _async_mode = self._async_enabled_var.get() and not _backlog_mode
@@ -4325,6 +4406,60 @@ class RelicBotApp(tk.Tk):
                         # threshold — otherwise the drain fires short by however many
                         # empty iterations occurred.
                         _iters_since_drain += 1
+
+                        # GPU Always Analyze: enqueue this iteration immediately so
+                        # the persistent GPU worker starts analyzing right away —
+                        # no need to wait for N iterations or a game-close.
+                        if _bg_gpu_active and _bg_gpu_q is not None:
+                            with _bg_bl_lock:
+                                _bg_bl_state[iteration] = {
+                                    "total":            len(captures),
+                                    "done":             0,
+                                    "results":          [],
+                                    "iter_dir":         iter_dir,
+                                    "hit_min":          hit_min,
+                                    "live_log_path":    live_log_path,
+                                    "run_dir":          run_dir,
+                                    "criteria_summary": criteria_summary,
+                                    "mode_desc":        mode_desc,
+                                    "limit_value":      limit_value,
+                                    "save_filename":    save_filename,
+                                    "batch_id":         batch_id,
+                                    "matches_log_path": matches_log_path,
+                                    "_run_log_path":    batch_log_path,
+                                }
+                                _bg_bl_dmap[iteration] = iter_dir
+                            _bg_enqueued = 0
+                            for _bg_si, _bg_img_bytes, _ in captures:
+                                _bg_img_path = os.path.join(
+                                    iter_dir, f"Iter_{iteration}_Relic_{_bg_si + 1}.jpg")
+                                _bg_task = {
+                                    "iteration":         iteration,
+                                    "step_i":            _bg_si,
+                                    "img_bytes":         _bg_img_bytes,
+                                    "pending_path":      "",
+                                    "_backlog_img_path": _bg_img_path,
+                                    "iter_dir":          iter_dir,
+                                    "criteria":          criteria,
+                                    "hit_min":           hit_min,
+                                    "live_log_path":     live_log_path,
+                                    "matches_log_path":  matches_log_path,
+                                    "run_dir":           run_dir,
+                                    "criteria_summary":  criteria_summary,
+                                    "mode_desc":         mode_desc,
+                                    "limit_value":       limit_value,
+                                    "save_filename":     save_filename,
+                                    "batch_id":          batch_id,
+                                    "_run_log_path":     batch_log_path,
+                                    "crop_left":         relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
+                                    "crop_top":          relic_analyzer._PREVIEW_CROP_TOP_FRAC,
+                                    "_retries":          0,
+                                }
+                                _bg_gpu_q.put(((iteration, _bg_si), _bg_task))
+                                _bg_enqueued += 1
+                            self._log(
+                                f"  [BG-GPU] Iter {iteration}: "
+                                f"{_bg_enqueued} relic(s) queued for GPU analysis.")
                     except Exception as _ble:
                         self._log(f"  [Backlog] WARNING: could not save backlog: {_ble}")
 
@@ -4341,17 +4476,27 @@ class RelicBotApp(tk.Tk):
 
                 # ── Intermittent backlog drain ───────────────────────── #
                 if _intermittent_mode and _iters_since_drain >= _intermittent_every_n:
-                    self._log(
-                        f"[Intermittent] {_iters_since_drain} iteration(s) captured — "
-                        f"closing game for analysis…")
-                    self._set_status("Intermittent: closing game…", "#0066cc")
-                    self._close_game()
-                    self._set_status("Intermittent: clearing backlog…", "#0066cc")
-                    self._process_backlog_run(
-                        run_dir, criteria, hit_min,
-                        matches_log_path, batch_log_path,
-                        criteria_summary, mode_desc, limit_value,
-                        save_filename, batch_id, results)
+                    if _bg_gpu_active:
+                        # GPU AA mode: GPU has been working continuously — no game-close
+                        # needed.  Just open the CPU gate so CPU workers can pick up any
+                        # remainder the GPU hasn't reached yet.  CPU workers re-block
+                        # themselves once the queue is empty.
+                        self._log(
+                            f"[Intermittent] {_iters_since_drain} iteration(s) captured — "
+                            f"opening CPU gate for remainder (GPU already processing).")
+                        _bg_cpu_go_ev.set()
+                    else:
+                        self._log(
+                            f"[Intermittent] {_iters_since_drain} iteration(s) captured — "
+                            f"closing game for analysis…")
+                        self._set_status("Intermittent: closing game…", "#0066cc")
+                        self._close_game()
+                        self._set_status("Intermittent: clearing backlog…", "#0066cc")
+                        self._process_backlog_run(
+                            run_dir, criteria, hit_min,
+                            matches_log_path, batch_log_path,
+                            criteria_summary, mode_desc, limit_value,
+                            save_filename, batch_id, results)
                     _iters_since_drain = 0
 
                 continue
@@ -4766,6 +4911,108 @@ class RelicBotApp(tk.Tk):
 
         # ── Backlog mode: process all deferred screenshots ─────────────── #
         if _backlog_mode and _run_dir_created[0]:
+            if _bg_gpu_active and _bg_gpu_q is not None:
+                # Drain the persistent background GPU+CPU workers.
+                # Open CPU gate one final time so CPU workers clear any remainder,
+                # then signal done and wait for the queue to empty.
+                self._log("[BG-GPU] Waiting for background workers to drain…")
+                self._set_status("Background GPU: draining queue…", "#0066cc")
+                _bg_cpu_go_ev.set()
+                _bg_done_ev.set()
+                _bg_gpu_q.join()
+                for _bgt in [_bg_worker] + _bg_cpu_threads:
+                    if _bgt:
+                        _bgt.join(timeout=5.0)
+
+                # ── Retry pass for GPU-failed relics ──────────────────── #
+                _bg_retry_dir = os.path.join(run_dir, "_retry_staging")
+                if os.path.isdir(_bg_retry_dir):
+                    _bg_retry_files = sorted(
+                        f for f in os.listdir(_bg_retry_dir) if f.endswith(".jpg"))
+                    _bg_valid = []
+                    for _brf in _bg_retry_files:
+                        _brp = _brf.replace(".jpg", "").split("_")
+                        if (len(_brp) != 4 or _brp[0] != "Iter"
+                                or _brp[2] != "Relic"):
+                            continue
+                        try:
+                            _br_iter = int(_brp[1])
+                            _br_si   = int(_brp[3]) - 1
+                        except ValueError:
+                            continue
+                        if _br_iter not in _bg_bl_state:
+                            continue
+                        _bg_valid.append(
+                            (_br_iter, _br_si, os.path.join(_bg_retry_dir, _brf)))
+                    if _bg_valid:
+                        self._log(
+                            f"[BG-GPU] Retry pass: {len(_bg_valid)} relic(s).")
+                        self._set_status("Background GPU: retry pass…", "#0066cc")
+                        relic_analyzer.set_thread_device(False)
+                        try:
+                            for _br_iter, _br_si, _br_path in _bg_valid:
+                                if not os.path.exists(_br_path):
+                                    continue
+                                _brs = _bg_bl_state[_br_iter]
+                                try:
+                                    with open(_br_path, "rb") as _brf2:
+                                        _br_img = _brf2.read()
+                                except Exception:
+                                    continue
+                                _br_task = {
+                                    "iteration":         _br_iter,
+                                    "step_i":            _br_si,
+                                    "img_bytes":         _br_img,
+                                    "pending_path":      "",
+                                    "_backlog_img_path": _br_path,
+                                    "_retry_pass":       True,
+                                    "iter_dir":          _brs["iter_dir"],
+                                    "criteria":          criteria,
+                                    "hit_min":           _brs["hit_min"],
+                                    "live_log_path":     _brs["live_log_path"],
+                                    "matches_log_path":  _brs["matches_log_path"],
+                                    "run_dir":           run_dir,
+                                    "criteria_summary":  _brs["criteria_summary"],
+                                    "mode_desc":         _brs["mode_desc"],
+                                    "limit_value":       _brs["limit_value"],
+                                    "save_filename":     _brs["save_filename"],
+                                    "batch_id":          _brs["batch_id"],
+                                    "_run_log_path":     _brs["_run_log_path"],
+                                    "_retries":          0,
+                                }
+                                try:
+                                    self._analyze_relic_task(
+                                        _br_task, _bg_bl_state, _bg_bl_lock,
+                                        _bg_bl_dmap, results)
+                                except Exception as _bre:
+                                    self._log(f"  [BG-GPU Retry] Error: {_bre}")
+                        finally:
+                            relic_analyzer.set_thread_device(None)
+                        self._log("[BG-GPU] Retry pass complete.")
+                    try:
+                        shutil.rmtree(_bg_retry_dir)
+                    except Exception:
+                        pass
+
+                # Mark all GPU-processed iterations as done so
+                # _process_backlog_run skips them.
+                for _bg_iter_num, _bg_idata in _bg_bl_state.items():
+                    _bg_src = os.path.join(_bg_idata["iter_dir"], "backlog_meta.json")
+                    _bg_dst = os.path.join(_bg_idata["iter_dir"], "backlog_meta_done.json")
+                    try:
+                        if os.path.exists(_bg_src):
+                            os.rename(_bg_src, _bg_dst)
+                    except Exception:
+                        pass
+
+                _bg_total = sum(v["done"] for v in _bg_bl_state.values())
+                self._log(
+                    f"[BG-GPU] Complete — {_bg_total} relic(s) analyzed by "
+                    f"background GPU worker.")
+
+            # Always call _process_backlog_run: handles any iterations that were
+            # not processed by the background GPU worker (e.g. partial final batch
+            # if the run was stopped early) and the retry pass for those.
             self._process_backlog_run(
                 run_dir, criteria, hit_min,
                 matches_log_path, batch_log_path,
