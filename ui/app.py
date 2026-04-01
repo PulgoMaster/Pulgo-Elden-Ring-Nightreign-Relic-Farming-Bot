@@ -4367,49 +4367,11 @@ class RelicBotApp(tk.Tk):
                     import json as _json
                     try:
                         os.makedirs(iter_dir, exist_ok=True)
-                        for _si, _img, _pp in captures:
-                            # Name includes iteration so each file is uniquely
-                            # identifiable without needing a subfolder.
-                            _bl_fname = f"Iter_{iteration}_Relic_{_si + 1}.jpg"
-                            with open(os.path.join(iter_dir, _bl_fname), "wb") as _f:
-                                _f.write(_img)
-                            if _pp and os.path.exists(_pp):
-                                try:
-                                    os.remove(_pp)
-                                except Exception:
-                                    pass
-                        _bl_meta = {
-                            "iteration":        iteration,
-                            "total_relics":     len(captures),
-                            "iter_dir":         iter_dir,
-                            "hit_min":          hit_min,
-                            "live_log_path":    live_log_path,
-                            "run_dir":          run_dir,
-                            "criteria_summary": criteria_summary,
-                            "mode_desc":        mode_desc,
-                            "limit_value":      limit_value,
-                            "save_filename":    save_filename,
-                            "batch_id":         batch_id,
-                            "matches_log_path": matches_log_path,
-                            "_run_log_path":    batch_log_path,
-                            "criteria":         criteria,
-                        }
-                        with open(os.path.join(iter_dir, "backlog_meta.json"),
-                                  "w", encoding="utf-8") as _f:
-                            _json.dump(_bl_meta, _f, indent=2)
-                        self._log(
-                            f"  [Backlog] {len(captures)} screenshot(s) saved "
-                            f"for iteration {iteration} — analysis deferred.")
-                        # Count only iterations that successfully wrote a meta file.
-                        # Iterations with empty captures (Phase 1 abort, settle fail)
-                        # do not produce a meta and must not count toward the drain
-                        # threshold — otherwise the drain fires short by however many
-                        # empty iterations occurred.
-                        _iters_since_drain += 1
 
-                        # GPU Always Analyze: enqueue this iteration immediately so
-                        # the persistent GPU worker starts analyzing right away —
-                        # no need to wait for N iterations or a game-close.
+                        # GPU Always Analyze: initialise the iteration state entry
+                        # before the save loop so each image can be enqueued the
+                        # instant it is written to disk — GPU worker can start on
+                        # relic 1 while relic 2 is still being saved.
                         if _bg_gpu_active and _bg_gpu_q is not None:
                             with _bg_bl_lock:
                                 _bg_bl_state[iteration] = {
@@ -4429,16 +4391,28 @@ class RelicBotApp(tk.Tk):
                                     "_run_log_path":    batch_log_path,
                                 }
                                 _bg_bl_dmap[iteration] = iter_dir
-                            _bg_enqueued = 0
-                            for _bg_si, _bg_img_bytes, _ in captures:
-                                _bg_img_path = os.path.join(
-                                    iter_dir, f"Iter_{iteration}_Relic_{_bg_si + 1}.jpg")
-                                _bg_task = {
+
+                        for _si, _img, _pp in captures:
+                            # Name includes iteration so each file is uniquely
+                            # identifiable without needing a subfolder.
+                            _bl_fname = f"Iter_{iteration}_Relic_{_si + 1}.jpg"
+                            _bl_fpath = os.path.join(iter_dir, _bl_fname)
+                            with open(_bl_fpath, "wb") as _f:
+                                _f.write(_img)
+                            if _pp and os.path.exists(_pp):
+                                try:
+                                    os.remove(_pp)
+                                except Exception:
+                                    pass
+                            # GPU Always Analyze: enqueue immediately after saving —
+                            # GPU worker can start on this image right now.
+                            if _bg_gpu_active and _bg_gpu_q is not None:
+                                _bg_gpu_q.put(((iteration, _si), {
                                     "iteration":         iteration,
-                                    "step_i":            _bg_si,
-                                    "img_bytes":         _bg_img_bytes,
+                                    "step_i":            _si,
+                                    "img_bytes":         _img,
                                     "pending_path":      "",
-                                    "_backlog_img_path": _bg_img_path,
+                                    "_backlog_img_path": _bl_fpath,
                                     "iter_dir":          iter_dir,
                                     "criteria":          criteria,
                                     "hit_min":           hit_min,
@@ -4454,12 +4428,42 @@ class RelicBotApp(tk.Tk):
                                     "crop_left":         relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
                                     "crop_top":          relic_analyzer._PREVIEW_CROP_TOP_FRAC,
                                     "_retries":          0,
-                                }
-                                _bg_gpu_q.put(((iteration, _bg_si), _bg_task))
-                                _bg_enqueued += 1
+                                }))
+
+                        _bl_meta = {
+                            "iteration":        iteration,
+                            "total_relics":     len(captures),
+                            "iter_dir":         iter_dir,
+                            "hit_min":          hit_min,
+                            "live_log_path":    live_log_path,
+                            "run_dir":          run_dir,
+                            "criteria_summary": criteria_summary,
+                            "mode_desc":        mode_desc,
+                            "limit_value":      limit_value,
+                            "save_filename":    save_filename,
+                            "batch_id":         batch_id,
+                            "matches_log_path": matches_log_path,
+                            "_run_log_path":    batch_log_path,
+                            "criteria":         criteria,
+                        }
+                        with open(os.path.join(iter_dir, "backlog_meta.json"),
+                                  "w", encoding="utf-8") as _f:
+                            _json.dump(_bl_meta, _f, indent=2)
+                        if _bg_gpu_active:
                             self._log(
-                                f"  [BG-GPU] Iter {iteration}: "
-                                f"{_bg_enqueued} relic(s) queued for GPU analysis.")
+                                f"  [Backlog] {len(captures)} screenshot(s) saved "
+                                f"for iteration {iteration} — "
+                                f"{len(captures)} queued for GPU analysis immediately.")
+                        else:
+                            self._log(
+                                f"  [Backlog] {len(captures)} screenshot(s) saved "
+                                f"for iteration {iteration} — analysis deferred.")
+                        # Count only iterations that successfully wrote a meta file.
+                        # Iterations with empty captures (Phase 1 abort, settle fail)
+                        # do not produce a meta and must not count toward the drain
+                        # threshold — otherwise the drain fires short by however many
+                        # empty iterations occurred.
+                        _iters_since_drain += 1
                     except Exception as _ble:
                         self._log(f"  [Backlog] WARNING: could not save backlog: {_ble}")
 
