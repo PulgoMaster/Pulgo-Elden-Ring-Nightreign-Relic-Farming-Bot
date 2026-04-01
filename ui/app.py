@@ -3481,13 +3481,19 @@ class RelicBotApp(tk.Tk):
         _bg_worker      = None
         _bg_cpu_threads: list = []
 
+        # OCR throttle event — exists in ALL modes (backlog + async).
+        # set=workers run freely, clear=workers pause during input phases.
+        # _set_ocr_throttle was a no-op in backlog mode because this was
+        # initialized inside `if _async_mode:` only — fixed here.
+        self._ocr_go_event = threading.Event()
+        self._ocr_go_event.set()
+
         if _bg_gpu_active:
             from bot import relic_analyzer as _bg_ra
             _bg_ra.set_gpu_mode(True)
 
             def _make_bg_worker(use_gpu, gate_ev=None):
                 from bot import relic_analyzer as _bra
-                _cached_rdr = [None]
                 def _worker():
                     _bra.set_thread_device(use_gpu)
                     while True:
@@ -3506,19 +3512,9 @@ class RelicBotApp(tk.Tk):
                                 # Queue drained — re-block until next N-iter gate open
                                 gate_ev.clear()
                             continue
-                        if _cached_rdr[0] is None:
-                            _cached_rdr[0] = _bra._get_reader()
                         try:
-                            _rdr = _cached_rdr[0]
-                            def _inner(_t=_task, _r=_rdr):
-                                _bra.prime_thread_reader(_r, use_gpu)
-                                self._analyze_relic_task(
-                                    _t, _bg_bl_state, _bg_bl_lock, _bg_bl_dmap, results)
-                            _rt = threading.Thread(target=_inner, daemon=True)
-                            _rt.start()
-                            _rt.join(timeout=90)
-                            if _rt.is_alive():
-                                self._log("  [BG-GPU] Relic analysis timed out — skipping.")
+                            self._analyze_relic_task(
+                                _task, _bg_bl_state, _bg_bl_lock, _bg_bl_dmap, results)
                         except Exception as _bge:
                             self._log(f"  [BG-GPU] Worker error: {_bge}")
                         finally:
@@ -3565,9 +3561,6 @@ class RelicBotApp(tk.Tk):
             self._async_dir_map     = _async_dir_map
             self._async_state_lock  = _async_state_lock
             self._async_results_list = results
-            # OCR throttle: cleared before input phases, set before Phase 2 scan
-            self._ocr_go_event = threading.Event()
-            self._ocr_go_event.set()
             _gpu_on          = self._gpu_accel_var.get()
             _async_hybrid    = (_gpu_on
                                 and self._hybrid_var.get()
