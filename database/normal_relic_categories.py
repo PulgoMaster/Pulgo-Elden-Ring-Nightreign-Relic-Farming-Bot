@@ -225,9 +225,7 @@ CATEGORY_5_CHARACTER = [
     "[Guardian] Increased duration for Character Skill",
     "[Guardian] Creates whirlwind when charging halberd attacks",
     "[Guardian] Slowly restores nearby allies' HP while Art is active",
-    "[Guardian] Become the target of enemy aggression when ability is activated",
     "[Guardian] Successful guards send out shockwaves while ability is active",
-    "[Guardian] Reflect a portion of damage received when ability is activated",
     # Ironeye
     "[Ironeye] Art Charge Activation Adds Poison Effect",
     "[Ironeye] Boosts thrusting counterattacks after executing Art",
@@ -478,8 +476,6 @@ CATEGORY_19_STACKABLE = [
 UNROLLABLE_SPECIAL = [
     # These appear on special in-world relics (isSalable=0 in EquipParamAntique)
     "Switching Weapons Boosts Attack Power",
-    "Guardian: Become the target of enemy aggression when ability is activated",
-    "Guardian: Reflect a portion of damage received when ability is activated",
     # NOTE: Many of the regular passives also appear on special relics —
     # the above are ones that ONLY appear on special non-purchasable relics.
 ]
