@@ -1122,6 +1122,8 @@ class _PassivePoolTab(ttk.Frame):
         pool_name = "Deep of Night" if rtype == "night" else "Normal"
 
         # ── Single-entry odds ────────────────────────────────────────────────
+        if self._entries:
+            lines.append("  My Pool:")
         for entry in self._entries:
             accepted = entry["accepted"]
             label = _entry_label(entry)
@@ -1131,14 +1133,16 @@ class _PassivePoolTab(ttk.Frame):
             if p_relic and p_relic > 0:
                 n_r = int(round(1.0 / p_relic))
                 pct = p_relic * 100
-                lines.append(f"  {label}  →  {_fmt_pct(pct)}%  (~1 in {n_r:,} per relic)")
+                lines.append(f"    {label}  →  {_fmt_pct(pct)}%  (~1 in {n_r:,} per relic)")
                 per_relic_probs.append(p_relic)
             elif p_relic == 0.0:
-                lines.append(f"  {label}  →  Impossible Combo — passives are from the same exclusive group")
+                lines.append(f"    {label}  →  Impossible Combo — passives are from the same exclusive group")
             else:
-                lines.append(f"  {label}  →  not in {pool_name} pool")
+                lines.append(f"    {label}  →  not in {pool_name} pool")
 
         # ── Pairing odds ─────────────────────────────────────────────────────
+        if self._pairings:
+            lines.append("\n  Pairings:")
         for pair in self._pairings:
             ll = _entry_label({"accepted": pair["left"]})
             rl = _entry_label({"accepted": pair["right"]})
@@ -1157,25 +1161,27 @@ class _PassivePoolTab(ttk.Frame):
             if pair_p > 0:
                 n = int(round(1.0 / pair_p))
                 pct = pair_p * 100
-                lines.append(f"  PAIR {ll} + {rl}  →  {_fmt_pct(pct)}%  (~1 in {n:,} per relic)")
+                lines.append(f"    {ll} + {rl}  →  {_fmt_pct(pct)}%  (~1 in {n:,} per relic)")
                 per_relic_probs.append(pair_p)
             elif not any_compat:
-                lines.append(f"  PAIR {ll} + {rl}  →  Impossible Combo — passives are from the same exclusive group")
+                lines.append(f"    {ll} + {rl}  →  Impossible Combo — passives are from the same exclusive group")
             else:
-                lines.append(f"  PAIR {ll} + {rl}  →  not available in {pool_name} pool")
+                lines.append(f"    {ll} + {rl}  →  not available in {pool_name} pool")
 
-        # ── Combined P(≥ thresh of pool) ─────────────────────────────────────
+        # ── Combined P(≥ thresh of all criteria) ─────────────────────────────
         p_combined: float | None = None
+        _has_pairs = bool(self._pairings)
+        _criteria_label = "pool + pairs" if _has_pairs else "expected criteria"
         if per_relic_probs:
             p_combined = prob_at_least_k_of_pool(per_relic_probs, thresh)
             if p_combined and p_combined > 0:
                 n_combined = int(round(1.0 / max(p_combined, 1e-12)))
                 pct_combined = p_combined * 100
                 lines.append(
-                    f"\n  Odds of finding a relic that fulfills at least {thresh} of the expected criteria:"
+                    f"\n  Odds of finding a relic that fulfills at least {thresh} of the {_criteria_label}:"
                     f"  {_fmt_pct(pct_combined)}%  (~1 in {n_combined:,} per relic)")
             elif p_combined == 0.0:
-                lines.append(f"\n  Odds of finding a relic that fulfills at least {thresh} of the expected criteria: Impossible")
+                lines.append(f"\n  Odds of finding a relic that fulfills at least {thresh} of the {_criteria_label}: Impossible")
 
         self._propagate_p(p_combined)
         self._set_odds_text("\n".join(lines))
@@ -1235,8 +1241,7 @@ class _PassivePoolTab(ttk.Frame):
         self._threshold.set(min(self._threshold.get(), cap))
         self._update_odds()
         pool_str  = f"{len(self._entries)} passive{'s' if len(self._entries) != 1 else ''}"
-        pair_str  = f"{len(self._pairings)} pair{'s' if len(self._pairings) != 1 else ''}"
-        self._count_lbl.set(f"of {pool_str} + {pair_str}")
+        self._count_lbl.set(f"of {pool_str} in pool")
 
     # ── pairing panel ────────────────────────────────────────────────────── #
 

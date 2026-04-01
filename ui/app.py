@@ -1818,8 +1818,8 @@ class RelicBotApp(tk.Tk):
             odds_viewer,
             text="Ideal conditions (no lag, no crashes).  "
                  "Rolling: ~2.0 s/relic buy+settle + ~0.30 s/relic nav (LPM: 2.5 s + 0.45 s).  "
-                 "OCR: ~3.0 s/relic CPU · ~0.3 s GPU · divided by Brute Force worker count.  "
-                 "Async overlaps OCR with game.  Backlog defers OCR until after the run.",
+                 "OCR: ~3.0 s/relic CPU · ~0.3 s GPU · Hybrid combines GPU+CPU throughput · GPU Always Analyze suppresses CPU workers (GPU only).  "
+                 "Async overlaps OCR with game.  Backlog defers OCR until after the run.  Intermittent drains every N iterations.",
             foreground=theme.TEXT_MUTED, wraplength=760,
         ).pack(anchor="w", padx=8, pady=(0, 6))
 
@@ -1828,7 +1828,8 @@ class RelicBotApp(tk.Tk):
         for _ov_var in (self._low_perf_mode_var, self._parallel_enabled_var,
                         self._async_enabled_var, self._parallel_workers_var,
                         self._gpu_accel_var, self._backlog_mode_var,
-                        self._intermittent_backlog_var):
+                        self._intermittent_backlog_var, self._hybrid_var,
+                        self._gpu_always_analyze_var, self._intermittent_every_n_var):
             _ov_var.trace_add("write", lambda *_: self._update_odds_viewer())
 
         # ── Bot Control ─────────────────────────────────────────────── #
@@ -7759,12 +7760,15 @@ class RelicBotApp(tk.Tk):
         async_on    = getattr(self, "_async_enabled_var", None)
         workers_var = getattr(self, "_parallel_workers_var", None)
         gpu_accel   = getattr(self, "_gpu_accel_var", None) and self._gpu_accel_var.get()
+        hybrid_on   = gpu_accel and getattr(self, "_hybrid_var", None) and self._hybrid_var.get()
+        gpu_aa_on   = hybrid_on and getattr(self, "_gpu_always_analyze_var", None) and self._gpu_always_analyze_var.get()
 
         # Timing model — buy-phase scanning architecture (Proposal 1):
         #   Phase 0: shop nav once per iteration (~20 s flat)
         #   Phase 1: buy + settle per relic (~2.0 s avg, ~2.5 s LPM)
         #   Phase 2: RIGHT + gap + capture per relic (0.30 s normal, 0.45 s LPM)
         #   OCR: 3.0 s/relic CPU; 0.3 s/relic GPU; divided by worker count (Brute Force)
+        #   Hybrid: 1 GPU + N CPU workers sharing queue; GPU AA suppresses CPU workers
         #   Async: overlaps OCR with next iteration's game time
         #   Backlog: zero OCR during game; all analysis runs after run ends
         backlog_var = getattr(self, "_backlog_mode_var", None)
@@ -7796,12 +7800,29 @@ class RelicBotApp(tk.Tk):
         sec_buy_relic, _n_p1  = _calibrated(_p1_entry,  2.5 if lpm else 2.0)
         sec_nav_relic, _n_p2  = _calibrated(_p2_entry,  0.45 if lpm else 0.30)
 
-        # Per-relic OCR cost — workers run in parallel (Brute Force); GPU 10× faster
+        # Per-relic OCR cost
         workers = (workers_var.get() if (workers_var and parallel_on and parallel_on.get()) else 1)
-        _ocr_fallback = 0.3 if gpu_accel else {1: 3.0, 2: 1.5, 3: 1.0, 4: 0.8}.get(min(workers, 4), 0.6)
-        sec_analyze_raw, _n_ocr = _calibrated(_ocr_entry, _ocr_fallback)
-        # Worker parallelism: multiple workers reduce wall-clock OCR time proportionally
-        sec_analyze = sec_analyze_raw / max(1, workers)
+        if gpu_aa_on:
+            # GPU Always Analyze → CPU workers suppressed → 1 GPU worker only
+            _ocr_fallback = 0.3
+            sec_analyze_raw, _n_ocr = _calibrated(_ocr_entry, _ocr_fallback)
+            sec_analyze = sec_analyze_raw
+        elif hybrid_on:
+            # 1 GPU (0.3 s) + workers CPU (3.0 s each) sharing queue — combined throughput
+            _gpu_rate = 1.0 / 0.3
+            _cpu_rate = workers / 3.0
+            sec_analyze = 1.0 / (_gpu_rate + _cpu_rate)
+            _n_ocr = 0
+        elif gpu_accel:
+            # GPU only
+            _ocr_fallback = 0.3
+            sec_analyze_raw, _n_ocr = _calibrated(_ocr_entry, _ocr_fallback)
+            sec_analyze = sec_analyze_raw
+        else:
+            # CPU only — Brute Force workers reduce wall-clock time proportionally
+            _ocr_fallback = {1: 3.0, 2: 1.5, 3: 1.0, 4: 0.8}.get(min(workers, 4), 0.6)
+            sec_analyze_raw, _n_ocr = _calibrated(_ocr_entry, _ocr_fallback)
+            sec_analyze = sec_analyze_raw / max(1, workers)
 
         # Calibration note for display — show count of game-input samples
         _game_cal_n = min(v for v in (_n_p0, _n_p1, _n_p2) if v >= _MIN_SAMPLES) \
@@ -7902,14 +7923,25 @@ class RelicBotApp(tk.Tk):
         ss_lines = []   # list of (text, tag)
         ss_lines.append(("Active modes:\n", "heading"))
 
+        _intermittent_active = _backlog_active and getattr(self, "_intermittent_backlog_var", None) and self._intermittent_backlog_var.get()
+        _every_n = getattr(self, "_intermittent_every_n_var", None) and self._intermittent_every_n_var.get()
+
         active_parts = []
         if gpu_accel:
             active_parts.append(f"GPU Acceleration (~0.3 s/relic OCR, {self._hw_gpu_name})")
+        if hybrid_on:
+            if gpu_aa_on:
+                active_parts.append(f"Hybrid GPU+CPU + GPU Always Analyze (GPU worker only, ~0.3 s/relic)")
+            else:
+                active_parts.append(f"Hybrid GPU+CPU (1 GPU + {workers} CPU worker(s), ~{sec_analyze:.2f} s/relic effective)")
         if _async_active:
             active_parts.append("Async Analysis (OCR overlaps game navigation)")
         if _backlog_active:
-            active_parts.append("Backlog Analysis (OCR deferred until after run)")
-        if _bf_active:
+            if _intermittent_active:
+                active_parts.append(f"Intermittent Backlog (drain every {_every_n} iteration(s), OCR after each drain)")
+            else:
+                active_parts.append("Backlog Analysis (OCR deferred until after run)")
+        if _bf_active and not hybrid_on:
             active_parts.append(f"Brute Force Analysis ({workers} workers)")
         if _lpm_active:
             active_parts.append("Low Performance Mode (+0.5 s/relic buy, +0.15 s/relic nav)")
