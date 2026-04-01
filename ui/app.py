@@ -3513,6 +3513,7 @@ class RelicBotApp(tk.Tk):
                                 # Queue drained — re-block until next N-iter gate open
                                 gate_ev.clear()
                             continue
+                        _task["_use_gpu"] = use_gpu
                         try:
                             self._analyze_relic_task(
                                 _task, _bg_bl_state, _bg_bl_lock, _bg_bl_dmap, results)
@@ -3652,6 +3653,9 @@ class RelicBotApp(tk.Tk):
                             if _go_ev is not None and not _go_ev.is_set():
                                 while not _go_ev.wait(timeout=1.0):
                                     pass
+                        # Tag the task with the worker's device so _analyze_relic_task
+                        # can skip the memory pressure gate for GPU workers with GPU AA.
+                        _task["_use_gpu"] = use_gpu
                         # Overflow tasks embed their own state so main workers can
                         # handle them without extra threads.
                         _ovf = _task.pop("_ovf_state", None)
@@ -5169,6 +5173,7 @@ class RelicBotApp(tk.Tk):
                         if _go_ev is not None and not _go_ev.is_set():
                             while not _go_ev.wait(timeout=1.0):
                                 pass
+                    _task["_use_gpu"] = use_gpu
                     try:
                         self._analyze_relic_task(
                             _task, _bl_state, _bl_lock, _bl_dmap, results)
@@ -5504,17 +5509,24 @@ class RelicBotApp(tk.Tk):
         # Memory pressure gate: if available RAM is critically low, hold off until
         # it recovers. The game loading during iteration N+1 can consume several GB
         # which leaves PyTorch/EasyOCR unable to allocate even small tensors.
-        _MEM_THRESHOLD_MB = 400
-        _mem_wait_logged  = False
-        while _available_ram_mb() < _MEM_THRESHOLD_MB:
-            if not self.bot_running:
-                return
-            if not _mem_wait_logged:
-                self._log(
-                    f"  [Worker] Low RAM — pausing OCR for relic {step_i + 1} "
-                    f"(iter {iteration}) until memory recovers…", overlay=False)
-                _mem_wait_logged = True
-            time.sleep(1.0)
+        # Skip for GPU workers when GPU Always Analyze is on — GPU inference uses
+        # VRAM (not system RAM), and the whole point of GPU AA is to analyze during
+        # game operations when system RAM is naturally low.
+        _task_use_gpu = task.get("_use_gpu")
+        _skip_mem_gate = (_task_use_gpu is True
+                          and self._gpu_always_analyze_var.get())
+        if not _skip_mem_gate:
+            _MEM_THRESHOLD_MB = 400
+            _mem_wait_logged  = False
+            while _available_ram_mb() < _MEM_THRESHOLD_MB:
+                if not self.bot_running:
+                    return
+                if not _mem_wait_logged:
+                    self._log(
+                        f"  [Worker] Low RAM — pausing OCR for relic {step_i + 1} "
+                        f"(iter {iteration}) until memory recovers…", overlay=False)
+                    _mem_wait_logged = True
+                time.sleep(1.0)
 
         crop_left  = task.get("crop_left",  relic_analyzer._CROP_LEFT_FRAC)
         crop_top   = task.get("crop_top",   relic_analyzer._CROP_TOP_FRAC)
