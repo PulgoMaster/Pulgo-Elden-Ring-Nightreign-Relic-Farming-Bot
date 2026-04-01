@@ -5,6 +5,10 @@
     Drop a new RelicBot*.zip next to this script (or one folder up) and run it.
     GPU acceleration, profiles, and calibration are kept; everything else is
     replaced with the new version.  Works for both release and test ZIPs.
+
+    The update does a CLEAN replacement: all old files are deleted first, then
+    new files are copied, then preserved items are restored.  This prevents
+    stale files from previous versions interfering with the new version.
 .NOTES
     Run by right-clicking -> "Run with PowerShell", or from a terminal:
         powershell -ExecutionPolicy Bypass -File Update.ps1
@@ -68,116 +72,116 @@ if ($hasGpuTorch) {
 }
 Write-Host ""
 
-# ── Preserve user data (profiles, calibration, GPU flag files) ─────────────── #
-Write-Host "--- Preserving user data ---" -ForegroundColor Cyan
+# ── Back up preserved items to temp ───────────────────────────────────────── #
+# Everything is backed up BEFORE the old install is wiped, then restored after.
+Write-Host "--- Backing up user data ---" -ForegroundColor Cyan
 
-# Items to copy from current install into the new extract before installing
+$backupDir = Join-Path $env:TEMP ("RelicBotBackup_" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+New-Item -ItemType Directory -Path $backupDir | Out-Null
+
+# User data to preserve across updates
 $preserveItems = @(
     "profiles",
     "relicbot_calibration.json",
     ".last_profile"
 )
 
-# GPU marker files — kept in place (not overwritten by new CPU zip)
-# These signal to the app that GPU accel was installed.
+# GPU marker files
 $gpuMarkerFiles = @(
     "gpu_upgrade_ready",
     "gpu_upgrade.log"
 )
 
-foreach ($item in $preserveItems) {
+foreach ($item in $preserveItems + $gpuMarkerFiles) {
     $src = Join-Path $scriptDir $item
     if (Test-Path $src) {
-        $dst = Join-Path $newDir $item
-        Write-Host "  Preserving $item ..." -ForegroundColor Green
+        $dst = Join-Path $backupDir $item
+        Write-Host "  Backing up $item ..." -ForegroundColor Green
+        try {
+            Copy-Item -Recurse $src $dst -Force
+        } catch {
+            Write-Host "  WARNING: Could not back up ${item}: $_" -ForegroundColor Yellow
+        }
+    }
+}
+
+# Back up GPU torch directory if present
+if ($hasGpuTorch) {
+    $torchSrc = Join-Path $scriptDir "_internal\torch"
+    $torchDst = Join-Path $backupDir "_torch_backup"
+    Write-Host "  Backing up GPU torch (~2 GB, may take a moment)..." -ForegroundColor Green
+    try {
+        Copy-Item -Recurse $torchSrc $torchDst -Force
+    } catch {
+        Write-Host "  WARNING: Could not back up torch: $_" -ForegroundColor Yellow
+        Write-Host "  GPU acceleration may need to be reinstalled." -ForegroundColor Yellow
+        $hasGpuTorch = $false
+    }
+}
+Write-Host ""
+
+# ── Clean install — wipe old, copy new ────────────────────────────────────── #
+# This is the key difference from the old script: EVERYTHING is deleted first
+# (except the ZIP itself and this script), then new files are copied.  This
+# prevents stale files from previous versions from persisting and interfering.
+Write-Host "--- Installing new version (clean replacement) ---" -ForegroundColor Cyan
+
+# Delete all old items
+$removed = 0
+Get-ChildItem -Path $scriptDir | Where-Object {
+    $_.Name -ne "Update.ps1" -and $_.Name -notlike "RelicBot*.zip"
+} | ForEach-Object {
+    Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
+    $removed++
+}
+Write-Host "  Removed $removed old item(s)."
+
+# Copy all new items (including the new Update.ps1 — self-update)
+$copied = 0
+Get-ChildItem -Path $newDir | ForEach-Object {
+    Copy-Item -Recurse $_.FullName (Join-Path $scriptDir $_.Name) -Force
+    $copied++
+}
+Write-Host "  Copied $copied new item(s)."
+Write-Host ""
+
+# ── Restore preserved items ───────────────────────────────────────────────── #
+Write-Host "--- Restoring user data ---" -ForegroundColor Cyan
+
+foreach ($item in $preserveItems + $gpuMarkerFiles) {
+    $src = Join-Path $backupDir $item
+    if (Test-Path $src) {
+        $dst = Join-Path $scriptDir $item
+        Write-Host "  Restoring $item ..." -ForegroundColor Green
         try {
             if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
             Copy-Item -Recurse $src $dst -Force
         } catch {
-            Write-Host "  WARNING: Could not preserve ${item}: $_" -ForegroundColor Yellow
+            Write-Host "  WARNING: Could not restore ${item}: $_" -ForegroundColor Yellow
         }
-    } else {
-        Write-Host "  Skipping $item (not present)"
     }
 }
-Write-Host ""
 
-# ── Install ───────────────────────────────────────────────────────────────── #
-Write-Host "--- Installing new version ---" -ForegroundColor Cyan
-
-# Names to never delete or overwrite from the current install folder
-$keepNames = @("Update.ps1") + $gpuMarkerFiles
-
+# Restore GPU torch
 if ($hasGpuTorch) {
-    Write-Host "  Mode: GPU-preserve (keeping _internal\torch\ intact)" -ForegroundColor Green
-    $oldInternal = Join-Path $scriptDir "_internal"
-    $newInternal = Join-Path $newDir "_internal"
-
-    # Delete old _internal items except torch\
-    Write-Host "  Clearing old _internal (except torch\)..."
-    if (Test-Path $oldInternal) {
-        $removed = 0
-        Get-ChildItem -Path $oldInternal | Where-Object { $_.Name -ne "torch" } |
-            ForEach-Object {
-                Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
-                $removed++
-            }
-        Write-Host "    Removed $removed item(s) from _internal."
-    }
-
-    # Copy new _internal items except torch\ (CPU torch discarded)
-    Write-Host "  Copying new _internal (except torch\)..."
-    if (Test-Path $newInternal) {
-        $copied = 0
-        Get-ChildItem -Path $newInternal | Where-Object { $_.Name -ne "torch" } |
-            ForEach-Object {
-                Copy-Item -Recurse $_.FullName (Join-Path $oldInternal $_.Name) -Force
-                $copied++
-            }
-        Write-Host "    Copied $copied item(s) into _internal."
-    }
-
-    # Replace everything outside _internal\ (EXE, docs, sequences, icons, etc.)
-    Write-Host "  Replacing root-level files..."
-    $replaced = 0
-    Get-ChildItem -Path $newDir | Where-Object { $_.Name -ne "_internal" } |
-        ForEach-Object {
-            if ($_.Name -in $keepNames) {
-                Write-Host "    Keeping (protected): $($_.Name)"
-                return
-            }
-            $dest = Join-Path $scriptDir $_.Name
-            if (Test-Path $dest) { Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue }
-            Copy-Item -Recurse $_.FullName $dest -Force
-            $replaced++
+    $torchBackup = Join-Path $backupDir "_torch_backup"
+    $torchDst    = Join-Path $scriptDir "_internal\torch"
+    if (Test-Path $torchBackup) {
+        Write-Host "  Restoring GPU torch..." -ForegroundColor Green
+        try {
+            if (Test-Path $torchDst) { Remove-Item -Recurse -Force $torchDst }
+            Copy-Item -Recurse $torchBackup $torchDst -Force
+        } catch {
+            Write-Host "  WARNING: Could not restore torch: $_" -ForegroundColor Yellow
+            Write-Host "  You may need to reinstall GPU Acceleration." -ForegroundColor Yellow
+            $hasGpuTorch = $false
         }
-    Write-Host "    Replaced $replaced root-level item(s)."
-
-} else {
-    Write-Host "  Mode: Full replacement (no GPU torch detected)" -ForegroundColor Yellow
-    $removed = 0
-    Get-ChildItem -Path $scriptDir | Where-Object {
-        $_.Name -notin $keepNames -and $_.Name -notlike "RelicBot*.zip"
-    } | ForEach-Object {
-        Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
-        $removed++
     }
-    Write-Host "  Removed $removed old item(s)."
-
-    $copied = 0
-    Get-ChildItem -Path $newDir | ForEach-Object {
-        Copy-Item -Recurse $_.FullName (Join-Path $scriptDir $_.Name) -Force
-        $copied++
-    }
-    Write-Host "  Copied $copied new item(s)."
 }
-
 Write-Host ""
 
 # ── Refresh default sequences ─────────────────────────────────────────────── #
-# The app only seeds sequences from _internal/ if they don't already exist, so
-# old sequences survive an in-place update and can break changed phase logic.
-# Force-overwrite the default sequences from the newly installed _internal/ here.
+# Force-overwrite the default sequences from the newly installed _internal/.
 Write-Host "--- Refreshing default sequences ---" -ForegroundColor Cyan
 $newSeqSrc = Join-Path $scriptDir "_internal\sequences"
 $seqDst    = Join-Path $scriptDir "sequences"
@@ -197,6 +201,7 @@ Write-Host ""
 
 # ── Cleanup ───────────────────────────────────────────────────────────────── #
 Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force $backupDir -ErrorAction SilentlyContinue
 
 # ── Post-install verification ─────────────────────────────────────────────── #
 Write-Host "--- Verifying install ---" -ForegroundColor Cyan

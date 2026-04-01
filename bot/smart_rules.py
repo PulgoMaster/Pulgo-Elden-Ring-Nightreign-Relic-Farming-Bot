@@ -55,113 +55,78 @@ def _has_cat(passives: list[str], category: str) -> list[str]:
 # Each returns a string description if it fires, or None if it doesn't.
 # Passives are the relic's passive list (may include None entries from OCR).
 
-def _rule_dragon_cult_triple(passives: list[str]) -> str | None:
+def _rule_school_synergy(passives: list[str]) -> str | None:
     """
-    Dragon Cult triple-stack:
-      Improved Incantations + Improved Dragon Cult Incantations + Lightning Attack Power Up
-    Reason: Dragon Cult spells deal Lightning damage, so all three passives
-    boost the same spells — the rarest and most powerful incant synergy.
+    School + damage synergy: detects when an incantation/sorcery school passive
+    is paired with a Group 0 passive that boosts the same damage type.
+
+    For each school passive on the relic, determines the school's primary damage
+    type, then checks for any of these synergistic Group 0 pairings:
+      1. General delivery boost ("Improved Incantations" / "Improved Sorceries")
+      2. Matching element passive (e.g. "Fire Attack Power Up" for Giants' Flame)
+      3. "Improved Affinity Attack Power" (if the school primarily deals affinity
+         damage — i.e. non-physical: Magic, Fire, Lightning, Holy)
+
+    Only one Group 0 passive can exist per relic, so this is always a double-stack.
+    Schools with no affinity (e.g. Bestial = physical) only pair with option 1.
     """
     clean = [p for p in passives if p]
-    bases = [_base(p) for p in clean]
+    if not clean:
+        return None
 
-    has_incant    = any(_cat(p) == "incantation_any" for p in clean)
-    has_dc_school = "Improved Dragon Cult Incantations" in bases
-    has_lightning = any(SPECIFIC_AFFINITY_ELEMENT.get(_base(p)) == "Lightning"
-                        for p in clean)
+    # Collect all school passives on this relic
+    incant_schools = [p for p in clean if _cat(p) == "incantation_school"]
+    sorc_schools   = [p for p in clean if _cat(p) == "sorcery_school"]
+    if not incant_schools and not sorc_schools:
+        return None
 
-    if has_incant and has_dc_school and has_lightning:
-        return "Dragon Cult triple-stack: Improved Incantations + Dragon Cult + Lightning Attack Power Up"
+    # Identify the single Group 0 passive present (only one can exist)
+    g0_delivery  = None   # "incantation_any" or "sorcery_any"
+    g0_element   = None   # e.g. "Fire" from SPECIFIC_AFFINITY_ELEMENT
+    g0_affinity  = False  # "affinity_damage" category
+    for p in clean:
+        cat = _cat(p)
+        if cat == "incantation_any":
+            g0_delivery = "incantation"
+        elif cat == "sorcery_any":
+            g0_delivery = "sorcery"
+        elif cat == "specific_affinity":
+            g0_element = SPECIFIC_AFFINITY_ELEMENT.get(_base(p))
+        elif cat == "affinity_damage":
+            g0_affinity = True
+
+    # Try to match each school passive against the Group 0 passive
+    for sp in incant_schools:
+        school_name = INCANTATION_SCHOOL_PASSIVE.get(_base(sp), _base(sp))
+        affinities  = INCANTATION_SCHOOLS.get(school_name, [])
+        primary     = affinities[0] if affinities else None  # None = physical
+
+        if g0_delivery == "incantation":
+            return (f"School synergy: Improved Incantations + "
+                    f"{_base(sp)} ({school_name})")
+        if primary and g0_element == primary:
+            return (f"School synergy: {primary} Attack Power Up + "
+                    f"{_base(sp)} ({school_name} deals {primary})")
+        if primary and g0_affinity:
+            return (f"School synergy: Improved Affinity Attack Power + "
+                    f"{_base(sp)} ({school_name} deals {primary})")
+
+    for sp in sorc_schools:
+        school_name = SORCERY_SCHOOL_PASSIVE.get(_base(sp), _base(sp))
+        affinities  = SORCERY_SCHOOLS.get(school_name, [])
+        primary     = affinities[0] if affinities else None
+
+        if g0_delivery == "sorcery":
+            return (f"School synergy: Improved Sorceries + "
+                    f"{_base(sp)} ({school_name})")
+        if primary and g0_element == primary:
+            return (f"School synergy: {primary} Attack Power Up + "
+                    f"{_base(sp)} ({school_name} deals {primary})")
+        if primary and g0_affinity:
+            return (f"School synergy: Improved Affinity Attack Power + "
+                    f"{_base(sp)} ({school_name} deals {primary})")
+
     return None
-
-
-def _rule_incant_school_double(passives: list[str]) -> str | None:
-    """
-    Incantation school double-stack: Improved Incantations + any incantation school passive.
-    Reason: School buff stacks with delivery buff — worth having regardless of whether
-    the user specified it. Reports which school was found.
-    """
-    clean = [p for p in passives if p]
-    if not any(_cat(p) == "incantation_any" for p in clean):
-        return None
-    school_passives = [p for p in clean if _cat(p) == "incantation_school"]
-    if not school_passives:
-        return None
-    schools = [INCANTATION_SCHOOL_PASSIVE.get(_base(p), _base(p)) for p in school_passives]
-    school_str = " + ".join(schools)
-    return f"Incantation double-stack: Improved Incantations + {school_str}"
-
-
-def _rule_incant_triple_any(passives: list[str]) -> str | None:
-    """
-    Any incantation triple-stack: delivery + school + matching element.
-    Covers schools other than Dragon Cult (Giants' Flame/Fire, Golden Order/Holy, etc.).
-    Dragon Cult triple is reported by its own dedicated rule (above) for clarity.
-    """
-    clean = [p for p in passives if p]
-    if not any(_cat(p) == "incantation_any" for p in clean):
-        return None
-    school_passives = [p for p in clean if _cat(p) == "incantation_school"]
-    if not school_passives:
-        return None
-
-    for sp in school_passives:
-        school_name = INCANTATION_SCHOOL_PASSIVE.get(_base(sp))
-        if not school_name or school_name == "Dragon Cult":
-            # Dragon Cult handled above
-            continue
-        # INCANTATION_SCHOOLS maps school → list of affinity damage types
-        school_affinities = INCANTATION_SCHOOLS.get(school_name, [])
-        if not school_affinities:
-            continue
-        affinity = school_affinities[0]   # primary affinity type
-        # Check if a matching element passive is also present
-        has_element = any(
-            SPECIFIC_AFFINITY_ELEMENT.get(_base(p)) == affinity
-            or _cat(p) == "affinity_damage"
-            for p in clean
-        )
-        if has_element:
-            return (f"{school_name} incantation triple-stack: "
-                    f"Improved Incantations + {_base(sp)} + {affinity} Attack Power")
-    return None
-
-
-def _rule_sorcery_double(passives: list[str]) -> str | None:
-    """
-    Sorcery school double-stack: Improved Sorceries + any sorcery school passive.
-    Reason: School buff stacks with delivery buff.
-    """
-    clean = [p for p in passives if p]
-    if not any(_cat(p) == "sorcery_any" for p in clean):
-        return None
-    school_passives = [p for p in clean if _cat(p) == "sorcery_school"]
-    if not school_passives:
-        return None
-    schools = [SORCERY_SCHOOL_PASSIVE.get(_base(p), _base(p)) for p in school_passives]
-    school_str = " + ".join(schools)
-    return f"Sorcery double-stack: Improved Sorceries + {school_str}"
-
-
-def _rule_affinity_element_double(passives: list[str]) -> str | None:
-    """
-    Affinity double-stack: Improved Affinity Attack Power + element-specific passive.
-    Reason: Both boost the same elemental attacks simultaneously.
-    Only fires when the passives are on the SAME relic (which the game allows).
-    """
-    clean = [p for p in passives if p]
-    if not any(_cat(p) == "affinity_damage" for p in clean):
-        return None
-    element_passives = [p for p in clean if _cat(p) == "specific_affinity"]
-    if not element_passives:
-        return None
-    elements = list({SPECIFIC_AFFINITY_ELEMENT.get(_base(p)) for p in element_passives
-                     if SPECIFIC_AFFINITY_ELEMENT.get(_base(p))})
-    if not elements:
-        return None
-    elem_str = " + ".join(elements)
-    return (f"Affinity double-stack: Improved Affinity Attack Power + "
-            f"{elem_str} Attack Power Up")
 
 
 def _rule_weapon_class_combo(passives: list[str]) -> str | None:
@@ -231,11 +196,7 @@ def _rule_physical_plus_melee(passives: list[str]) -> str | None:
 # Each entry: (rule_id, rule_fn, short_label)
 
 RULES: list[tuple[str, Callable]] = [
-    ("dragon_cult_triple",       _rule_dragon_cult_triple),
-    ("incant_triple_any",        _rule_incant_triple_any),
-    ("incant_school_double",     _rule_incant_school_double),
-    ("sorcery_double",           _rule_sorcery_double),
-    ("affinity_element_double",  _rule_affinity_element_double),
+    ("school_synergy",           _rule_school_synergy),
     ("physical_plus_melee",      _rule_physical_plus_melee),
     ("multiple_attack_boosters", _rule_multiple_attack_boosters),
     ("weapon_class_combo",       _rule_weapon_class_combo),

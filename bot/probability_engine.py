@@ -10,7 +10,6 @@ Key design:
   - Color filter and size distribution applied to get per-relic probability.
 """
 
-import math
 import os
 import sys
 

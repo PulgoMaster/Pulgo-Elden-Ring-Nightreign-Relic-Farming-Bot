@@ -135,6 +135,7 @@ class DiagnosticLogger:
                     ("ullTotalPageFile",        ctypes.c_ulonglong),
                     ("ullAvailPageFile",        ctypes.c_ulonglong),
                     ("ullTotalVirtual",         ctypes.c_ulonglong),
+                    ("ullAvailVirtual",         ctypes.c_ulonglong),
                     ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
                 ]
             ms = _MEMSTATUS()
@@ -611,5 +612,8 @@ class DiagnosticLogger:
 
     def close(self):
         """Stop monitor and write summary. Safe to call multiple times."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         self.stop_interference_monitor()
         self.write_summary()

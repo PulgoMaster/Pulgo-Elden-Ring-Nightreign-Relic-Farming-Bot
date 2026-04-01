@@ -58,8 +58,8 @@ POOL_2000000 = [
     # Utility (higher tiers)
     "Partial HP Restoration upon Post-Damage Attacks +1",
     "Partial HP Restoration upon Post-Damage Attacks +2",
-    "Art gauge charged from successful guarding +1",
-    "Art gauge fills moderately upon critical hit +1",
+    "Successful guarding fills more of the Art gauge +1",
+    "Critical hits fill more of the Art gauge +1",
     "Physical attack power increases after using grease items +1",
     "Physical attack power increases after using grease items +2",
     "Improved Guard Counters +1",
@@ -120,12 +120,12 @@ POOL_2100000 = [
     "Flask Also Heals Allies",
     "Slowly restore HP for self and nearby allies when HP is low",
     "Improved Damage Negation at Low HP",
-    "HP restored when using cured meats, medicinal boluses, etc.",
+    "HP restored when using medicinal boluses, etc.",
     # Art gauge / combat
-    "Art gauge charged from successful guarding",
+    "Successful guarding fills more of the Art gauge",
     "Draw enemy attention while guarding",
-    "Art gauge fills moderately upon critical hit",
-    "Attack power increases after using grease items",
+    "Critical hits fill more of the Art gauge",
+    "Physical attack power increases after using grease items",
     "Critical Hits Earn Runes",
     "Critical Hit Boosts Stamina Recovery Speed",
     "HP Recovery From Successful Guarding",
@@ -376,8 +376,8 @@ DEEP_CAT_6_STACKABLE = [
     "Partial HP Restoration upon Post-Damage Attacks +2",
     "HP restored when using medicinal boluses, etc. +1",
     # Art gauge
-    "Art gauge charged from successful guarding +1",
-    "Art gauge fills moderately upon critical hit +1",
+    "Successful guarding fills more of the Art gauge +1",
+    "Critical hits fill more of the Art gauge +1",
     # Combat
     "Critical Hit Boosts Stamina Recovery Speed +1",
     # Throwables / special

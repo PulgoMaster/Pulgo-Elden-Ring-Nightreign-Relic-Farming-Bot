@@ -596,7 +596,7 @@ CATEGORIES: "OrderedDict[str, list[str]]" = OrderedDict([
         "Uplifting Aromatic in possession at start of expedition",
         "Acid Sprayment in possession at start of expedition",
         "Bloodboil Aromatic in possession at start of expedition",
-        "Wrath Calling Bell in possession at start of expedition",
+        "Wraith Calling Bell in possession at start of expedition",
         "Fire Grease in possession at start of expedition",
         "Magic Grease in possession at start of expedition",
         "Lightning Grease in possession at start of expedition",

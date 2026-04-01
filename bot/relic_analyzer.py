@@ -88,24 +88,6 @@ def set_thread_device(gpu) -> None:
     _thread_device_local.use_gpu = gpu
 
 
-def prime_thread_reader(reader, use_gpu) -> None:
-    """Inject a pre-warmed EasyOCR Reader into this thread's local storage.
-
-    Avoids the ~2-3s model reload that happens when a new thread calls
-    _get_reader() for the first time.  Call this at the start of a short-lived
-    inner thread (e.g. the _rt analysis thread in async workers) so it reuses
-    the reader already loaded by the long-lived outer worker thread.
-
-    reader   — the EasyOCR Reader object to cache for this thread.
-    use_gpu  — True/False/None: the device the reader was built for.
-               None = inherit global _gpu_mode_enabled.
-    """
-    _thread_local.reader = reader
-    _resolved = use_gpu if use_gpu is not None else _gpu_mode_enabled
-    _thread_local.reader_gpu = _resolved
-    _thread_device_local.use_gpu = use_gpu
-
-
 def set_gpu_mode(enabled: bool) -> None:
     """Enable or disable GPU (CUDA) inference for all subsequent OCR calls.
 
@@ -193,45 +175,6 @@ def _to_array(image_bytes: bytes, max_width: int = 0) -> np.ndarray:
             Image.LANCZOS,
         )
     return np.array(img)
-
-
-# ── Color classification (UNUSED) ─────────────────────────────────────── #
-# This approach was abandoned — analyze() uses ALL_CURSES direct matching instead.
-
-def _classify_color(img: np.ndarray, bbox) -> str:
-    """
-    UNUSED. Sample pixels inside an EasyOCR bounding box and classify as
-    'passive' (white-ish text) or 'curse' (blue-ish text).
-    Retained for reference; analyze() does not call this.
-    """
-    pts = np.array(bbox, dtype=int)
-    x0, y0 = pts[:, 0].min(), pts[:, 1].min()
-    x1, y1 = pts[:, 0].max(), pts[:, 1].max()
-
-    h, w = img.shape[:2]
-    x0, y0 = max(0, x0), max(0, y0)
-    x1, y1 = min(w, x1), min(h, y1)
-
-    region = img[y0:y1, x0:x1].reshape(-1, 3).astype(float)
-    if len(region) == 0:
-        return "unknown"
-
-    # Only consider non-dark pixels (text, not background)
-    bright = region[region.max(axis=1) > 140]
-    if len(bright) == 0:
-        return "unknown"
-
-    r, g, b = bright.mean(axis=0)
-
-    # White/grey: all channels high and roughly equal
-    if r > 160 and g > 160 and b > 160 and abs(r - b) < 60:
-        return "passive"
-
-    # Blue/cyan: blue channel clearly dominates
-    if b > 140 and b > r + 40:
-        return "curse"
-
-    return "unknown"
 
 
 # ── Passive fuzzy matching ────────────────────────────────────────────── #
@@ -593,7 +536,7 @@ def analyze(
                     "matched": matched_curse,
                 })
             elif relic_name is None and conf > 0.55 \
-                    and not _text[0].isdigit():
+                    and _text and not _text[0].isdigit():
                 relic_name = _text
                 _dbg_tokens.append({
                     "text": _text, "conf": conf, "y": _y,

@@ -490,7 +490,7 @@ class RelicBotApp(tk.Tk):
         # under python.exe and iconbitmap has no effect on the taskbar icon.
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "PulgoMaster.RelicBot.v1.6.0"
+                "PulgoMaster.RelicBot.v1.6.1"
             )
         except Exception:
             pass
@@ -498,7 +498,7 @@ class RelicBotApp(tk.Tk):
         super().__init__()
         self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.6.0  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.6.1  |  Made by Pulgo")
         self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
@@ -3496,6 +3496,7 @@ class RelicBotApp(tk.Tk):
                 from bot import relic_analyzer as _bra
                 def _worker():
                     _bra.set_thread_device(use_gpu)
+                    _bra._get_reader()   # warm CUDA/CPU model now, before first task arrives
                     while True:
                         if gate_ev is not None:
                             # CPU worker: wait for gate before each task
@@ -3616,15 +3617,16 @@ class RelicBotApp(tk.Tk):
 
                 use_gpu=True  → GPU reader (CUDA); use_gpu=None → global flag.
 
-                The outer (long-lived) worker thread pre-warms its EasyOCR Reader
-                once on first task.  Each inner _rt analysis thread is primed with
-                that cached reader via prime_thread_reader() so the ~2-3s per-thread
-                model reload is skipped for every subsequent relic.
+                The worker thread calls set_thread_device() once at start so
+                _get_reader() builds the correct reader on first use and caches
+                it in thread-local storage for all subsequent tasks.
+                _analyze_relic_task is called directly — no per-task sub-thread.
                 """
                 from bot import relic_analyzer as _ra
-                _cached_reader = [None]   # reader warmed once in the outer thread
 
                 def _worker():
+                    _ra.set_thread_device(use_gpu)
+                    _ra._get_reader()   # warm CUDA/CPU model now, before first task arrives
                     while True:
                         _gpu_aa = self._gpu_always_analyze_var.get()
                         if _gpu_aa and not use_gpu:
@@ -3650,13 +3652,6 @@ class RelicBotApp(tk.Tk):
                             if _go_ev is not None and not _go_ev.is_set():
                                 while not _go_ev.wait(timeout=1.0):
                                     pass
-                        # GPU AA on: GPU worker bypasses gate entirely; CPU workers
-                        # already waited before dequeue above — no post-check needed.
-                        # Pre-warm the EasyOCR reader in this (outer) worker thread
-                        # the first time a task is dequeued.  Subsequent tasks reuse it.
-                        if _cached_reader[0] is None:
-                            _ra.set_thread_device(use_gpu)
-                            _cached_reader[0] = _ra._get_reader()
                         # Overflow tasks embed their own state so main workers can
                         # handle them without extra threads.
                         _ovf = _task.pop("_ovf_state", None)
@@ -3666,33 +3661,8 @@ class RelicBotApp(tk.Tk):
                                   _async_dir_map, results)
                         )
                         try:
-                            _reader = _cached_reader[0]
-                            def _inner(_t=_task, _ws=_w_state, _wl=_w_lock,
-                                       _wd=_w_dmap, _wr=_w_res, _rdr=_reader):
-                                # Prime this inner thread with the pre-warmed reader so
-                                # _get_reader() returns immediately without reloading.
-                                _ra.prime_thread_reader(_rdr, use_gpu)
-                                self._analyze_relic_task(_t, _ws, _wl, _wd, _wr)
-                            _rt = threading.Thread(target=_inner, daemon=True)
-                            _rt.start()
-                            _rt.join(timeout=_ASYNC_TASK_TIMEOUT)
-                            if _rt.is_alive():
-                                _retries = _task.get("_retries", 0)
-                                if _retries < 2:
-                                    self._log(
-                                        f"[Async] Iter {_task['iteration']} relic "
-                                        f"{_task['step_i'] + 1} timed out — "
-                                        f"requeueing (attempt {_retries + 2}/3)."
-                                    )
-                                    _async_relic_q.put(
-                                        (_prio, {**_task, "_retries": _retries + 1}))
-                                else:
-                                    self._log(
-                                        f"[Async] Iter {_task['iteration']} relic "
-                                        f"{_task['step_i'] + 1} timed out permanently."
-                                    )
-                                    self._mark_relic_failed(
-                                        _task, _w_state, _w_lock, _w_dmap, _w_res)
+                            self._analyze_relic_task(
+                                _task, _w_state, _w_lock, _w_dmap, _w_res)
                         except Exception as _re:
                             self._log(f"ERROR in async relic worker: {_re}")
                             self._mark_relic_failed(
@@ -3784,24 +3754,12 @@ class RelicBotApp(tk.Tk):
                                 _oq.task_done()
                                 break
                             try:
-                                _rt = threading.Thread(
-                                    target=self._analyze_relic_task,
-                                    args=(_task, _ois, _ol, _odm, _or),
-                                    daemon=True,
-                                )
-                                _rt.start()
-                                _rt.join(timeout=_ASYNC_TASK_TIMEOUT)
-                                if _rt.is_alive():
-                                    _retries = _task.get("_retries", 0)
-                                    if _retries < 2:
-                                        _oq.put((_prio, {**_task, "_retries": _retries + 1}))
-                                    else:
-                                        self._mark_relic_failed(
-                                            _task, _ois, _ol, _odm, _or)
+                                self._analyze_relic_task(
+                                    _task, _ois, _ol, _odm, _or)
                             except Exception as _oexc:
                                 self._log(
                                     f"  [Overflow worker] Unhandled error on relic "
-                                    f"{_task.get('step_i', '?') + 1} "
+                                    f"{_task.get('step_i', -1) + 1} "
                                     f"(iter {_task.get('iteration', '?')}): {_oexc}",
                                     overlay=False)
                                 self._mark_relic_failed(_task, _ois, _ol, _odm, _or)
@@ -5194,6 +5152,7 @@ class RelicBotApp(tk.Tk):
             from bot import relic_analyzer as _ra
             def _worker():
                 _ra.set_thread_device(use_gpu)   # pin this thread's device before first analyze()
+                _ra._get_reader()   # warm CUDA/CPU model now, before first task arrives
                 while True:
                     try:
                         _prio, _task = _bl_q.get(timeout=0.3)
