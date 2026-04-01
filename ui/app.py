@@ -499,10 +499,11 @@ class RelicBotApp(tk.Tk):
             pass
 
         # App icon (title-bar + alt-tab thumbnail)
-        _icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "assets", "icon.ico",
-        )
+        # When frozen by PyInstaller, assets are extracted to sys._MEIPASS.
+        # In dev, fall back to the repo root (two dirs above this file).
+        _icon_base = getattr(sys, "_MEIPASS",
+                             os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        _icon_path = os.path.join(_icon_base, "assets", "icon.ico")
         if os.path.exists(_icon_path):
             self.iconbitmap(_icon_path)
 
@@ -3321,9 +3322,10 @@ class RelicBotApp(tk.Tk):
             pass
 
         save_path = self.save_path_var.get()
-        backup_path = os.path.join(
-            self.backup_path_var.get(), os.path.basename(save_path)
-        )
+        _backup_folder = self.backup_path_var.get()
+        _backup_dir  = save_manager.make_backup_dir(_backup_folder, batch_id)
+        backup_path  = os.path.join(_backup_dir, os.path.basename(save_path))
+        self._run_backup_path = backup_path   # accessible to _run_iteration_phases
         criteria = self.relic_builder.get_criteria_dict()
         criteria_summary = self.relic_builder.get_criteria_summary()
         criteria["allowed_colors"] = self._get_allowed_colors()
@@ -4212,10 +4214,8 @@ class RelicBotApp(tk.Tk):
                     self._log(f"[Reset] Discarding iteration {iteration} and restarting.")
                     self._cancel_and_rollback_iteration(iteration)
                     self._close_game()
-                    _rs = self.save_path_var.get()
-                    _rb = os.path.join(self.backup_path_var.get(), os.path.basename(_rs))
                     try:
-                        save_manager.restore(_rs, _rb)
+                        save_manager.restore(save_path, backup_path)
                     except Exception as _rse:
                         self._log(f"  WARNING: save restore failed: {_rse}")
                     try:
@@ -4348,10 +4348,8 @@ class RelicBotApp(tk.Tk):
                     self._log(f"[Reset] Discarding iteration {iteration}.")
                     self._cancel_and_rollback_iteration(iteration)
                     self._close_game()
-                    _rs = self.save_path_var.get()
-                    _rb = os.path.join(self.backup_path_var.get(), os.path.basename(_rs))
                     try:
-                        save_manager.restore(_rs, _rb)
+                        save_manager.restore(save_path, backup_path)
                     except Exception as _rse:
                         self._log(f"  WARNING: save restore failed: {_rse}")
                     try:
@@ -4547,10 +4545,8 @@ class RelicBotApp(tk.Tk):
                 self._log(f"[Reset] Discarding iteration {iteration} and restarting.")
                 self._cancel_and_rollback_iteration(iteration)
                 self._close_game()
-                _rs = self.save_path_var.get()
-                _rb = os.path.join(self.backup_path_var.get(), os.path.basename(_rs))
                 try:
-                    save_manager.restore(_rs, _rb)
+                    save_manager.restore(save_path, backup_path)
                 except Exception as _rse:
                     self._log(f"  WARNING: save restore failed: {_rse}")
                 try:
@@ -5036,6 +5032,22 @@ class RelicBotApp(tk.Tk):
                 self._log(f"PRIORITY.txt written to {run_dir}")
             except Exception as e:
                 self._log(f"WARNING: could not write PRIORITY.txt: {e}")
+
+        self._run_backup_path = None   # clear so stale path can't be reused
+
+        # ── Restore save to original clean state ──────────────────────── #
+        # Done after all analysis so the live save is always left as it was
+        # before the run started, regardless of how the run ended.
+        try:
+            save_manager.restore(save_path, backup_path)
+            self._log("Save file restored to original state.")
+        except Exception as _sre:
+            self._log(f"WARNING: could not restore save at run end: {_sre}")
+
+        # ── Finalise backup folder name with actual iteration count ────── #
+        _actual_iters = len(results)
+        _final_bk_dir = save_manager.finalize_backup_dir(_backup_dir, _actual_iters)
+        self._log(f"Backup saved: {os.path.basename(_final_bk_dir)}")
 
         match_count  = sum(1 for r in results if r["match"])
         total_hits33 = sum(r.get("hits_33", 0) for r in results)
@@ -6544,8 +6556,9 @@ class RelicBotApp(tk.Tk):
                         try:
                             save_manager.restore(
                                 self.save_path_var.get(),
-                                os.path.join(self.backup_path_var.get(),
-                                             os.path.basename(self.save_path_var.get())))
+                                getattr(self, "_run_backup_path",
+                                        os.path.join(self.backup_path_var.get(),
+                                                     os.path.basename(self.save_path_var.get()))))
                         except Exception:
                             pass
                         return relic_results
@@ -6604,8 +6617,9 @@ class RelicBotApp(tk.Tk):
                                     _sp = self.save_path_var.get()
                                     save_manager.restore(
                                         _sp,
-                                        os.path.join(self.backup_path_var.get(),
-                                                     os.path.basename(_sp)))
+                                        getattr(self, "_run_backup_path",
+                                                os.path.join(self.backup_path_var.get(),
+                                                             os.path.basename(_sp))))
                                 except Exception as _gme:
                                     self._log(f"  Save restore failed: {_gme}")
                                 return relic_results

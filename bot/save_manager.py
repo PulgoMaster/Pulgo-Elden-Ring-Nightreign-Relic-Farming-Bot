@@ -6,6 +6,44 @@ so the game resets to the relic-generation screen.
 
 import shutil
 import os
+import time
+
+
+def make_backup_dir(backup_folder: str, run_stamp: str) -> str:
+    """Create and return a timestamped ACTIVE backup directory for this run.
+
+    The directory is named with a ACTIVE_ prefix so it can be identified
+    and renamed to its final name (with actual iteration count) at run end.
+    Returns the full path to the created directory.
+    """
+    dir_name = f"Nightreign_Backup_ACTIVE_{run_stamp}"
+    backup_dir = os.path.join(backup_folder, dir_name)
+    os.makedirs(backup_dir, exist_ok=True)
+    return backup_dir
+
+
+def finalize_backup_dir(backup_dir: str, actual_iters: int) -> str:
+    """Rename the ACTIVE backup dir to its final name with iteration count and date.
+
+    Returns the final directory path (renamed), or the original if rename fails.
+    """
+    if not os.path.isdir(backup_dir):
+        return backup_dir
+    date_str = time.strftime("%Y_%m_%d")
+    base = os.path.dirname(backup_dir)
+    final_name = f"Nightreign_Backup_{actual_iters}Iters_{date_str}"
+    final_dir = os.path.join(base, final_name)
+    # Avoid collision if another run on the same day already exists
+    suffix = 0
+    candidate = final_dir
+    while os.path.exists(candidate):
+        suffix += 1
+        candidate = f"{final_dir}_{suffix}"
+    try:
+        os.rename(backup_dir, candidate)
+        return candidate
+    except Exception:
+        return backup_dir
 
 
 def backup(save_path: str, backup_path: str) -> None:
