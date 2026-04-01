@@ -8488,6 +8488,22 @@ class RelicBotApp(tk.Tk):
 
         _exe_dir     = _pl.Path(sys.executable).parent
         _staging_dir = str(_exe_dir / "gpu_torch_staging")
+
+        # Block install in cloud-synced or restricted directories — file locks
+        # from OneDrive/Dropbox/Google Drive prevent the torch swap on restart.
+        _exe_str = str(_exe_dir).lower()
+        _blocked_dirs = ("onedrive", "dropbox", "google drive", "icloud")
+        _blocked = next((d for d in _blocked_dirs if d in _exe_str), None)
+        if _blocked:
+            tk.messagebox.showerror(
+                "Cannot Install Here",
+                f"RelicBot is running inside a {_blocked.title()}-synced folder.\n\n"
+                f"Cloud sync services lock files and prevent the GPU upgrade\n"
+                f"from completing on restart.\n\n"
+                f"Please move the RelicBot folder to a local path\n"
+                f"(e.g. C:\\RelicBot\\) and try again.",
+            )
+            return
         # Phase 1 resolve cmd — pip --dry-run --report gives us the wheel URL
         # Phase 2 downloads via urllib (real live progress)
         # Phase 3 installs from local wheel via pip --no-index
