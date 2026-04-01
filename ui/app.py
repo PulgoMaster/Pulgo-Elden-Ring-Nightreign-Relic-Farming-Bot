@@ -1655,7 +1655,7 @@ class RelicBotApp(tk.Tk):
         # ── Hardware Recommendations ──────────────────────────────────── #
         _recs = self._get_hw_recommendations()
         hw_frame = ttk.LabelFrame(self.batch_frame, text="Recommended Settings for Your System")
-        hw_frame.grid(row=11, column=0, columnspan=8, sticky="ew", **pad)
+        hw_frame.grid(row=12, column=0, columnspan=8, sticky="ew", **pad)
 
         ram_str  = f"{self._hw_ram_gb} GB" if self._hw_ram_gb else "unknown"
         cpu_str  = f"{self._hw_cpu_cores} logical cores" if self._hw_cpu_cores else "unknown"
