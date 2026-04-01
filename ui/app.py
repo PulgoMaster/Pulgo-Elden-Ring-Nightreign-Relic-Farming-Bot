@@ -485,18 +485,21 @@ def _boost_game_priority(exe_name: str) -> bool:
 
 class RelicBotApp(tk.Tk):
     def __init__(self):
-        super().__init__()
-        self.title("Elden Ring Nightreign – Relic Bot v1.6.0  |  Made by Pulgo")
-        self.resizable(True, True)
-
-        # Tell Windows to treat this process as its own app (not a Python child),
-        # so the taskbar button uses the EXE's embedded icon instead of python.exe's.
+        # Must run before super().__init__() — Windows assigns the taskbar slot
+        # on window creation, so this must fire first or the button gets grouped
+        # under python.exe and iconbitmap has no effect on the taskbar icon.
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
                 "PulgoMaster.RelicBot.v1.6.0"
             )
         except Exception:
             pass
+
+        super().__init__()
+        self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
+
+        self.title("Elden Ring Nightreign – Relic Bot v1.6.0  |  Made by Pulgo")
+        self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
         # When frozen by PyInstaller, assets are extracted to sys._MEIPASS.
@@ -665,6 +668,7 @@ class RelicBotApp(tk.Tk):
         self.after(0, self._on_relic_type_change)   # apply curse frame visibility after UI settles
         self.after(200, self._log_screen_resolution)
         self.after(300, self._log_calibration_status)
+        self.deiconify()   # show window now that icon is set and UI is fully built
 
     # ------------------------------------------------------------------ #
     #  UI CONSTRUCTION
@@ -3323,6 +3327,8 @@ class RelicBotApp(tk.Tk):
 
         save_path = self.save_path_var.get()
         _backup_folder = self.backup_path_var.get()
+        run_stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        batch_id  = time.strftime("%Y%m%d_%H%M%S")
         _backup_dir  = save_manager.make_backup_dir(_backup_folder, batch_id)
         backup_path  = os.path.join(_backup_dir, os.path.basename(save_path))
         self._run_backup_path = backup_path   # accessible to _run_iteration_phases
@@ -3341,8 +3347,6 @@ class RelicBotApp(tk.Tk):
 
         # The run folder is created lazily — only when the first iteration actually runs.
         # This prevents empty batch_run_* folders when the bot is stopped before any iteration.
-        run_stamp = time.strftime("%Y-%m-%d_%H%M%S")
-        batch_id  = time.strftime("%Y%m%d_%H%M%S")
         self._current_batch_id = batch_id
         self._ov_overflow_hits = 0
         self._global_murk_expected = None   # murk verified against each iteration; None = first run
