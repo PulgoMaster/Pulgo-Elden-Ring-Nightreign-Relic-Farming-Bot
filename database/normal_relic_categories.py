@@ -391,7 +391,6 @@ CATEGORY_19_STACKABLE = [
     "Increased Maximum FP",
     "Increased Maximum Stamina",
     # HP restoration
-    "HP Restoration",
     "Partial HP Restoration upon Post-Damage Attacks",
     "Slowly restore HP for self and nearby allies when HP is low",
     "Improved Damage Negation at Low HP",
@@ -409,7 +408,6 @@ CATEGORY_19_STACKABLE = [
     # Stamina
     "Stamina Recovery upon Landing Attacks",
     "Raised stamina recovery for nearby allies, but not for self",
-    "Night of the Beast: Recover Stamina on Attack",
     # Affinity / elemental switch
     "Switching Weapons Adds an Affinity Attack",
     "Boosts Attack Power of Added Affinity Attacks",
@@ -417,14 +415,13 @@ CATEGORY_19_STACKABLE = [
     "Improved Throwing Pot Damage",
     "Improved Throwing Knife Damage",
     "Improved Glintstone and Gravity Stone Damage",
-    "Improved Glintstone and Gravity Stone Damage",
     "Improved Perfuming Arts",
     # Conditional attack
     "Attack power up when facing poison-afflicted enemy",
     "Attack power up when facing scarlet rot-afflicted enemy",
     "Attack power up when facing frostbite-afflicted enemy",
     # Status / madness synergies
-    "Gesture 'Crossed Legs' Builds Up Madness",
+    'Gesture "Crossed Legs" Builds Up Madness',
     "Madness Continually Recovers FP",
     "Frostbite in Vicinity Conceals Self",
     "Poison & Rot in Vicinity Increases Attack Power",

@@ -2596,7 +2596,7 @@ DEEP_TABLES: dict[int, dict[str, int]] = {
 }
 DEEP_TOTALS: dict[int, int] = {
     2000000: 9984,
-    2100000: 9977,
+    2100000: 10577,  # was 9977 — wrong since Scholar/Undertaker +600 weight added
     # NOTE: TABLE_2200000 intentionally excluded — confirmed not used in any bazaar relic.
 }
 

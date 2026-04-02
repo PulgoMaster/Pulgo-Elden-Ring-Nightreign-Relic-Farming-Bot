@@ -64,7 +64,11 @@ def restore(save_path: str, backup_path: str) -> None:
     """
     if not os.path.isfile(backup_path):
         raise FileNotFoundError(f"Backup file not found: {backup_path}")
-    shutil.copy2(backup_path, save_path)
+    # Atomic restore: copy to temp, then os.replace (atomic on NTFS).
+    # Prevents corrupted save if process is killed mid-copy.
+    tmp = save_path + ".tmp"
+    shutil.copy2(backup_path, tmp)
+    os.replace(tmp, save_path)
 
 
 def delete_backup(backup_path: str) -> None:

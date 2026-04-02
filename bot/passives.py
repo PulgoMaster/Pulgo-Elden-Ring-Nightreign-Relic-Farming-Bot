@@ -149,7 +149,23 @@ CATEGORIES: "OrderedDict[str, list[str]]" = OrderedDict([
 
     ("Damage Negation", [
         "Improved Physical Damage Negation",
+        "Improved Physical Damage Negation +1",
+        "Improved Physical Damage Negation +2",
         "Improved Affinity Damage Negation",
+        "Improved Affinity Damage Negation +1",
+        "Improved Affinity Damage Negation +2",
+        "Improved Magic Damage Negation",
+        "Improved Magic Damage Negation +1",
+        "Improved Magic Damage Negation +2",
+        "Improved Fire Damage Negation",
+        "Improved Fire Damage Negation +1",
+        "Improved Fire Damage Negation +2",
+        "Improved Lightning Damage Negation",
+        "Improved Lightning Damage Negation +1",
+        "Improved Lightning Damage Negation +2",
+        "Improved Holy Damage Negation",
+        "Improved Holy Damage Negation +1",
+        "Improved Holy Damage Negation +2",
         "Magic Damage Negation Up",
         "Magic Damage Negation Up +1",
         "Magic Damage Negation Up +2",
@@ -591,10 +607,10 @@ CATEGORIES: "OrderedDict[str, list[str]]" = OrderedDict([
         "Gravity Stone Chunks in possession at start of expedition",
         "Bewitching Branches in possession at start of expedition",
         "Spark Aromatic in possession at start of expedition",
-        "Poison Sprayment in possession at start of expedition",
+        "Poison Spraymist in possession at start of expedition",
         "Ironjar Aromatic in possession at start of expedition",
         "Uplifting Aromatic in possession at start of expedition",
-        "Acid Sprayment in possession at start of expedition",
+        "Acid Spraymist in possession at start of expedition",
         "Bloodboil Aromatic in possession at start of expedition",
         "Wraith Calling Bell in possession at start of expedition",
         "Fire Grease in possession at start of expedition",
@@ -799,14 +815,14 @@ _COMPAT_EXCLUSIVE_GROUPS: list[list[str]] = [
         for p in passives
     ],
 
-    # ── Group 2 – Aromatics & Sprayments ─────────────────────────────────
+    # ── Group 2 – Aromatics & Spraymists ──────────────────────────────────
     [
         "Spark Aromatic in possession at start of expedition",
         "Ironjar Aromatic in possession at start of expedition",
         "Uplifting Aromatic in possession at start of expedition",
         "Bloodboil Aromatic in possession at start of expedition",
-        "Acid Sprayment in possession at start of expedition",
-        "Poison Sprayment in possession at start of expedition",
+        "Acid Spraymist in possession at start of expedition",
+        "Poison Spraymist in possession at start of expedition",
     ],
 
     # ── Group 3 – Tears ───────────────────────────────────────────────────
@@ -1058,3 +1074,109 @@ for _p in ALL_PASSIVES:
 
 # Remove empty UI categories
 UI_CATEGORIES = _OD((k, v) for k, v in UI_CATEGORIES.items() if v)
+
+
+def build_mode_categories(pool: "frozenset[str]") -> "OrderedDict[str, list[str]]":
+    """Build UI category dict containing only passives present in the given pool.
+
+    Categories are organized by compat groups (exclusive = picking one blocks the
+    rest) and sub-divided independent passives for easy browsing.
+
+    Each category name indicates whether it's exclusive or stackable.
+    """
+    _CURSE = frozenset({"Demerits (Attributes)", "Demerits (Damage Negation)", "Demerits (Action)"})
+
+    # Step 1: separate pooled passives into compat-grouped vs independent
+    grouped = {}     # compat_group_id -> list of passives
+    independent = [] # passives with no compat group
+
+    for cat, entries in CATEGORIES.items():
+        if cat in _CURSE:
+            continue
+        for p in entries:
+            if p not in pool:
+                continue
+            g = COMPAT_GROUPS.get(p)
+            if g is not None:
+                if g not in grouped:
+                    grouped[g] = []
+                grouped[g].append(p)
+            else:
+                independent.append(p)
+
+    # Deduplicate (a passive can appear in multiple CATEGORIES entries)
+    for g in grouped:
+        grouped[g] = sorted(set(grouped[g]), key=str.casefold)
+    independent = sorted(set(independent), key=str.casefold)
+
+    # Step 2: name the compat groups
+    _GROUP_NAMES = {
+        0: "Attack Power & Combat Arts (exclusive)",
+        1: "Character Skills (exclusive)",
+        2: "Aromatics & Consumables (exclusive)",
+        3: "Crystal Tears (exclusive)",
+        4: "Dormant Powers (exclusive)",
+        5: "Starting Armament Skills (exclusive)",
+        6: "Starting Armament Spells & Imbues (exclusive)",
+        7: "Sorcery & Incantation Schools (exclusive)",
+    }
+
+    result = _OD()
+
+    # Add exclusive groups in a fixed order
+    for gid in sorted(_GROUP_NAMES.keys()):
+        if gid in grouped:
+            result[_GROUP_NAMES[gid]] = grouped[gid]
+
+    # Step 3: sub-divide independent passives by their CATEGORIES category
+    # Build passive -> internal category map
+    _cat_map = {}
+    for cat, entries in CATEGORIES.items():
+        if cat in _CURSE:
+            continue
+        for p in entries:
+            if p not in _cat_map:
+                _cat_map[p] = cat
+
+    # Sub-category mapping for independent passives
+    _INDEP_NAMES = {
+        "Attributes":               "Attributes & Stats (stackable)",
+        "Attack Power":             "Attack Power Bonuses (stackable)",
+        "Character Skills & Art":   "Art Gauge & Skills (stackable)",
+        "Damage Negation":          "Damage Negation (stackable)",
+        "Status Ailment Resistances": "Status Resistances (stackable)",
+        "Restoration":              "HP / FP / Stamina Restoration (stackable)",
+        "Actions":                  "Conditional Boosts (stackable)",
+        "Environment":              "Exploration & Runes (stackable)",
+        "Team Members":             "Team Support (stackable)",
+        "Starting Item":            "Starting Items (stackable)",
+    }
+
+    indep_buckets = _OD()
+    weapon_bucket = []
+    uncategorized = []
+
+    for p in independent:
+        cat = _cat_map.get(p, "")
+        if cat.startswith(("Weapon", "Shield", "Catalyst")):
+            weapon_bucket.append(p)
+        elif cat in _INDEP_NAMES:
+            key = _INDEP_NAMES[cat]
+            if key not in indep_buckets:
+                indep_buckets[key] = []
+            indep_buckets[key].append(p)
+        else:
+            uncategorized.append(p)
+
+    # Add independent sub-categories
+    for key, passives in indep_buckets.items():
+        if passives:
+            result[key] = sorted(passives, key=str.casefold)
+
+    if weapon_bucket:
+        result["Weapon HP/FP/Atk Bonuses (stackable)"] = sorted(weapon_bucket, key=str.casefold)
+
+    if uncategorized:
+        result["Other (stackable)"] = sorted(uncategorized, key=str.casefold)
+
+    return result

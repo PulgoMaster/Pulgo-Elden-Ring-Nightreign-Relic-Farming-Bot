@@ -43,3 +43,20 @@ def capture(region: Optional[Tuple[int, int, int, int]] = None) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
     return buf.getvalue()
+
+
+def is_black_frame(image_bytes: bytes, threshold: int = 15, dark_ratio: float = 0.95) -> bool:
+    """Check if a captured frame is mostly black (monitor off / sleep).
+
+    Returns True if more than `dark_ratio` of pixels have all RGB channels
+    below `threshold`.  Used to detect monitor-off conditions where screen
+    capture returns blank frames.
+    """
+    try:
+        import numpy as np
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        arr = np.array(img)
+        dark_pixels = np.all(arr < threshold, axis=2)
+        return float(dark_pixels.mean()) >= dark_ratio
+    except Exception:
+        return False

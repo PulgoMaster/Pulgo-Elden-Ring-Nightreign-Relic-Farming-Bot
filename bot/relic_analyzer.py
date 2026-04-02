@@ -166,35 +166,6 @@ _PREVIEW_CROP_TOP_FRAC  = 0.38   # fraction of height to skip (preview screen)
 _MAX_OCR_WIDTH = 1000
 
 
-def has_passive_text_pixels(image_bytes: bytes,
-                            min_bright_pixels: int = 80) -> bool:
-    """Fast pixel check: is there bright (white) text in the passive region?
-
-    Checks a tight rectangle on the preview screen where passive text renders.
-    Region defined as fractions of the FULL screenshot (calibrated from real
-    screenshots at 2560x1440 — fractions are resolution-independent):
-      x: 33%-75%  (passive text starts after the relic icon at ~32%)
-      y: 59%-75%  (below the relic name at ~54%, above the F:Close bar at ~82%)
-
-    Counts pixels where all 3 RGB channels exceed 200 (white passive text on
-    dark background).  Curse text is blue and won't trigger this check.
-    ~0.5 ms per call (pure numpy, no OCR).  Used by the settle check to
-    confirm passives are rendered without running full analyze().
-    """
-    try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        w, h = img.size
-        # Tight crop: only the passive text band
-        x0, x1 = int(w * 0.33), int(w * 0.75)
-        y0, y1 = int(h * 0.59), int(h * 0.75)
-        passive_region = np.array(img.crop((x0, y0, x1, y1)))
-        # White-ish text: all 3 channels > 200
-        bright = np.all(passive_region > 200, axis=2)
-        return int(np.sum(bright)) >= min_bright_pixels
-    except Exception:
-        return False
-
-
 def _to_array(image_bytes: bytes, max_width: int = 0) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     if max_width and img.width > max_width:
@@ -279,25 +250,44 @@ def _check_criteria(found: list, criteria: dict) -> tuple:
             if hit:
                 matched.append(hit)
 
-        # Pairings — both sides must be present; counts as 1 match
-        # Optional pool: if a third-passive pool is defined, one of those
-        # must also be present for the pairing to count.
+        # Pairings — at least 2 of 3 slots (A, B, pool C) must be populated.
+        # A present relic must satisfy ALL populated slots for the pairing to match.
+        # Pool C requires at least one pool passive present on the relic.
         for pairing in criteria.get("pairings", []):
-            left_hit  = next((p for p in pairing.get("left",  []) if p in found_set), None)
-            right_hit = next((p for p in pairing.get("right", []) if p in found_set), None)
-            pool      = pairing.get("pool", [])
-            if left_hit and right_hit:
-                if pool:
-                    pool_hit = next((p for p in pool if p in found_set), None)
-                    if pool_hit:
-                        matched.append(f"{left_hit} \u2194 {right_hit} + {pool_hit}")
-                    else:
-                        # Left+right present but no pool passive — near miss
-                        near_miss_passives.append(f"{left_hit} \u2194 {right_hit}")
-                else:
-                    matched.append(f"{left_hit} \u2194 {right_hit}")
-            elif left_hit or right_hit:
-                near_miss_passives.append(left_hit or right_hit)
+            left  = pairing.get("left",  [])
+            right = pairing.get("right", [])
+            pool  = pairing.get("pool",  [])
+            has_a, has_b, has_c = bool(left), bool(right), bool(pool)
+            left_hit  = next((p for p in left  if p in found_set), None) if has_a else None
+            right_hit = next((p for p in right if p in found_set), None) if has_b else None
+            pool_hit  = next((p for p in pool  if p in found_set), None) if has_c else None
+
+            # Check if all populated slots are satisfied
+            a_ok = (not has_a) or (left_hit  is not None)
+            b_ok = (not has_b) or (right_hit is not None)
+            c_ok = (not has_c) or (pool_hit  is not None)
+
+            if a_ok and b_ok and c_ok:
+                # Full match — build label from what's present
+                parts = []
+                if left_hit:
+                    parts.append(left_hit)
+                if right_hit:
+                    parts.append(right_hit)
+                if pool_hit:
+                    parts.append(pool_hit)
+                matched.append(" \u2194 ".join(parts))
+            else:
+                # Near miss — at least one populated slot hit but not all
+                partial = []
+                if left_hit:
+                    partial.append(left_hit)
+                if right_hit:
+                    partial.append(right_hit)
+                if pool_hit:
+                    partial.append(pool_hit)
+                if partial:
+                    near_miss_passives.append(" \u2194 ".join(partial))
 
         if len(matched) >= threshold:
             return True, matched, []
@@ -319,106 +309,6 @@ def _check_criteria(found: list, criteria: dict) -> tuple:
 
 
 # ── Tab detection (Phase 3 smart navigation) ─────────────────────────── #
-
-_TAB_HIERARCHY = [
-    "Wylder", "Guardian", "Ironeye", "Duchess", "Raider",
-    "Revenant", "Recluse", "Executor", "Scholar", "Undertaker", "Sell",
-]
-# How many F2 presses are needed from each tab to reach Sell
-_TAB_F2_COUNT = {name: (len(_TAB_HIERARCHY) - 1 - i) for i, name in enumerate(_TAB_HIERARCHY)}
-# Wylder→10, Guardian→9, Ironeye→8, Duchess→7, Raider→6,
-# Revenant→5, Recluse→4, Executor→3, Scholar→2, Undertaker→1, Sell→0
-
-
-def detect_current_tab(image_bytes: bytes) -> tuple:
-    """
-    Detect which Relic Rites tab is currently active.
-
-    Strategy 1 (primary): OCR the upper 50 % of the screen and look for
-    character name text.  The active tab renders its name prominently in
-    the content area, so a direct text match is more reliable than measuring
-    tab-label brightness.
-
-    Strategy 2 (fallback): Among OCR results that fall inside the tab bar
-    region (top ~14 %), score each detected name by the average brightness of
-    its bounding box.  The selected tab label is noticeably brighter; winner
-    must be ≥ 15 units brighter than the runner-up.
-
-    A single readtext() call covers both strategies — results are filtered
-    by position for strategy 2 rather than re-scanning.
-
-    Returns:
-        (tab_name, f2_presses_needed)  e.g. ("Guardian", 9)
-        (None, None)                   if detection is inconclusive — callers
-                                       should press F2 × 1 to shift position
-                                       and re-detect on the next cycle
-    """
-    reader = _get_reader()
-    img = _to_array(image_bytes, max_width=0)
-    h, w = img.shape[:2]
-    tab_bar_h = int(h * 0.14)
-
-    # OCR the upper 50 % — covers both the tab bar and the main content header
-    scan_h = int(h * 0.50)
-    scan_region = img[:scan_h, :]
-    results = reader.readtext(scan_region)
-
-    # ── Strategy 1: direct character name text matching ───────────────── #
-    # Collect (confidence, y_center, tab_name) for every OCR hit that
-    # contains a tab name.  Prefer higher confidence; break ties by proximity
-    # to the top of the screen (tab bar area).
-    name_candidates: list = []
-    for bbox, text, conf in results:
-        if conf < 0.30:
-            continue
-        text_clean = text.strip()
-        for tab in _TAB_HIERARCHY:
-            if tab.lower() in text_clean.lower():
-                pts = np.array(bbox, dtype=int)
-                y_center = (int(pts[:, 1].min()) + int(pts[:, 1].max())) / 2
-                name_candidates.append((conf, y_center, tab))
-                break
-
-    if name_candidates:
-        # Sort: highest confidence first; for equal confidence, closest to top
-        name_candidates.sort(key=lambda x: (-x[0], x[1]))
-        best_conf, _best_y, best_tab = name_candidates[0]
-        if best_conf >= 0.45:
-            return best_tab, _TAB_F2_COUNT[best_tab]
-
-    # ── Strategy 2: tab-bar brightness scoring ────────────────────────── #
-    # Reuse the same readtext() results; only consider bounding boxes that
-    # sit inside the tab bar strip (top 14 % of the original image).
-    brightness_candidates: list = []
-    for bbox, text, conf in results:
-        if conf < 0.25:
-            continue
-        pts = np.array(bbox, dtype=int)
-        y0_bbox = int(pts[:, 1].min())
-        if y0_bbox > tab_bar_h:
-            continue  # outside the tab bar — skip for brightness scoring
-        text_clean = text.strip()
-        for tab in _TAB_HIERARCHY:
-            if tab.lower() in text_clean.lower():
-                x0 = max(0, int(pts[:, 0].min()))
-                y0 = max(0, y0_bbox)
-                x1 = min(w,          int(pts[:, 0].max()))
-                y1 = min(tab_bar_h,  int(pts[:, 1].max()))
-                region = scan_region[y0:y1, x0:x1]
-                if region.size == 0:
-                    break
-                brightness = float(region.mean())
-                brightness_candidates.append((brightness, tab))
-                break
-
-    if brightness_candidates:
-        brightness_candidates.sort(reverse=True)
-        best_brightness, best_tab = brightness_candidates[0]
-        if len(brightness_candidates) < 2 or brightness_candidates[0][0] - brightness_candidates[1][0] >= 15:
-            return best_tab, _TAB_F2_COUNT[best_tab]
-
-    return None, None  # nothing conclusive — caller presses F2 × 1 and re-detects
-
 
 # ── Relic color detection ─────────────────────────────────────────────── #
 
@@ -886,32 +776,3 @@ def verify_shop_item(image_bytes: bytes, relic_type: str) -> tuple:
         return False, "'Scenic Flatstone' not found in tooltip — inconclusive OCR"
 
 
-def check_condition(image_bytes: bytes, condition_text: str) -> bool:
-    """
-    Check whether the given text is visible anywhere on screen using OCR.
-    Returns True if found, False otherwise.
-
-    Uses a downscaled crop of the top half of the screen — UI labels like
-    "Sell" appear there and the smaller image makes each OCR call ~2-3 s
-    faster than scanning the full frame.
-    """
-    reader = _get_reader()
-    img = _to_array(image_bytes, max_width=0)       # full resolution — keep OCR reliable
-    h, w = img.shape[:2]
-    # Top-left region — "Sell" tab label lives in the top strip of the Relic Rites menu
-    # and stop-condition text (e.g. phase 1 buy confirmations) appears in the upper-left.
-    # Keeping the crop small is important: check_condition is called after every buy batch
-    # in Phase 1, so OCR area directly drives per-batch time.
-    img = img[: int(h * 0.30), : int(w * 0.65)]
-    results = reader.readtext(img)
-
-    all_text = " ".join(t for _, t, c in results if c > 0.3).lower()
-    condition_lower = condition_text.lower()
-
-    if condition_lower in all_text:
-        return True
-
-    # Fuzzy fallback: accept if most words of the condition are present.
-    words = condition_lower.split()
-    matched = sum(1 for w in words if w in all_text)
-    return matched >= max(1, len(words) * 0.6)

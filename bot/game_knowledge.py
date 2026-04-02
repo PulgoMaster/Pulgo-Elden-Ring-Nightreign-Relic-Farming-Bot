@@ -244,9 +244,18 @@ WEAPON_CLASS_TO_ATTACK_PASSIVE = {
 # primary scaling stats, innate status effect (None if none), default weapon skill,
 # whether it can be infused with an affinity.
 #
-# Sources: Nightreign Weapons PDF + in-game knowledge.
-# Fields marked # TODO: verify should be confirmed against the PDF/wiki.
+# ── Weapons & Skills: imported from datamine-verified modules ──────────────────
+# NIGHTREIGN_WEAPONS: 50 base weapons with categories, damage, skill pools
+# WEAPON_SKILLS_FULL: 183 weapon skills with affinity, damage types, status
+# NIGHTREIGN_SORCERIES / NIGHTREIGN_INCANTATIONS: spells with damage types
+from database.nightreign_weapons import NIGHTREIGN_WEAPONS
+from database.nightreign_weapon_skills import WEAPON_SKILLS_FULL
+from database.nightreign_spells import SORCERIES as NIGHTREIGN_SORCERIES
+from database.nightreign_spells import INCANTATIONS as NIGHTREIGN_INCANTATIONS
 
+# Legacy WEAPONS list — kept for backward compatibility with existing code
+# that iterates game_knowledge.WEAPONS as a list of dicts.
+# TODO: migrate callers to use NIGHTREIGN_WEAPONS dict directly.
 WEAPONS = [
 
     # ── Daggers ────────────────────────────────────────────────────────────────
@@ -1437,11 +1446,10 @@ WEAPONS = [
 ]
 
 
-# ── Weapon skills ──────────────────────────────────────────────────────────────
-# Maps skill name → damage type(s) it deals (for synergy detection).
-# "affinity" = the elemental affinity the skill deals (None = physical).
-# "damage_types" = physical subtypes (if affinity is None) or [] if pure elemental.
-# TODO: verify individual skill damage types from wiki
+# ── Weapon skills (legacy — 69 entries) ────────────────────────────────────────
+# Kept for backward compatibility. The authoritative source is now
+# WEAPON_SKILLS_FULL (183 entries) imported from database/nightreign_weapon_skills.py.
+# TODO: migrate callers to use WEAPON_SKILLS_FULL directly.
 
 WEAPON_SKILLS = {
     # ── Physical / General ─────────────────────────────────────────────────────
@@ -1468,7 +1476,7 @@ WEAPON_SKILLS = {
     # ── Lightning ─────────────────────────────────────────────────────────────
     "Thunderbolt":          {"damage_types": [], "affinity": "Lightning"},
     "Lightning Slash":      {"damage_types": [], "affinity": "Lightning"},
-    "Frenzyflame Thrust":   {"damage_types": [], "affinity": "Lightning"},  # actually Fire+Madness TODO: verify
+    "Frenzyflame Thrust":   {"damage_types": [], "affinity": "Fire", "innate_status": "Madness"},
 
     # ── Fire ──────────────────────────────────────────────────────────────────
     "Flaming Strike":       {"damage_types": [], "affinity": "Fire"},
@@ -1479,7 +1487,7 @@ WEAPON_SKILLS = {
     "Surge of Faith":       {"damage_types": [], "affinity": "Fire"},
     "Corpse Piler":         {"damage_types": ["Slash"], "affinity": "Fire"},
     "Bloodblade Dance":     {"damage_types": ["Slash"], "affinity": "Fire"},
-    "Ghostflame Ignition":  {"damage_types": [], "affinity": None},  # TODO: verify — ghost-flame type
+    "Ghostflame Ignition":  {"damage_types": [], "affinity": "Magic", "innate_status": "Frostbite"},
 
     # ── Magic ─────────────────────────────────────────────────────────────────
     "Glintblade Phalanx":       {"damage_types": [], "affinity": "Magic"},
@@ -1487,7 +1495,7 @@ WEAPON_SKILLS = {
     "Loretta's Slash":          {"damage_types": ["Slash"], "affinity": "Magic"},
     "Night-and-Flame Stance":   {"damage_types": [], "affinity": "Magic"},  # has both; primary Magic
     "Wave of Destruction":      {"damage_types": [], "affinity": "Magic"},
-    "Eochaid's Dancing Blade":  {"damage_types": [], "affinity": None},     # TODO: verify
+    "Eochaid's Dancing Blade":  {"damage_types": ["Standard"], "affinity": "Magic"},
 
     # ── Holy ──────────────────────────────────────────────────────────────────
     "Sacred Blade":         {"damage_types": [], "affinity": "Holy"},
@@ -1510,12 +1518,11 @@ WEAPON_SKILLS = {
     "White Shadow's Lure":  {"damage_types": [], "affinity": None, "innate_status": "Sleep"},
 
     # ── Unique skills ─────────────────────────────────────────────────────────
-    "Starcaller Cry":       {"damage_types": [], "affinity": None},         # TODO: verify damage type
+    "Starcaller Cry":       {"damage_types": ["Strike"], "affinity": "Magic"},
     "Dynast's Finesse":     {"damage_types": ["Pierce"], "affinity": None},
     "Reduvia Blood Blade":  {"damage_types": [], "affinity": None, "innate_status": "Hemorrhage"},
-    "Familial Rancor":      {"damage_types": [], "affinity": None},
-    "Familial Rancor":      {"damage_types": [], "affinity": None},
-    "Gravitas":             {"damage_types": [], "affinity": None},         # TODO: verify
+    "Familial Rancor":      {"damage_types": [], "affinity": "Magic"},
+    "Gravitas":             {"damage_types": [], "affinity": "Magic"},
     "Unfaltering Prayer":   {"damage_types": [], "affinity": None},
 
     # ── Spell-as-skill (from Starting Armaments passives) ─────────────────────
@@ -2013,6 +2020,119 @@ PASSIVE_CATEGORY: "dict[str, str]" = {
 
     # ── Extended spell duration ────────────────────────────────────────────────
     "Extended Spell Duration":  "utility",
+
+    # ── Damage Negation tiers ──────────────────────────────────────────────────
+    "Improved Physical Damage Negation +1":      "damage_negation",
+    "Improved Physical Damage Negation +2":      "damage_negation",
+    "Improved Affinity Damage Negation +1":      "damage_negation",
+    "Improved Affinity Damage Negation +2":      "damage_negation",
+    "Improved Magic Damage Negation":            "damage_negation",
+    "Improved Magic Damage Negation +1":         "damage_negation",
+    "Improved Magic Damage Negation +2":         "damage_negation",
+    "Improved Fire Damage Negation":             "damage_negation",
+    "Improved Fire Damage Negation +1":          "damage_negation",
+    "Improved Fire Damage Negation +2":          "damage_negation",
+    "Improved Lightning Damage Negation":        "damage_negation",
+    "Improved Lightning Damage Negation +1":     "damage_negation",
+    "Improved Lightning Damage Negation +2":     "damage_negation",
+    "Improved Holy Damage Negation":             "damage_negation",
+    "Improved Holy Damage Negation +1":          "damage_negation",
+    "Improved Holy Damage Negation +2":          "damage_negation",
+
+    # ── Starting Items ─────────────────────────────────────────────────────────
+    "Starlight Shards in possession at start of expedition":       "starting_item",
+    "Fire Pots in possession at start of expedition":              "starting_item",
+    "Magic Pots in possession at start of expedition":             "starting_item",
+    "Lightning Pots in possession at start of expedition":         "starting_item",
+    "Holy Water Pots in possession at start of expedition":        "starting_item",
+    "Poisonbone Darts in possession at start of expedition":       "starting_item",
+    "Crystal Darts in possession at start of expedition":          "starting_item",
+    "Throwing Daggers in possession at start of expedition":       "starting_item",
+    "Glintstone Scraps in possession at start of expedition":      "starting_item",
+    "Gravity Stone Chunks in possession at start of expedition":   "starting_item",
+    "Bewitching Branches in possession at start of expedition":    "starting_item",
+    "Fire Grease in possession at start of expedition":            "starting_item",
+    "Magic Grease in possession at start of expedition":           "starting_item",
+    "Lightning Grease in possession at start of expedition":       "starting_item",
+    "Holy Grease in possession at start of expedition":            "starting_item",
+    "Shield Grease in possession at start of expedition":          "starting_item",
+    "Wraith Calling Bell in possession at start of expedition":    "starting_item",
+    "Small Pouch in possession at start of expedition":            "starting_item",
+    "Stonesword Key in possession at start of expedition":         "starting_item",
+    "Spark Aromatic in possession at start of expedition":         "starting_item",
+    "Poison Spraymist in possession at start of expedition":       "starting_item",
+    "Ironjar Aromatic in possession at start of expedition":       "starting_item",
+    "Uplifting Aromatic in possession at start of expedition":     "starting_item",
+    "Acid Spraymist in possession at start of expedition":         "starting_item",
+    "Bloodboil Aromatic in possession at start of expedition":     "starting_item",
+
+    # ── Starting Items (Tears) ─────────────────────────────────────────────────
+    "Crimson Crystal Tear in possession at start of expedition":        "starting_tear",
+    "Crimson Bubbletear in possession at start of expedition":          "starting_tear",
+    "Crimsonburst Crystal Tear in possession at start of expedition":   "starting_tear",
+    "Crimsonspill Crystal Tear in possession at start of expedition":   "starting_tear",
+    "Crimsonwhorl Bubbletear in possession at start of expedition":     "starting_tear",
+    "Cerulean Crystal Tear in possession at start of expedition":       "starting_tear",
+    "Cerulean Hidden Tear in possession at start of expedition":        "starting_tear",
+    "Greenburst Crystal Tear in possession at start of expedition":     "starting_tear",
+    "Greenspill Crystal Tear in possession at start of expedition":     "starting_tear",
+    "Opaline Bubbletear in possession at start of expedition":          "starting_tear",
+    "Opaline Hardtear in possession at start of expedition":            "starting_tear",
+    "Leaden Hardtear in possession at start of expedition":             "starting_tear",
+    "Speckled Hardtear in possession at start of expedition":           "starting_tear",
+    "Windy Crystal Tear in possession at start of expedition":          "starting_tear",
+    "Ruptured Crystal Tear in possession at start of expedition":       "starting_tear",
+    "Stonebarb Cracked Tear in possession at start of expedition":      "starting_tear",
+    "Spiked Cracked Tear in possession at start of expedition":         "starting_tear",
+    "Thorny Cracked Tear in possession at start of expedition":         "starting_tear",
+    "Twiggy Cracked Tear in possession at start of expedition":         "starting_tear",
+    "Flame-Shrouding Cracked Tear in possession at start of expedition":    "starting_tear",
+    "Magic-Shrouding Cracked Tear in possession at start of expedition":    "starting_tear",
+    "Lightning-Shrouding Cracked Tear in possession at start of expedition":"starting_tear",
+    "Holy-Shrouding Cracked Tear in possession at start of expedition":     "starting_tear",
+
+    # ── Starting Armaments (Skills) ────────────────────────────────────────────
+    "Changes compatible armament's skill to Endure at start of expedition":             "starting_skill",
+    "Changes compatible armament's skill to Quickstep at start of expedition":           "starting_skill",
+    "Changes compatible armament's skill to Storm Stomp at start of expedition":         "starting_skill",
+    "Changes compatible armament's skill to Determination at start of expedition":       "starting_skill",
+    "Changes compatible armament's skill to Glintblade Phalanx at start of expedition":  "starting_skill",
+    "Changes compatible armament's skill to Gravitas at start of expedition":            "starting_skill",
+    "Changes compatible armament's skill to Flaming Strike at start of expedition":      "starting_skill",
+    "Changes compatible armament's skill to Eruption at start of expedition":            "starting_skill",
+    "Changes compatible armament's skill to Thunderbolt at start of expedition":         "starting_skill",
+    "Changes compatible armament's skill to Lightning Slash at start of expedition":     "starting_skill",
+    "Changes compatible armament's skill to Sacred Blade at start of expedition":        "starting_skill",
+    "Changes compatible armament's skill to Prayerful Strike at start of expedition":    "starting_skill",
+    "Changes compatible armament's skill to Poisonous Mist at start of expedition":      "starting_skill",
+    "Changes compatible armament's skill to Poison Moth Flight at start of expedition":  "starting_skill",
+    "Changes compatible armament's skill to Blood Blade at start of expedition":         "starting_skill",
+    "Changes compatible armament's skill to Seppuku at start of expedition":             "starting_skill",
+    "Changes compatible armament's skill to Chilling Mist at start of expedition":       "starting_skill",
+    "Changes compatible armament's skill to Hoarfrost Stomp at start of expedition":     "starting_skill",
+    "Changes compatible armament's skill to White Shadow's Lure at start of expedition": "starting_skill",
+    "Changes compatible armament's skill to Rain of Arrows at start of expedition":      "starting_skill",
+
+    # ── Starting Armaments (Imbues) ────────────────────────────────────────────
+    "Starting armament deals magic damage":        "starting_imbue",
+    "Starting armament deals fire damage":         "starting_imbue",
+    "Starting armament deals lightning damage":    "starting_imbue",
+    "Starting armament deals holy damage":         "starting_imbue",
+    "Starting armament inflicts poison":           "starting_imbue",
+    "Starting armament inflicts blood loss":       "starting_imbue",
+    "Starting armament inflicts frost":            "starting_imbue",
+
+    # ── Starting Armaments (Spells) ────────────────────────────────────────────
+    "Changes compatible armament's sorcery to Magic Glintblade at start of expedition":     "starting_spell",
+    "Changes compatible armament's sorcery to Carian Greatsword at start of expedition":    "starting_spell",
+    "Changes compatible armament's sorcery to Night Shard at start of expedition":           "starting_spell",
+    "Changes compatible armament's sorcery to Magma Shot at start of expedition":            "starting_spell",
+    "Changes compatible armament's sorcery to Briars of Punishment at start of expedition":  "starting_spell",
+    "Changes compatible armament's incantation to Wrath of Gold at start of expedition":     "starting_spell",
+    "Changes compatible armament's incantation to Lightning Spear at start of expedition":   "starting_spell",
+    "Changes compatible armament's incantation to O, Flame! at start of expedition":         "starting_spell",
+    "Changes compatible armament's incantation to Beast Claw at start of expedition":         "starting_spell",
+    "Changes compatible armament's incantation to Dragonfire at start of expedition":         "starting_spell",
 }
 
 

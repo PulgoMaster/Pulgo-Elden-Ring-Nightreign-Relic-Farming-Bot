@@ -270,6 +270,7 @@ class InputPlayer:
     def __init__(self):
         self._ms = MouseController()
         self._stop_flag = False
+        self._held_keys: set[str] = set()   # keys currently pressed (for abort cleanup)
         # Set this to the game exe filename (e.g. "nightreign.exe") to enable
         # focus-guard: inputs are skipped if the game is not the foreground window.
         self.game_exe: str = ""
@@ -290,17 +291,29 @@ class InputPlayer:
 
     def _press(self, key_str: str):
         ok = _send_key(key_str, key_up=False)
+        if ok:
+            self._held_keys.add(key_str)
         if self.diag is not None:
             sc, ext = _sc_for_key(key_str)
             self.diag.log_input(self._diag_iter, key_str, "press", sc, ok, ext)
 
     def _release(self, key_str: str):
         ok = _send_key(key_str, key_up=True)
+        self._held_keys.discard(key_str)
         if self.diag is not None:
             sc, ext = _sc_for_key(key_str)
             self.diag.log_input(self._diag_iter, key_str, "release", sc, ok, ext)
 
     # ── public API ────────────────────────────────────────────────────────── #
+
+    def _release_all_held(self):
+        """Release any keys still held — safety cleanup after abort."""
+        for key in list(self._held_keys):
+            try:
+                self._release(key)
+            except Exception:
+                pass
+        self._held_keys.clear()
 
     def tap(self, key: str, hold: float = 0.05):
         """Press and release a single key. Used for menu navigation spam."""
@@ -347,6 +360,7 @@ class InputPlayer:
                 btn = Button.left if event["button"] == "left" else Button.right
                 self._ms.release(btn)
                 time.sleep(hold + gap)
+        self._release_all_held()
 
     def play(self, events: list, speed: float = 1.0, bypass_focus: bool = False,
              extra_delay: float = 0.0) -> tuple:
@@ -410,6 +424,7 @@ class InputPlayer:
                 if extra_delay > 0:
                     time.sleep(extra_delay)
 
+        self._release_all_held()
         return fired, fired_keys
 
     def play_split(self, events: list, split_after_n_keys: int, mid_pause: float = 0.0,
@@ -491,4 +506,5 @@ class InputPlayer:
                 if extra_delay > 0:
                     time.sleep(extra_delay)
 
+        self._release_all_held()
         return fired, fired_keys

@@ -991,6 +991,7 @@ class RelicBotApp(tk.Tk):
             "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
             "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
         }
+        self._loading_profile = False
         self._smart_analyze_var = tk.BooleanVar(value=False)
         self._ov_smart_hits: int = 0
 
@@ -2241,11 +2242,18 @@ class RelicBotApp(tk.Tk):
 
     def _stash_mode_data(self, mode: str):
         """Save current UI criteria/curses/exclusions into per-mode storage."""
+        state = self.relic_builder.get_state()
         self._mode_data[mode] = {
-            "criteria":           self.relic_builder.get_state(),
+            "criteria":           state,
             "blocked_curses":     list(self._blocked_curses_list),
             "excluded_passives":  list(self._excluded_passives_list),
         }
+        # Defensive: log if stashing would overwrite the OTHER mode's data
+        other = "normal" if mode == "night" else "night"
+        if other in self._mode_data:
+            other_crit = self._mode_data[other].get("criteria", {})
+            if other_crit == state and state.get("pool", {}).get("entries"):
+                self._log(f"  WARNING: stash({mode}) has same criteria as {other} — possible overwrite")
 
     def _restore_mode_data(self, mode: str):
         """Load per-mode criteria/curses/exclusions into the UI."""
@@ -2464,7 +2472,13 @@ class RelicBotApp(tk.Tk):
         relicbot_config.json and is NOT saved per-profile.
         """
         rtype = self.relic_type_var.get()
+        # Stash current UI into the active mode. The non-active mode's data
+        # should already be in _mode_data from the last mode switch.
         self._stash_mode_data(rtype)
+        # Defensive: verify both modes have data (not just the active one)
+        other = "normal" if rtype == "night" else "night"
+        if not self._mode_data.get(other, {}).get("criteria"):
+            self._log(f"  NOTE: {other} mode has no criteria — profile will save it as empty.")
         return {
             "relic_type": self.relic_type_var.get(),
             "mode_data": {m: {k: list(v) if isinstance(v, list) else v
@@ -2506,14 +2520,10 @@ class RelicBotApp(tk.Tk):
         "Duchess: Dagger chain attack reprises event upon nearby enemies": "[Duchess] Reprise events upon nearby enemies by landing the final blow of a chain attack with dagger",
         "Raider: Damage taken while using Character Skill improves attack power and stamina": "[Raider] Damage taken while using Character Skill",
         "Executor: Character Skill Boosts Attack but Attacking Drains HP": "[Executor] Character Skill Boosts Attack but Lowers Damage Negation While Attacking",
+        # Spraymist typo fix
+        "Poison Sprayment in possession at start of expedition": "Poison Spraymist in possession at start of expedition",
+        "Acid Sprayment in possession at start of expedition":   "Acid Spraymist in possession at start of expedition",
     }
-    # Also generate colon→bracket for all characters with unchanged descriptions
-    for _char in ("Wylder", "Guardian", "Ironeye", "Duchess", "Raider",
-                  "Revenant", "Recluse", "Executor", "Scholar", "Undertaker"):
-        # Generic colon→bracket: "Name: desc" → "[Name] desc"
-        # Only for entries not already in the explicit map above
-        pass  # handled by _migrate_passive below
-
     @staticmethod
     def _migrate_passive(name: str) -> str:
         """Map a passive name from an old profile to the current canonical name."""
@@ -2547,6 +2557,8 @@ class RelicBotApp(tk.Tk):
                     p["left"] = [migrate(n) for n in p["left"]]
                 if "right" in p:
                     p["right"] = [migrate(n) for n in p["right"]]
+                if "pool" in p:
+                    p["pool"] = [migrate(n) for n in p["pool"]]
         return criteria
 
     def _dict_to_profile(self, data: dict):
@@ -3091,6 +3103,17 @@ class RelicBotApp(tk.Tk):
 
             try:
                 _img = screen_capture.capture(region)
+                # Detect monitor-off: if the frame is all black, the monitor
+                # may be sleeping. Don't count this as a failed detection —
+                # extend the timeout and keep trying.
+                if screen_capture.is_black_frame(_img):
+                    if _cycle == 1 or _cycle % 5 == 0:
+                        self._log(
+                            "[Phase -0.5] Black frame detected — monitor may be off. "
+                            "Waiting for signal…")
+                    # Extend timeout so the bot doesn't abort while monitor sleeps
+                    _start = max(_start, time.time() - _MAX_WAIT + 30)
+                    continue
                 if relic_analyzer.check_text_visible(_img, "equipment", top_fraction=0.15):
                     _elapsed = time.time() - _start
                     self._log(
@@ -3777,6 +3800,11 @@ class RelicBotApp(tk.Tk):
                                 _task, _bg_bl_state, _bg_bl_lock, _bg_bl_dmap, results)
                         except Exception as _bge:
                             self._log(f"  [BG-GPU] Worker error: {_bge}")
+                            try:
+                                self._mark_relic_failed(
+                                    _task, _bg_bl_state, _bg_bl_lock, _bg_bl_dmap, results)
+                            except Exception:
+                                pass
                         finally:
                             _bg_gpu_q.task_done()
                 return _worker
@@ -4537,6 +4565,7 @@ class RelicBotApp(tk.Tk):
 
                 if captures is None:
                     self._log("[Backlog] Fatal capture error — aborting.")
+                    _diag_end("fatal")
                     self.after(0, self._reset_controls)
                     return
 
@@ -4547,6 +4576,7 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             f"Phase 0 failed on all {_MAX_P0_ITER_RESTARTS} attempts "
                             f"of iteration {iteration} — aborting batch.")
+                        _diag_end("p0_fail")
                         self.after(0, self._reset_controls)
                         return
                     self._log(
@@ -4557,7 +4587,7 @@ class RelicBotApp(tk.Tk):
                     except Exception:
                         pass
                     _prev_save_dir = None
-                    _is_restart = True
+                    _diag_end(); _is_restart = True
                     continue
 
                 if self._reset_iter_requested:
@@ -4575,7 +4605,7 @@ class RelicBotApp(tk.Tk):
                         pass
                     _prev_save_dir = None
                     _iter_restart_count = 0
-                    _is_restart = True
+                    _diag_end(); _is_restart = True
                     continue
 
                 if captures:
@@ -5778,6 +5808,7 @@ class RelicBotApp(tk.Tk):
             _mem_wait_logged  = False
             while _available_ram_mb() < _MEM_THRESHOLD_MB:
                 if not self.bot_running:
+                    self._mark_relic_failed(task, iter_state, lock, dir_map, results)
                     return
                 if not _mem_wait_logged:
                     self._log(
@@ -6695,62 +6726,11 @@ class RelicBotApp(tk.Tk):
                 _p0_seq_ok   = (_p0_sent_keys == _p0_expected_keys)
                 _p0_shop_ok  = _shop_found[0]
 
-                # ── Shop item verification (ARCHIVED — not active) ────────────
-                # verify_shop_item() OCRs the tooltip panel to confirm the cursor
-                # landed on the correct relic and that it is not the old-version
-                # (1.02) variant.  Archived pending proper testing/tuning.
-                # To re-enable: remove the `if False:` wrapper below.
-                #
-                # Retry logic (when re-enabled):
-                # • Definitive wrong item detected → bail immediately (ESC reset).
-                # • Inconclusive OCR → retry every 1.5 s for up to 30 s, then ESC
-                #   reset and restart the iteration from a fresh state.
+                # Shop item verification is handled by the settle check after
+                # Phase 1 (verify_shop_item distinguishes shop from relic preview).
+                # Phase 0 only needs to confirm the shop screen appeared.
                 _p0_item_ok     = True
                 _p0_item_reason = ""
-                if False:   # ARCHIVED
-                    if _p0_count_ok and _p0_seq_ok and _p0_shop_ok:
-                        _tooltip_settle = (1.0 if _lpm else 0.5) * max(1.0, self._perf_gap_mult)
-                        time.sleep(_tooltip_settle)
-                        _ITEM_VERIFY_TIMEOUT = 30.0
-                        _item_deadline = time.monotonic() + _ITEM_VERIFY_TIMEOUT
-                        _item_attempt  = 0
-                        while self.bot_running and not self._reset_iter_requested:
-                            _item_attempt += 1
-                            try:
-                                _item_img = screen_capture.capture(region)
-                                _p0_item_ok, _p0_item_reason = relic_analyzer.verify_shop_item(
-                                    _item_img, self.relic_type_var.get())
-                            except Exception as _p0ie:
-                                self._log(
-                                    f"  Phase 0: shop item check error: {_p0ie} — proceeding.")
-                                _p0_item_ok = True
-                                break
-
-                            if _p0_item_ok:
-                                self._log(
-                                    f"  Phase 0: shop item verified — {_p0_item_reason}.")
-                                break
-
-                            if "inconclusive" not in _p0_item_reason.lower():
-                                self._log(
-                                    f"  Phase 0: shop item check FAILED — {_p0_item_reason}.")
-                                break
-
-                            if time.monotonic() >= _item_deadline:
-                                self._log(
-                                    f"  Phase 0: item not detected after "
-                                    f"{_ITEM_VERIFY_TIMEOUT:.0f}s — resetting iteration.")
-                                _p0_item_ok   = False
-                                _p0_item_reason = (
-                                    f"item not detected after {_ITEM_VERIFY_TIMEOUT:.0f}s")
-                                break
-
-                            _remaining = max(0.0, _item_deadline - time.monotonic())
-                            self._log(
-                                f"  Phase 0: item not yet visible "
-                                f"(attempt {_item_attempt}, {_remaining:.0f}s remaining)"
-                                f" — retrying…")
-                            time.sleep(1.5)
 
                 # Record Phase 0 duration on clean first-attempt success only
                 # (retried runs include recovery waits — not representative).
@@ -7112,14 +7092,44 @@ class RelicBotApp(tk.Tk):
                         break   # break _p1_try loop
 
                     # If the relic name was seen during polling but passives never
-                    # confirmed (OCR miss or fast tooltip), accept it as settled rather
-                    # than ESC-recovering — Phase 2 will do the proper passive scan.
+                    # confirmed, verify we actually left the shop.  The shop tooltip
+                    # shows "Deep Scenic Flatstone" / "Scenic Flatstone" which can
+                    # look like a relic name to OCR.  verify_shop_item checks the
+                    # tooltip region — if it finds the shop item, Phase 1 failed to
+                    # navigate into the preview and we should NOT accept the settle.
                     if not _settle_ok and _settle_no_passives:
-                        _settle_ok = True
-                        self._log(
-                            f"  Cycle {_batch_i + 1}: settle accepted — relic name"
-                            f" detected but no passives in {_sc} poll(s); proceeding"
-                            f" to Phase 2.")
+                        _p1_still_on_shop = False
+                        try:
+                            _p1v_img = screen_capture.capture(region)
+                            _p1_still_on_shop, _ = relic_analyzer.verify_shop_item(
+                                _p1v_img, self.relic_type_var.get())
+                        except Exception:
+                            pass
+                        if not _p1_still_on_shop:
+                            # Not on shop — likely on relic preview with slow passives.
+                            # Brief settle so passives finish rendering, then re-capture
+                            # for a better slot 0 image.
+                            time.sleep(0.25)
+                            try:
+                                _settle_img = screen_capture.capture(region)
+                                _settle_result = relic_analyzer.analyze(
+                                    _settle_img, criteria,
+                                    crop_left=relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
+                                    crop_top=relic_analyzer._PREVIEW_CROP_TOP_FRAC,
+                                    relic_type=self.relic_type_var.get(),
+                                )
+                            except Exception:
+                                pass   # fall back to the earlier capture
+                            _settle_ok = True
+                            self._log(
+                                f"  Cycle {_batch_i + 1}: settle accepted — relic name"
+                                f" detected but no passives in {_sc} poll(s); proceeding"
+                                f" to Phase 2.")
+                        else:
+                            self._log(
+                                f"  Cycle {_batch_i + 1}: still on shop after Phase 1"
+                                f" (Scenic Flatstone tooltip visible) — buy may have"
+                                f" failed.")
 
                     if _settle_ok:
                         self._log(
@@ -7137,58 +7147,28 @@ class RelicBotApp(tk.Tk):
                         break   # proceed to Phase 2 with full scan
 
                     if _settle_no_passives:
-                        # We are still in the shop menu (Scenic / Deep Scenic Flatstone
-                        # tooltip visible — player-owned relics never carry that name).
-                        # Phase 1 failed to navigate into the preview.
-                        # ── Shop item re-verify (ARCHIVED — not active) ──────────
-                        # When active: calls verify_shop_item() to decide whether to
-                        # retry Phase 1 in place (still on correct item) or fall
-                        # through to ESC + Phase 0 recovery (wrong item/inconclusive).
-                        # Archived pending proper testing/tuning alongside Phase 0
-                        # verify.  To re-enable: remove the `if False:` wrapper.
-                        _shop_item_ok     = False
-                        _shop_verify_reason = "not checked"
-                        if False:   # ARCHIVED
-                            try:
-                                _verify_img = screen_capture.capture(region)
-                                _shop_item_ok, _shop_verify_reason = (
-                                    relic_analyzer.verify_shop_item(
-                                        _verify_img, self.relic_type_var.get()))
-                            except Exception as _ve:
-                                _shop_verify_reason = f"error: {_ve}"
-
-                        if _shop_item_ok:
-                            # Still on the correct shop item, correct version.
-                            # Retry Phase 1 from this position — no ESC needed.
-                            _p2_settle_skip_count += 1
+                        # We are still on the shop — confirmed by verify_shop_item
+                        # above.  Retry Phase 1 in place (no ESC needed).
+                        _p2_settle_skip_count += 1
+                        self._log(
+                            f"  Cycle {_batch_i + 1}: Phase 1 did not open preview"
+                            f" — still on correct shop item"
+                            f" (fail {_p2_settle_skip_count}/{_MAX_P2_SETTLE_SKIPS})"
+                            f" — retrying Phase 1 in place.")
+                        if _p2_settle_skip_count >= _MAX_P2_SETTLE_SKIPS:
                             self._log(
-                                f"  Cycle {_batch_i + 1}: Phase 1 did not open preview"
-                                f" — still on correct shop item"
-                                f" (fail {_p2_settle_skip_count}/{_MAX_P2_SETTLE_SKIPS})"
-                                f" — retrying Phase 1 in place.")
-                            if _p2_settle_skip_count >= _MAX_P2_SETTLE_SKIPS:
-                                self._log(
-                                    f"  {_MAX_P2_SETTLE_SKIPS} Phase 1 failures on correct"
-                                    f" item — ESC recovery then resetting iteration.")
-                                self._esc_to_game_screen(region)
-                                # Correct async total to actual submitted count so
-                                # workers can finalize this iteration (over-estimate
-                                # would prevent done >= total from ever being true).
-                                if _p2_async and self._async_state_lock is not None:
-                                    with self._async_state_lock:
-                                        _istate = (self._async_iter_state or {}).get(iteration)
-                                        if _istate is not None:
-                                            _istate["total"] = _p2_submitted
-                                if _exclude_buy_phase:
-                                    self._set_ocr_throttle(False)
-                                return relic_results
-                            continue   # retry the _p1_try loop without ESC recovery
-                        else:
-                            # Wrong item, wrong version, OCR inconclusive, or verify
-                            # archived — fall through to ESC + Phase 0 recovery below.
-                            self._log(
-                                f"  Cycle {_batch_i + 1}: Phase 1 failed — shop item"
-                                f" check: {_shop_verify_reason} — ESC recovery.")
+                                f"  {_MAX_P2_SETTLE_SKIPS} Phase 1 failures on correct"
+                                f" item — ESC recovery then resetting iteration.")
+                            self._esc_to_game_screen(region)
+                            if _p2_async and self._async_state_lock is not None:
+                                with self._async_state_lock:
+                                    _istate = (self._async_iter_state or {}).get(iteration)
+                                    if _istate is not None:
+                                        _istate["total"] = _p2_submitted
+                            if _exclude_buy_phase:
+                                self._set_ocr_throttle(False)
+                            return relic_results
+                        continue   # retry the _p1_try loop without ESC recovery
 
                     # Nothing detected at all OR shop item wrong/wrong version
                     # → ESC + Phase 0 recovery, then retry
@@ -7626,6 +7606,62 @@ class RelicBotApp(tk.Tk):
                     if not _exclude_buy_phase:     # excl-ops: batch loop releases at close_game
                         self._set_ocr_throttle(False)  # resume — workers can run during shop settle
                     time.sleep(0.40)   # shop ready within ~239ms of F release
+
+                    # ── Post-Phase 3: verify shop item ─────────────────── #
+                    # Confirm we landed back on the correct shop item
+                    # (Scenic Flatstone / Deep Scenic Flatstone).  The shop
+                    # title "Small Jar Bazaar" is visible even when darkened
+                    # inside the relic preview, so we use the tooltip check
+                    # which is only visible on the buy-ready shop screen.
+                    # Skip on the last cycle — no next buy.
+                    if _batch_i < _buy_count - 1:
+                        _p3_verify_ok = False
+                        try:
+                            _p3v_img = screen_capture.capture(region)
+                            _p3_verify_ok, _p3v_reason = (
+                                relic_analyzer.verify_shop_item(
+                                    _p3v_img, self.relic_type_var.get()))
+                        except Exception as _p3ve:
+                            _p3v_reason = f"error: {_p3ve}"
+
+                        if not _p3_verify_ok:
+                            self._log(
+                                f"  Cycle {_batch_i + 1}: Phase 3 shop return"
+                                f" failed — {_p3v_reason} — ESC + Phase 0"
+                                f" recovery.")
+                            self._esc_to_game_screen(region)
+                            if self.phase_events[0]:
+                                self.player.play(
+                                    self.phase_events[0],
+                                    extra_delay=_p02_extra_delay)
+                                _p3_shop_back = False
+                                for _p3sw in range(20):
+                                    if not self.bot_running or self._reset_iter_requested:
+                                        if _exclude_buy_phase:
+                                            self._set_ocr_throttle(False)
+                                        if (not self.bot_running
+                                                and capture_only
+                                                and not _p2_async):
+                                            return _bl_captures
+                                        return relic_results
+                                    try:
+                                        _p3sw_img = screen_capture.capture(region)
+                                        if relic_analyzer.check_text_visible(
+                                                _p3sw_img, "small jar bazaar",
+                                                top_fraction=0.15):
+                                            time.sleep(
+                                                (3.0 if _lpm else 1.5)
+                                                * max(1.0, self._perf_gap_mult))
+                                            _p3_shop_back = True
+                                            break
+                                    except Exception:
+                                        pass
+                                    time.sleep(0.20)
+                                if not _p3_shop_back:
+                                    self._log(
+                                        "  WARNING: shop not re-detected after"
+                                        " Phase 3 recovery — proceeding anyway.")
+
                     if self._diag:
                         self._diag.phase_end(f"Cycle {_batch_i + 1} Phase 3 (reset)")
 
@@ -9811,6 +9847,7 @@ class RelicBotApp(tk.Tk):
             for pair in d.get("pairings", []):
                 included.update(pair.get("left", []))
                 included.update(pair.get("right", []))
+                included.update(pair.get("pool", []))
 
         mode = criteria.get("mode", "")
         if mode == "exact":
