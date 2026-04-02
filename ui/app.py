@@ -510,7 +510,7 @@ class RelicBotApp(tk.Tk):
         # under python.exe and iconbitmap has no effect on the taskbar icon.
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "PulgoMaster.RelicBot.v1.6.0"
+                "PulgoMaster.RelicBot.v1.6.1"
             )
         except Exception:
             pass
@@ -518,7 +518,7 @@ class RelicBotApp(tk.Tk):
         super().__init__()
         self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.6.0  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.6.1  |  Made by Pulgo")
         self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
@@ -748,7 +748,8 @@ class RelicBotApp(tk.Tk):
             profile_frame, textvariable=self._profile_var, state="readonly", width=30
         )
         self._profile_cb.grid(row=0, column=1, sticky="ew", **pad)
-        ttk.Button(profile_frame, text="Load", command=self._load_profile).grid(row=0, column=2, **pad)
+        self._profile_cb.bind("<<ComboboxSelected>>", lambda _e: self._load_profile())
+        ttk.Button(profile_frame, text="Create", command=self._create_profile).grid(row=0, column=2, **pad)
         ttk.Button(profile_frame, text="Save", command=self._save_profile).grid(row=0, column=3, **pad)
         ttk.Button(profile_frame, text="Save As…", command=self._save_profile_as).grid(row=0, column=4, **pad)
         ttk.Button(profile_frame, text="Delete", command=self._delete_profile).grid(row=0, column=5, **pad)
@@ -1809,6 +1810,8 @@ class RelicBotApp(tk.Tk):
         # ── Odds Viewer ──────────────────────────────────────────────── #
         odds_viewer = ttk.LabelFrame(inner, text="Odds Viewer")
         odds_viewer.grid(row=8, column=0, sticky="ew", **pad)
+        # Height auto-adjusts via after() call below once content is populated
+        odds_viewer.configure(height=200)
 
         ov_top = ttk.Frame(odds_viewer)
         ov_top.pack(fill="x", padx=8, pady=(6, 2))
@@ -1840,7 +1843,7 @@ class RelicBotApp(tk.Tk):
 
         # Selectable read-only result display (tk.Text allows mouse selection + Ctrl+C)
         self._ov_result_txt = tk.Text(
-            odds_viewer, height=6, state="disabled",
+            odds_viewer, height=6, width=1, state="disabled",
             background=_ss_bg, foreground="#90c890",
             relief="flat", borderwidth=0, highlightthickness=0,
             font=("TkDefaultFont", 9), wrap="word",
@@ -1849,14 +1852,19 @@ class RelicBotApp(tk.Tk):
         self._ov_result_txt.tag_configure("normal", foreground="#90c890")
         self._ov_result_txt.tag_configure("muted",  foreground=theme.TEXT_MUTED)
 
-        ttk.Label(
+        _ov_footer = ttk.Label(
             odds_viewer,
             text="Ideal conditions (no lag, no crashes).  "
                  "Rolling: ~2.0 s/relic buy+settle + ~0.30 s/relic nav (LPM: 2.5 s + 0.45 s).  "
                  "OCR: ~3.0 s/relic CPU · ~0.3 s GPU · Hybrid combines GPU+CPU throughput · GPU Always Analyze suppresses CPU workers (GPU only).  "
                  "Async overlaps OCR with game.  Backlog defers OCR until after the run.  Intermittent drains every N iterations.",
-            foreground=theme.TEXT_MUTED, wraplength=760,
-        ).pack(anchor="w", padx=8, pady=(0, 6))
+            foreground=theme.TEXT_MUTED, wraplength=100,
+        )
+        _ov_footer.pack(fill="x", padx=8, pady=(0, 6))
+        # Dynamically match wraplength to available width on resize
+        def _sync_footer_wrap(event):
+            _ov_footer.configure(wraplength=max(100, event.width - 24))
+        odds_viewer.bind("<Configure>", _sync_footer_wrap)
 
         # Wire odds updates from relic_builder and all relevant settings
         self.relic_builder._on_odds_changed = lambda p: self._update_odds_viewer()
@@ -2450,44 +2458,20 @@ class RelicBotApp(tk.Tk):
         self._profile_cb["values"] = names
 
     def _profile_to_dict(self) -> dict:
-        # save_path, backup_folder, game_executable, batch_output are in
-        # relicbot_config.json (app-level, not per-profile).
-        # Stash current mode before saving so both modes are captured.
+        """Serialize profile — only relic-search settings that vary per build.
+
+        Machine config (paths, batch settings, overlay, hotkeys, GPU) lives in
+        relicbot_config.json and is NOT saved per-profile.
+        """
         rtype = self.relic_type_var.get()
         self._stash_mode_data(rtype)
         return {
-            "batch_limit_type": self.batch_limit_type.get(),
-            "batch_limit": self.batch_limit_var.get(),
             "relic_type": self.relic_type_var.get(),
-            "hotkey_str": self._hotkey_str,
-            "hotkey_display": self._hotkey_display,
-            # Per-mode criteria, curses, and exclusions
-            "mode_data": self._mode_data,
+            "mode_data": {m: {k: list(v) if isinstance(v, list) else v
+                             for k, v in md.items()}
+                         for m, md in self._mode_data.items()},
             "save_exclusion_matches": self._save_exclusion_matches_var.get(),
             "allowed_colors": self._get_allowed_colors(),
-            "parallel_enabled": self._parallel_enabled_var.get(),
-            "parallel_workers": self._parallel_workers_var.get(),
-            "async_enabled":      self._async_enabled_var.get(),
-            "smart_throttle":     self._smart_throttle_var.get(),
-            "exclude_buy_phase":  self._exclude_buy_phase_var.get(),
-            "smart_analyze":    self._smart_analyze_var.get(),
-            "gpu_accel": self._gpu_accel_var.get(),
-            "low_perf_mode": self._low_perf_mode_var.get(),
-            "backlog_mode":              self._backlog_mode_var.get(),
-            "intermittent_backlog":      self._intermittent_backlog_var.get(),
-            "intermittent_every_n":      self._intermittent_every_n_var.get(),
-            "hybrid":                    self._hybrid_var.get(),
-            "gpu_always_analyze":        self._gpu_always_analyze_var.get(),
-            "overlay_enabled":      self._overlay_enabled_var.get(),
-            "ov_show_stats":        self._ov_show_stats_var.get(),
-            "ov_show_rolls":        self._ov_show_rolls_var.get(),
-            "ov_show_overflow":     self._ov_show_overflow_var.get(),
-            "ov_show_process_log":  self._ov_show_proc_log_var.get(),
-            "ov_show_relic_log":    self._ov_show_relic_log_var.get(),
-            "ov_hotkey_str":        self._ov_hotkey_str,
-            "ov_hotkey_display":    self._ov_hotkey_display,
-            "matches_hotkey_str":   self._matches_hotkey_str,
-            "matches_hotkey_display": self._matches_hotkey_display,
         }
 
     # Passive names renamed between versions — profiles may contain old names.
@@ -2580,8 +2564,7 @@ class RelicBotApp(tk.Tk):
                 self.batch_output_var.set(data["batch_output"]); _migrated = True
             if _migrated:
                 self._save_app_config()
-        self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
-        self.batch_limit_var.set(str(data.get("batch_limit", "20")))
+        # batch_limit_type and batch_limit are now in app config — don't load from profile.
         # Input sequences (phase_events) are intentionally NOT loaded from profiles.
         # Sequences are recorded independently and must not be overwritten by profile
         # switches. If a user has recorded sequences they want to keep, they stay as-is.
@@ -2589,44 +2572,6 @@ class RelicBotApp(tk.Tk):
         self.relic_type_var.set(data.get("relic_type", "night"))
         self._on_relic_type_change()
         self._loading_profile = False
-        self._parallel_enabled_var.set(data.get("parallel_enabled", False))
-        self._parallel_workers_var.set(data.get("parallel_workers", 2))
-        self._async_enabled_var.set(data.get("async_enabled", False))
-        self._smart_throttle_var.set(data.get("smart_throttle", False))
-        self._exclude_buy_phase_var.set(data.get("exclude_buy_phase", False))
-        self._smart_analyze_var.set(data.get("smart_analyze", False))
-        self._gpu_accel_var.set(data.get("gpu_accel", False))
-        self._low_perf_mode_var.set(data.get("low_perf_mode", False))
-        self._backlog_mode_var.set(data.get("backlog_mode", False))
-        self._intermittent_backlog_var.set(data.get("intermittent_backlog", False))
-        self._intermittent_every_n_var.set(data.get("intermittent_every_n", 5))
-        # "hybrid" supersedes the old per-mode keys; fall back for old profiles
-        _hybrid_val = data.get("hybrid",
-                               data.get("async_hybrid", False)
-                               or data.get("backlog_hybrid", False))
-        self._hybrid_var.set(_hybrid_val)
-        self._gpu_always_analyze_var.set(data.get("gpu_always_analyze", False))
-        self._on_parallel_toggle()
-        # Apply GPU setting immediately so the analyzer uses the correct mode
-        from bot import relic_analyzer as _ra
-        _ra.set_gpu_mode(self._gpu_accel_var.get())
-        if "hotkey_str" in data:
-            self._hotkey_str = data["hotkey_str"]
-            self._hotkey_display = data.get("hotkey_display", self._hotkey_str.replace("Key.", "").upper())
-            self._hotkey_btn.config(text=f"Rec Hotkey: {self._hotkey_display}")
-            self._start_global_hotkey_listener()
-        if "ov_hotkey_str" in data:
-            self._ov_hotkey_str     = data["ov_hotkey_str"]
-            self._ov_hotkey_display = data.get("ov_hotkey_display",
-                                               self._ov_hotkey_str.replace("Key.", "").upper())
-            self._ov_hotkey_btn.config(text=f"Rec: {self._ov_hotkey_display}")
-            self._start_global_hotkey_listener()
-        if "matches_hotkey_str" in data:
-            self._matches_hotkey_str     = data["matches_hotkey_str"]
-            self._matches_hotkey_display = data.get("matches_hotkey_display",
-                                                    self._matches_hotkey_str.replace("Key.", "").upper())
-            self._matches_hotkey_btn.config(text=f"Rec: {self._matches_hotkey_display}")
-            self._start_global_hotkey_listener()
         # ── Per-mode criteria / curses / exclusions ────────────────────── #
         # New profiles: "mode_data" dict with "normal" and "night" sub-keys.
         # Old profiles: flat "criteria", "blocked_curses", "excluded_passives"
@@ -2666,7 +2611,68 @@ class RelicBotApp(tk.Tk):
         # gem images follow relic_type — sync after relic_type is loaded
         self._gem_mode_var.set("don" if _rtype == "night" else "normal")
         self._refresh_gem_images()
-        # Overlay settings
+
+    # ── App-level config (not per-profile) ──────────────────────────────── #
+
+    def _load_app_config(self):
+        """Load machine-specific settings from relicbot_config.json.
+
+        These are NOT profile settings — they persist regardless of which
+        profile is active: paths, batch mode settings, overlay, hotkeys, GPU.
+        If the config file doesn't exist, defaults are applied and the game
+        exe is auto-detected from common Steam paths.
+        """
+        data = {}
+        if os.path.isfile(_APP_CONFIG_FILE):
+            try:
+                with open(_APP_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                pass
+        # Paths
+        self.save_path_var.set(data.get("save_path", ""))
+        self.backup_path_var.set(data.get("backup_folder", os.path.join(_REPO_ROOT, "save_backups")))
+        self.batch_output_var.set(data.get("batch_output", os.path.join(_REPO_ROOT, "batch_output")))
+        _default_exe = _detect_game_exe()
+        self.game_exe_var.set(data.get("game_executable", _default_exe))
+        if not data.get("game_executable") and self.game_exe_var.get():
+            self._log(f"Auto-detected game: {self.game_exe_var.get()}")
+        # Batch settings
+        self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
+        self.batch_limit_var.set(str(data.get("batch_limit", "20")))
+        self._parallel_enabled_var.set(data.get("parallel_enabled", False))
+        self._parallel_workers_var.set(data.get("parallel_workers", 2))
+        self._async_enabled_var.set(data.get("async_enabled", False))
+        self._smart_throttle_var.set(data.get("smart_throttle", False))
+        self._exclude_buy_phase_var.set(data.get("exclude_buy_phase", False))
+        self._smart_analyze_var.set(data.get("smart_analyze", False))
+        self._gpu_accel_var.set(data.get("gpu_accel", False))
+        self._low_perf_mode_var.set(data.get("low_perf_mode", False))
+        self._backlog_mode_var.set(data.get("backlog_mode", False))
+        self._intermittent_backlog_var.set(data.get("intermittent_backlog", False))
+        self._intermittent_every_n_var.set(data.get("intermittent_every_n", 5))
+        self._hybrid_var.set(data.get("hybrid", False))
+        self._gpu_always_analyze_var.set(data.get("gpu_always_analyze", False))
+        self._on_parallel_toggle()
+        from bot import relic_analyzer as _ra
+        _ra.set_gpu_mode(self._gpu_accel_var.get())
+        # Hotkeys
+        if "hotkey_str" in data:
+            self._hotkey_str = data["hotkey_str"]
+            self._hotkey_display = data.get("hotkey_display", self._hotkey_str.replace("Key.", "").upper())
+            self._hotkey_btn.config(text=f"Rec Hotkey: {self._hotkey_display}")
+            self._start_global_hotkey_listener()
+        if "ov_hotkey_str" in data:
+            self._ov_hotkey_str     = data["ov_hotkey_str"]
+            self._ov_hotkey_display = data.get("ov_hotkey_display",
+                                               self._ov_hotkey_str.replace("Key.", "").upper())
+            self._ov_hotkey_btn.config(text=f"Rec: {self._ov_hotkey_display}")
+        if "matches_hotkey_str" in data:
+            self._matches_hotkey_str     = data["matches_hotkey_str"]
+            self._matches_hotkey_display = data.get("matches_hotkey_display",
+                                                    self._matches_hotkey_str.replace("Key.", "").upper())
+            self._matches_hotkey_btn.config(text=f"Rec: {self._matches_hotkey_display}")
+        # Overlay
         self._overlay_enabled_var.set(data.get("overlay_enabled", True))
         self._ov_show_stats_var.set(data.get("ov_show_stats", True))
         self._ov_show_rolls_var.set(data.get("ov_show_rolls", True))
@@ -2675,44 +2681,44 @@ class RelicBotApp(tk.Tk):
         self._ov_show_relic_log_var.set(data.get("ov_show_relic_log", True))
         self._on_overlay_enable_toggle()
 
-    # ── App-level config (not per-profile) ──────────────────────────────── #
-
-    def _load_app_config(self):
-        """Load machine-specific settings from relicbot_config.json.
-
-        These are NOT profile settings — they're the same regardless of which
-        profile is active: save file path, backup folder, output folder, game
-        executable.  If the config file doesn't exist, defaults are applied
-        and the game exe is auto-detected from common Steam paths.
-        """
-        defaults = {
-            "save_path":        "",
-            "backup_folder":    os.path.join(_REPO_ROOT, "save_backups"),
-            "batch_output":     os.path.join(_REPO_ROOT, "batch_output"),
-            "game_executable":  _detect_game_exe(),
-        }
-        data = {}
-        if os.path.isfile(_APP_CONFIG_FILE):
-            try:
-                with open(_APP_CONFIG_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                pass
-        self.save_path_var.set(data.get("save_path", defaults["save_path"]))
-        self.backup_path_var.set(data.get("backup_folder", defaults["backup_folder"]))
-        self.batch_output_var.set(data.get("batch_output", defaults["batch_output"]))
-        self.game_exe_var.set(data.get("game_executable", defaults["game_executable"]))
-        # Log auto-detection result
-        if not data.get("game_executable") and self.game_exe_var.get():
-            self._log(f"Auto-detected game: {self.game_exe_var.get()}")
-
     def _save_app_config(self):
         """Persist machine-specific settings to relicbot_config.json."""
         data = {
+            # Paths
             "save_path":        self.save_path_var.get(),
             "backup_folder":    self.backup_path_var.get(),
             "batch_output":     self.batch_output_var.get(),
             "game_executable":  self.game_exe_var.get(),
+            # Batch settings
+            "batch_limit_type": self.batch_limit_type.get(),
+            "batch_limit":      self.batch_limit_var.get(),
+            "parallel_enabled": self._parallel_enabled_var.get(),
+            "parallel_workers": self._parallel_workers_var.get(),
+            "async_enabled":      self._async_enabled_var.get(),
+            "smart_throttle":     self._smart_throttle_var.get(),
+            "exclude_buy_phase":  self._exclude_buy_phase_var.get(),
+            "smart_analyze":      self._smart_analyze_var.get(),
+            "gpu_accel":          self._gpu_accel_var.get(),
+            "low_perf_mode":      self._low_perf_mode_var.get(),
+            "backlog_mode":       self._backlog_mode_var.get(),
+            "intermittent_backlog":  self._intermittent_backlog_var.get(),
+            "intermittent_every_n":  self._intermittent_every_n_var.get(),
+            "hybrid":             self._hybrid_var.get(),
+            "gpu_always_analyze": self._gpu_always_analyze_var.get(),
+            # Hotkeys
+            "hotkey_str":       self._hotkey_str,
+            "hotkey_display":   self._hotkey_display,
+            "ov_hotkey_str":        self._ov_hotkey_str,
+            "ov_hotkey_display":    self._ov_hotkey_display,
+            "matches_hotkey_str":   self._matches_hotkey_str,
+            "matches_hotkey_display": self._matches_hotkey_display,
+            # Overlay
+            "overlay_enabled":      self._overlay_enabled_var.get(),
+            "ov_show_stats":        self._ov_show_stats_var.get(),
+            "ov_show_rolls":        self._ov_show_rolls_var.get(),
+            "ov_show_overflow":     self._ov_show_overflow_var.get(),
+            "ov_show_process_log":  self._ov_show_proc_log_var.get(),
+            "ov_show_relic_log":    self._ov_show_relic_log_var.get(),
         }
         try:
             with open(_APP_CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -2737,6 +2743,33 @@ class RelicBotApp(tk.Tk):
             self._log(f"Auto-loaded last profile: '{name}'")
         except Exception:
             pass  # No last profile or corrupt file — start with defaults
+
+    def _create_profile(self):
+        """Create a new blank profile with a user-chosen name."""
+        from tkinter import simpledialog
+        name = simpledialog.askstring("Create Profile", "Profile name:", parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        # Check if it already exists
+        if os.path.exists(self._profile_path(name)):
+            messagebox.showwarning("Profile Exists",
+                                   f"A profile named '{name}' already exists.\n"
+                                   "Use Save to overwrite it, or choose a different name.")
+            return
+        # Reset profile to blank state
+        self._mode_data = {
+            "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+            "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+        }
+        self.relic_type_var.set("night")
+        self._on_relic_type_change()
+        for var in self._color_vars.values():
+            var.set(True)
+        self._save_exclusion_matches_var.set(False)
+        self._restore_mode_data("night")
+        self._write_profile(name)
+        self._log(f"Created blank profile '{name}'.")
 
     def _load_profile(self):
         name = self._profile_var.get().strip()
@@ -2816,17 +2849,36 @@ class RelicBotApp(tk.Tk):
             messagebox.showerror("Delete Error", str(e))
 
     def _reset_to_defaults(self):
-        """Restore all settings to their out-of-the-box defaults."""
+        """Restore profile settings to their out-of-the-box defaults.
+
+        Resets: relic type, criteria, curses, exclusions, colors.
+        Does NOT touch app-level settings (paths, batch mode, overlay, hotkeys).
+        """
         if not messagebox.askyesno(
             "Restore Defaults",
-            "Reset all settings to their defaults?\n\n"
-            "This will clear your save/backup paths, criteria, filters, and sequences.\n"
-            "Your saved profiles will not be affected.",
+            "Reset profile settings to defaults?\n\n"
+            "This will clear your relic criteria, curse filters, excluded passives,\n"
+            "and color selections for both Normal and Deep of Night modes.\n\n"
+            "Your saved profiles and app settings (paths, batch mode, overlay)\n"
+            "will not be affected.",
         ):
             return
-        self._dict_to_profile({})   # empty dict → every field falls back to its default
+        # Reset mode data for both modes
+        self._mode_data = {
+            "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+            "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+        }
+        # Reset relic type
+        self.relic_type_var.set("night")
+        self._on_relic_type_change()
+        # Reset colors to all enabled
+        for var in self._color_vars.values():
+            var.set(True)
+        self._save_exclusion_matches_var.set(False)
+        # Clear UI
+        self._restore_mode_data("night")
         self._auto_load_sequences()
-        self._log("Settings restored to defaults.")
+        self._log("Profile settings restored to defaults.")
 
     # ------------------------------------------------------------------ #
     #  GAME MANAGEMENT
@@ -3385,7 +3437,8 @@ class RelicBotApp(tk.Tk):
         self._log("⟳ Reset iteration requested — interrupting current phase.")
 
     def _on_app_close(self):
-        """Stop the global hotkey listener then close the window."""
+        """Save app config, stop the global hotkey listener, then close."""
+        self._save_app_config()
         if self._global_kb_listener is not None:
             try:
                 self._global_kb_listener.stop()

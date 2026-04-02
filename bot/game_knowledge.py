@@ -1841,10 +1841,10 @@ PASSIVE_CATEGORY: "dict[str, str]" = {
     "Improved Throwing Pot Damage +1":                  "utility",
     "Improved Throwing Knife Damage":                   "utility",
     "Improved Throwing Knife Damage +1":                "utility",
-    "Improved Glinstone and Gravity Stone Damage":      "utility",
-    "Improved Glinstone and Gravity Stone Damage +1":   "utility",
-    "Improved Performing Arts":                         "utility",
-    "Improved Performing Arts +1":                      "utility",
+    "Improved Glintstone and Gravity Stone Damage":      "utility",
+    "Improved Glintstone and Gravity Stone Damage +1":  "utility",
+    "Improved Perfuming Arts":                          "utility",
+    "Improved Perfuming Arts +1":                       "utility",
 
     # ── Character skills ───────────────────────────────────────────────────────
     "Character Skill Cooldown Reduction":   "character_skill",

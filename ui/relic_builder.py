@@ -92,7 +92,7 @@ class _SearchableListbox(ttk.Frame):
         body.pack(fill="both", expand=True)
 
         self._lb = tk.Listbox(
-            body, height=height, selectmode="browse",
+            body, height=height, width=1, selectmode="browse",
             exportselection=False, activestyle="none",
         )
         theme.style_listbox(self._lb)
@@ -341,7 +341,7 @@ class _ExactRelicTab(ttk.Frame):
         _odds_sb = ttk.Scrollbar(_odds_container, orient="vertical")
         _odds_sb.pack(side="right", fill="y")
         self._odds_txt = tk.Text(
-            _odds_container, height=8, wrap="word", state="disabled",
+            _odds_container, height=8, width=1, wrap="word", state="disabled",
             bg=_theme.INPUT_BG, fg="#90c890",
             relief="flat", bd=0, highlightthickness=0,
             font=("TkDefaultFont", 9),
@@ -355,10 +355,14 @@ class _ExactRelicTab(ttk.Frame):
         self._set_odds_text("Select passives above to see odds.")
         self._odds_disclaimer_var = tk.StringVar(
             value="Odds from AttachEffectTableParam. Per-relic rate accounts for size distribution and color filter.")
-        ttk.Label(
+        _exact_disc = ttk.Label(
             odds_frame, textvariable=self._odds_disclaimer_var,
-            foreground=theme.TEXT_MUTED, wraplength=860,
-        ).pack(anchor="w", padx=6, pady=(0, 4))
+            foreground=theme.TEXT_MUTED, wraplength=100,
+        )
+        _exact_disc.pack(fill="x", padx=6, pady=(0, 4))
+        def _sync_exact_odds_wrap(event, _l=_exact_disc):
+            _l.configure(wraplength=max(100, event.width - 24))
+        odds_frame.bind("<Configure>", _sync_exact_odds_wrap)
 
         # Populate initial state
         self._refresh_list()
@@ -954,8 +958,8 @@ class _PassivePoolTab(ttk.Frame):
 
         content = ttk.Frame(self)
         content.pack(fill="both", expand=True, padx=6, pady=2)
-        content.columnconfigure(0, weight=3)
-        content.columnconfigure(2, weight=2)
+        content.columnconfigure(0, weight=51)
+        content.columnconfigure(2, weight=49)
 
         # ── Left: All Passives ─────────────────────────────────────────────── #
         left = ttk.LabelFrame(content, text="All Passives")
@@ -1041,9 +1045,9 @@ class _PassivePoolTab(ttk.Frame):
         self._count_lbl = tk.StringVar(value="of 0 passives in pool")
         ttk.Label(foot, textvariable=self._count_lbl).pack(side="left")
 
-        # ── Odds display ───────────────────────────────────────────────────── #
-        odds_frame = ttk.LabelFrame(self, text="Odds  (per relic)")
-        odds_frame.pack(fill="x", padx=8, pady=(0, 6))
+        # ── Odds display (aligned to the All Passives column) ────────────── #
+        odds_frame = ttk.LabelFrame(content, text="Odds  (per relic)")
+        odds_frame.grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(4, 6))
 
         from ui import theme as _theme
         _odds_container = ttk.Frame(odds_frame)
@@ -1051,7 +1055,7 @@ class _PassivePoolTab(ttk.Frame):
         _odds_sb = ttk.Scrollbar(_odds_container, orient="vertical")
         _odds_sb.pack(side="right", fill="y")
         self._odds_txt = tk.Text(
-            _odds_container, height=8, wrap="word", state="disabled",
+            _odds_container, height=8, width=1, wrap="word", state="disabled",
             bg=_theme.INPUT_BG, fg="#90c890",
             relief="flat", bd=0, highlightthickness=0,
             font=("TkDefaultFont", 9),
@@ -1065,10 +1069,14 @@ class _PassivePoolTab(ttk.Frame):
         self._set_odds_text("Add passives to your pool to see odds.")
         self._odds_disclaimer_var = tk.StringVar(
             value="Odds from AttachEffectTableParam. Per-relic rate accounts for size distribution and color filter.")
-        ttk.Label(
+        _pool_disc = ttk.Label(
             odds_frame, textvariable=self._odds_disclaimer_var,
-            foreground=theme.TEXT_MUTED, wraplength=860,
-        ).pack(anchor="w", padx=6, pady=(0, 4))
+            foreground=theme.TEXT_MUTED, wraplength=100,
+        )
+        _pool_disc.pack(fill="x", padx=6, pady=(0, 4))
+        def _sync_pool_odds_wrap(event, _l=_pool_disc):
+            _l.configure(wraplength=max(100, event.width - 24))
+        odds_frame.bind("<Configure>", _sync_pool_odds_wrap)
 
     # ── category filter ─────────────────────────────────────────────────── #
 
