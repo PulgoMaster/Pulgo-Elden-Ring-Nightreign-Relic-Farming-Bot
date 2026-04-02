@@ -2000,7 +2000,7 @@ TABLE_2000000: dict[str, int] = {
 }
 TABLE_2000000_TOTAL: int = 9984
 
-# TABLE_2100000: Deep broad pool A — 277 entries, total weight 9977
+# TABLE_2100000: Deep broad pool A — 283 entries, total weight 10577
 TABLE_2100000: dict[str, int] = {
     '<Table> [Wylder] Character Skill inflicts Blood Loss': 200,
     '<Table> [Guardian] Character Skill Boosts Damage Negation of Nearby Allies': 200,
@@ -2010,6 +2010,12 @@ TABLE_2100000: dict[str, int] = {
     '<Table> [Revenant] Increased Max FP upon Ability Activation': 200,
     '<Table> [Recluse] Collect Affinity Residues to Negate Affinity': 200,
     '<Table> [Executor] Slowly Restore HP upon Ability Activation': 200,
+    '<Table> [Scholar] Reduced FP consumption when using Character Skill on self': 200,
+    '<Table> [Undertaker] Executing Art readies Character Skill': 200,
+    '<Table> [Scholar] Improved Mind, Reduced Vigor': 50,
+    '<Table> [Scholar] Improved Endurance and Dexterity, Reduced Intelligence and Arcane': 50,
+    '<Table> [Undertaker] Improved Dexterity, Reduced Vigor and Faith': 50,
+    '<Table> [Undertaker] Improved Mind and Faith, Reduced Strength': 50,
     '<Table> Poise +3': 69,
     '<Table> Physical Attack Up +2': 69,
     '<Table> Magic Attack Power Up +2': 69,
@@ -2280,9 +2286,9 @@ TABLE_2100000: dict[str, int] = {
     '<Table> FP Restoration upon Colossal Weapon Attacks': 10,
     '<Table> FP Restoration upon Bow Attacks': 10,
 }
-TABLE_2100000_TOTAL: int = 9977
+TABLE_2100000_TOTAL: int = 10577
 
-# TABLE_2200000: Deep broad pool B — 277 entries, total weight 9977
+# TABLE_2200000: Deep broad pool B — 283 entries, total weight 10577
 TABLE_2200000: dict[str, int] = {
     '<Table> [Wylder] Character Skill inflicts Blood Loss': 200,
     '<Table> [Guardian] Character Skill Boosts Damage Negation of Nearby Allies': 200,
@@ -2292,6 +2298,12 @@ TABLE_2200000: dict[str, int] = {
     '<Table> [Revenant] Increased Max FP upon Ability Activation': 200,
     '<Table> [Recluse] Collect Affinity Residues to Negate Affinity': 200,
     '<Table> [Executor] Slowly Restore HP upon Ability Activation': 200,
+    '<Table> [Scholar] Reduced FP consumption when using Character Skill on self': 200,
+    '<Table> [Undertaker] Executing Art readies Character Skill': 200,
+    '<Table> [Scholar] Improved Mind, Reduced Vigor': 50,
+    '<Table> [Scholar] Improved Endurance and Dexterity, Reduced Intelligence and Arcane': 50,
+    '<Table> [Undertaker] Improved Dexterity, Reduced Vigor and Faith': 50,
+    '<Table> [Undertaker] Improved Mind and Faith, Reduced Strength': 50,
     '<Table> Poise +3': 69,
     '<Table> Physical Attack Up +2': 69,
     '<Table> Magic Attack Power Up +2': 69,
@@ -2562,7 +2574,7 @@ TABLE_2200000: dict[str, int] = {
     '<Table> FP Restoration upon Colossal Weapon Attacks': 10,
     '<Table> FP Restoration upon Bow Attacks': 10,
 }
-TABLE_2200000_TOTAL: int = 9977
+TABLE_2200000_TOTAL: int = 10577
 
 NORMAL_TABLES: dict[int, dict[str, int]] = {
     100: TABLE_100, 110: TABLE_110,

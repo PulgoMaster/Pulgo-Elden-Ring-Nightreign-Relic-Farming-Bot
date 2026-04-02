@@ -7068,26 +7068,22 @@ class RelicBotApp(tk.Tk):
                                 relic_type=self.relic_type_var.get(),
                             )
                             _toks = _settle_result.get("_ocr_tokens", [])
-                            _rf   = _settle_result.get("relics_found") or []
-                            # Two-stage settle: (1) valid relic name confirms we're
-                            # on the relic screen (Scenic Flatstone = shop, reject),
-                            # (2) bright text pixels in the passive region confirms
-                            # passives are rendered.  No need to OCR the passives
-                            # inline — the screenshot gets pushed to workers.
-                            _relic_name = ((_rf[0] or {}).get("name", "") if _rf else "")
-                            if not _relic_name:
-                                _rn_tok = next((t for t in _toks
-                                                if t.get("status") == "RELIC_NAME"), None)
-                                _relic_name = (_rn_tok or {}).get("text", "")
-                            _is_flatstone = "flatstone" in _relic_name.lower()
-                            if _relic_name and not _is_flatstone:
-                                # Name confirmed — now check passive region pixels
-                                if relic_analyzer.has_passive_text_pixels(_settle_img):
-                                    self._iter_settle_poll_depth += _sc + 1
-                                    self._iter_batches_settled   += 1
-                                    _settle_ok = True
-                                    break
-                                # Name visible but passives not yet rendered — keep polling
+                            # Require at least one passive — a PASSIVE token, or
+                            # relics_found[0] with a non-empty passives list.
+                            _has_passive_tok  = any(t.get("status") == "PASSIVE" for t in _toks)
+                            _rf               = _settle_result.get("relics_found") or []
+                            _has_relic_passives = (
+                                bool(_rf) and bool((_rf[0] or {}).get("passives"))
+                            )
+                            if _has_passive_tok or _has_relic_passives:
+                                self._iter_settle_poll_depth += _sc + 1
+                                self._iter_batches_settled   += 1
+                                _settle_ok = True
+                                break
+                            # Relic name found but no passives — may be a
+                            # Scenic Flatstone tooltip or bare name OCR bleed.
+                            if bool(_rf) or any(t.get("status") == "RELIC_NAME"
+                                                for t in _toks):
                                 _settle_no_passives = True
                         except Exception as _se:
                             self._log(f"  Cycle {_batch_i+1}: settle check err: {_se}")

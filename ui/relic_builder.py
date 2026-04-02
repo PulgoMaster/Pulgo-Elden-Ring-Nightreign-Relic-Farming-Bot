@@ -793,29 +793,34 @@ class _VariantDialog(tk.Toplevel):
 
 class _CreatePairingDialog(tk.Toplevel):
     """
-    Select two passives (with optional +N variant sets) to form a required pair.
-    Both passives must appear on the same relic for the pair to count as a match.
-    Neither passive needs to be in My Pool.
+    Select two mandatory passives + an optional third-passive pool.
+    Both mandatory passives must appear on the same relic.  If a pool is
+    defined, one pool passive must also be present for the pairing to count.
+    Supports editing: pass existing data to pre-populate the dialog.
     """
 
-    def __init__(self, parent):
+    def __init__(self, parent, relic_type: str = "night",
+                 initial: dict | None = None):
         super().__init__(parent)
-        self.title("Create Pairing")
+        _editing = initial is not None
+        self.title("Edit Pairing" if _editing else "Create Pairing")
         self.transient(parent)
         self.grab_set()
         self.resizable(True, True)
-        self.geometry("720x520")
-        self.result: tuple[list[str], list[str]] | None = None   # (left_accepted, right_accepted)
+        self.geometry("720x640")
+        self.result: dict | None = None
         self.configure(bg=theme.BG)
-        self._left:  list[str] = []
-        self._right: list[str] = []
+        self._left:  list[str] = list((initial or {}).get("left", []))
+        self._right: list[str] = list((initial or {}).get("right", []))
+        self._pool:  list[str] = list((initial or {}).get("pool", []))
 
         ttk.Label(
             self,
             text=(
                 "Choose one passive for each side. Both must appear on the same relic "
                 "for this pair to count as a match.\n"
-                "Passives with +N variants let you accept multiple versions at once."
+                "Optionally, create a pool for the third passive — the relic must also "
+                "have one passive from the pool for the pairing to count."
             ),
             wraplength=680, justify="left",
         ).pack(padx=12, pady=(10, 6))
@@ -826,16 +831,17 @@ class _CreatePairingDialog(tk.Toplevel):
         cols.columnconfigure(2, weight=1)
 
         # ── Left picker ──────────────────────────────────────────────── #
-        left_frame = ttk.LabelFrame(cols, text="Left Passive")
+        left_frame = ttk.LabelFrame(cols, text="Passive A (mandatory)")
         left_frame.grid(row=0, column=0, sticky="nsew")
         _pair_mode_passives = (
             sorted(DEEP_POOL_PASSIVES, key=str.casefold)
-            if getattr(parent, "_relic_type", "night") == "night"
+            if relic_type == "night"
             else sorted(NORMAL_POOL_PASSIVES, key=str.casefold)
         )
-        self._left_lb = _SearchableListbox(left_frame, _pair_mode_passives, height=13)
+        self._mode_passives = _pair_mode_passives
+        self._left_lb = _SearchableListbox(left_frame, _pair_mode_passives, height=10)
         self._left_lb.pack(fill="both", expand=True, padx=4, pady=(4, 2))
-        ttk.Button(left_frame, text="✔ Select for Left",
+        ttk.Button(left_frame, text="✔ Select",
                    command=self._select_left).pack(padx=4, pady=(0, 4))
 
         # ── Divider ──────────────────────────────────────────────────── #
@@ -843,31 +849,67 @@ class _CreatePairingDialog(tk.Toplevel):
             row=0, column=1, padx=10)
 
         # ── Right picker ─────────────────────────────────────────────── #
-        right_frame = ttk.LabelFrame(cols, text="Right Passive")
+        right_frame = ttk.LabelFrame(cols, text="Passive B (mandatory)")
         right_frame.grid(row=0, column=2, sticky="nsew")
-        self._right_lb = _SearchableListbox(right_frame, _pair_mode_passives, height=13)
+        self._right_lb = _SearchableListbox(right_frame, _pair_mode_passives, height=10)
         self._right_lb.pack(fill="both", expand=True, padx=4, pady=(4, 2))
-        ttk.Button(right_frame, text="✔ Select for Right",
+        ttk.Button(right_frame, text="✔ Select",
                    command=self._select_right).pack(padx=4, pady=(0, 4))
 
         cols.rowconfigure(0, weight=1)
 
-        # ── Status / confirm row ──────────────────────────────────────── #
+        # ── Status row ────────────────────────────────────────────────── #
         status_row = ttk.Frame(self)
         status_row.pack(fill="x", padx=12, pady=(4, 2))
-        self._left_lbl  = ttk.Label(status_row, text="Left:  (none selected)",
+        self._left_lbl  = ttk.Label(status_row, text="A:  (none selected)",
                                      foreground=theme.TEXT_MUTED)
         self._left_lbl.pack(side="left", padx=4)
-        self._right_lbl = ttk.Label(status_row, text="Right: (none selected)",
+        self._right_lbl = ttk.Label(status_row, text="B: (none selected)",
                                      foreground=theme.TEXT_MUTED)
         self._right_lbl.pack(side="right", padx=4)
 
+        # ── Third Passive Pool (optional) ─────────────────────────────── #
+        pool_frame = ttk.LabelFrame(self, text="Third Passive Pool  (optional — relic must also have one of these)")
+        pool_frame.pack(fill="x", padx=12, pady=(4, 2))
+
+        pool_body = ttk.Frame(pool_frame)
+        pool_body.pack(fill="x", padx=4, pady=4)
+        pool_body.columnconfigure(0, weight=1)
+
+        self._pool_lb = tk.Listbox(pool_body, height=4, selectmode="browse",
+                                    exportselection=False, activestyle="none")
+        theme.style_listbox(self._pool_lb)
+        _pool_sb = ttk.Scrollbar(pool_body, orient="vertical", command=self._pool_lb.yview)
+        self._pool_lb.configure(yscrollcommand=_pool_sb.set)
+        self._pool_lb.grid(row=0, column=0, sticky="nsew")
+        _pool_sb.grid(row=0, column=1, sticky="ns")
+        self._pool_lb.bind("<MouseWheel>",
+            lambda e: (self._pool_lb.yview_scroll(int(-1*(e.delta/120)), "units"), "break")[1])
+
+        pool_btns = ttk.Frame(pool_body)
+        pool_btns.grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(pool_btns, text="+ Add", command=self._pool_add, width=10).pack(pady=2)
+        ttk.Button(pool_btns, text="− Remove", command=self._pool_remove, width=10).pack(pady=2)
+        ttk.Button(pool_btns, text="Clear", command=self._pool_clear, width=10).pack(pady=2)
+
+        # ── Confirm row ───────────────────────────────────────────────── #
         btn_row = ttk.Frame(self)
-        btn_row.pack(fill="x", padx=12, pady=(2, 12))
-        ttk.Button(btn_row, text="Create Pairing", command=self._confirm).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="Cancel",         command=self.destroy).pack(side="left")
+        btn_row.pack(fill="x", padx=12, pady=(4, 12))
+        _btn_text = "Save Pairing" if _editing else "Create Pairing"
+        ttk.Button(btn_row, text=_btn_text, command=self._confirm).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side="left")
         self._err_lbl = ttk.Label(btn_row, text="", foreground="#cc3300")
         self._err_lbl.pack(side="left", padx=8)
+
+        # Pre-populate if editing
+        if self._left:
+            label = self._left[0] if len(self._left) == 1 else f"{self._left[0]}… (+{len(self._left)-1})"
+            self._left_lbl.configure(text=f"A:  {label}", foreground="")
+        if self._right:
+            label = self._right[0] if len(self._right) == 1 else f"{self._right[0]}… (+{len(self._right)-1})"
+            self._right_lbl.configure(text=f"B: {label}", foreground="")
+        for p in self._pool:
+            self._pool_lb.insert("end", p)
 
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.wait_window()
@@ -889,7 +931,7 @@ class _CreatePairingDialog(tk.Toplevel):
             return
         self._left = accepted
         label = accepted[0] if len(accepted) == 1 else f"{accepted[0]}… (+{len(accepted)-1} variant(s))"
-        self._left_lbl.configure(text=f"Left:  {label}", foreground="")
+        self._left_lbl.configure(text=f"A:  {label}", foreground="")
 
     def _select_right(self):
         p = self._right_lb.get_selected()
@@ -900,16 +942,60 @@ class _CreatePairingDialog(tk.Toplevel):
             return
         self._right = accepted
         label = accepted[0] if len(accepted) == 1 else f"{accepted[0]}… (+{len(accepted)-1} variant(s))"
-        self._right_lbl.configure(text=f"Right: {label}", foreground="")
+        self._right_lbl.configure(text=f"B: {label}", foreground="")
+
+    def _pool_add(self):
+        """Open a passive picker to add a passive to the third pool."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Add to Third Passive Pool")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.geometry("400x450")
+        dlg.configure(bg=theme.BG)
+        ttk.Label(dlg, text="Select a passive to add to the pool:").pack(
+            padx=8, pady=(8, 4))
+        picker = _SearchableListbox(dlg, self._mode_passives, height=15)
+        picker.pack(fill="both", expand=True, padx=8, pady=4)
+        def _do_add():
+            p = picker.get_selected()
+            if not p:
+                return
+            accepted = self._pick_variants(p)
+            if not accepted:
+                return
+            for a in accepted:
+                if a not in self._pool:
+                    self._pool.append(a)
+                    self._pool_lb.insert("end", a)
+            dlg.destroy()
+        ttk.Button(dlg, text="Add", command=_do_add).pack(pady=(0, 8))
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+
+    def _pool_remove(self):
+        sel = self._pool_lb.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        self._pool_lb.delete(idx)
+        if idx < len(self._pool):
+            self._pool.pop(idx)
+
+    def _pool_clear(self):
+        self._pool.clear()
+        self._pool_lb.delete(0, "end")
 
     def _confirm(self):
         if not self._left:
-            self._err_lbl.configure(text="Select a Left passive first.")
+            self._err_lbl.configure(text="Select Passive A first.")
             return
         if not self._right:
-            self._err_lbl.configure(text="Select a Right passive first.")
+            self._err_lbl.configure(text="Select Passive B first.")
             return
-        self.result = (self._left, self._right)
+        self.result = {
+            "left": self._left,
+            "right": self._right,
+            "pool": list(self._pool),
+        }
         self.destroy()
 
 
@@ -969,9 +1055,7 @@ class _PassivePoolTab(ttk.Frame):
         cat_row.pack(fill="x", padx=4, pady=(4, 0))
         ttk.Label(cat_row, text="Category:").pack(side="left")
         self._cat_var = tk.StringVar(value="(all)")
-        # Exclude Demerit (curse) categories — curses are not selectable as passives
-        _non_curse_cats = [c for c in CATEGORIES.keys() if c not in _CURSE_CATS]
-        cats = ["(all)"] + _non_curse_cats
+        cats = ["(all)"] + list(UI_CATEGORIES.keys())
         cat_cb = ttk.Combobox(cat_row, textvariable=self._cat_var, values=cats,
                                state="readonly", width=34)
         cat_cb.pack(side="left", padx=4)
@@ -1032,6 +1116,7 @@ class _PassivePoolTab(ttk.Frame):
         pair_btns = ttk.Frame(pair_frame)
         pair_btns.pack(fill="x", padx=4, pady=(0, 4))
         ttk.Button(pair_btns, text="+ Create Pairing", command=self._create_pairing, width=16).pack(side="left", padx=2)
+        ttk.Button(pair_btns, text="Edit",             command=self._edit_pairing,   width=6).pack(side="left", padx=2)
         ttk.Button(pair_btns, text="X Remove",         command=self._remove_pairing, width=10).pack(side="left", padx=2)
 
         # ── Threshold row ──────────────────────────────────────────────────── #
@@ -1086,11 +1171,8 @@ class _PassivePoolTab(ttk.Frame):
         if cat == "(all)":
             items = [p for p in ALL_PASSIVES_SORTED if p in pool]
         else:
-            items = sorted(
-                [p for p in CATEGORIES.get(cat, [])
-                 if p not in _DEBUFFS_SET and p in pool],
-                key=str.casefold,
-            )
+            base = sorted(UI_CATEGORIES.get(cat, []), key=str.casefold)
+            items = [p for p in base if p in pool]
         self._left_lb._all = items
         self._left_lb._refresh(items)
         self._left_lb.clear_search()
@@ -1259,13 +1341,30 @@ class _PassivePoolTab(ttk.Frame):
         for p in self._pairings:
             left_label  = _entry_label({"accepted": p.get("left",  [])})
             right_label = _entry_label({"accepted": p.get("right", [])})
-            self._pair_lb.insert("end", f"{left_label}  ↔  {right_label}")
+            pool = p.get("pool", [])
+            pool_suffix = f"  + pool({len(pool)})" if pool else ""
+            self._pair_lb.insert("end", f"{left_label}  ↔  {right_label}{pool_suffix}")
 
     def _create_pairing(self):
-        dlg = _CreatePairingDialog(self.winfo_toplevel())
+        dlg = _CreatePairingDialog(self.winfo_toplevel(), relic_type=self._relic_type)
         if dlg.result:
-            left, right = dlg.result
-            self._pairings.append({"left": left, "right": right})
+            self._pairings.append(dlg.result)
+            self._refresh_pairings()
+            self._sync_threshold()
+
+    def _edit_pairing(self):
+        sel = self._pair_lb.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self._pairings):
+            return
+        existing = self._pairings[idx]
+        dlg = _CreatePairingDialog(self.winfo_toplevel(),
+                                    relic_type=self._relic_type,
+                                    initial=existing)
+        if dlg.result:
+            self._pairings[idx] = dlg.result
             self._refresh_pairings()
             self._sync_threshold()
 
@@ -1291,7 +1390,8 @@ class _PassivePoolTab(ttk.Frame):
         return {
             "mode": "pool",
             "entries":  [{"accepted": list(e["accepted"])} for e in self._entries],
-            "pairings": [{"left": list(p["left"]), "right": list(p["right"])}
+            "pairings": [{"left": list(p["left"]), "right": list(p["right"]),
+                          "pool": list(p.get("pool", []))}
                          for p in self._pairings],
             "threshold": self._threshold.get(),
         }
@@ -1325,7 +1425,8 @@ class _PassivePoolTab(ttk.Frame):
     def get_state(self) -> dict:
         return {
             "entries":  [{"accepted": list(e["accepted"])} for e in self._entries],
-            "pairings": [{"left": list(p["left"]), "right": list(p["right"])}
+            "pairings": [{"left": list(p["left"]), "right": list(p["right"]),
+                          "pool": list(p.get("pool", []))}
                          for p in self._pairings],
             "threshold": self._threshold.get(),
         }
@@ -1610,15 +1711,42 @@ class RelicBuilderFrame(ttk.LabelFrame):
         self._advisor = _BuildAdvisorTab(self._nb, on_import=self._exact.import_target)
         self._nb.add(self._advisor, text="  Build Advisor  ")
 
-        # ── Combine toggle ──────────────────────────────────────────── #
+        # ── Tab selector + Combine toggle ─────────────────────────────── #
+        select_row = ttk.Frame(self)
+        select_row.pack(fill="x", padx=8, pady=(0, 2))
+
+        # Active tab selector — mutually exclusive when Combine is off
+        self._active_tab_var = tk.IntVar(value=0)  # 0=Exact, 1=Pool
+        self._exact_radio = ttk.Radiobutton(
+            select_row, text="Use Build Exact Relic",
+            variable=self._active_tab_var, value=0,
+        )
+        self._exact_radio.pack(side="left", padx=(0, 12))
+        self._pool_radio = ttk.Radiobutton(
+            select_row, text="Use Passive Pool",
+            variable=self._active_tab_var, value=1,
+        )
+        self._pool_radio.pack(side="left")
+
         combine_row = ttk.Frame(self)
         combine_row.pack(anchor="w", padx=8, pady=(0, 4))
         self._combine_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self._combine_chk = ttk.Checkbutton(
             combine_row,
             text="Combine both tabs — match if relic satisfies Build Exact Relic OR Passive Pool",
             variable=self._combine_var,
-        ).pack(side="left")
+            command=self._on_combine_toggle,
+        )
+        self._combine_chk.pack(side="left")
+
+    def _on_combine_toggle(self):
+        """When Combine is enabled, disable tab selectors. When off, re-enable."""
+        if self._combine_var.get():
+            self._exact_radio.configure(state="disabled")
+            self._pool_radio.configure(state="disabled")
+        else:
+            self._exact_radio.configure(state="normal")
+            self._pool_radio.configure(state="normal")
 
     # ── Public API ──────────────────────────────────────────────────── #
 
@@ -1659,8 +1787,7 @@ class RelicBuilderFrame(ttk.LabelFrame):
                 "exact": self._exact.get_criteria_dict(),
                 "pool": self._pool.get_criteria_dict(),
             }
-        tab = self._nb.index(self._nb.select())
-        if tab == 0:
+        if self._active_tab_var.get() == 0:
             return self._exact.get_criteria_dict()
         return self._pool.get_criteria_dict()
 
@@ -1673,23 +1800,20 @@ class RelicBuilderFrame(ttk.LabelFrame):
                 + "\n\n--- OR ---\n\n"
                 + self._pool.get_criteria_prompt()
             )
-        tab = self._nb.index(self._nb.select())
-        if tab == 0:
+        if self._active_tab_var.get() == 0:
             return self._exact.get_criteria_prompt()
         return self._pool.get_criteria_prompt()
 
     def is_valid(self) -> bool:
         if self._combine_var.get():
             return self._exact.is_valid() or self._pool.is_valid()
-        tab = self._nb.index(self._nb.select())
-        if tab == 0:
+        if self._active_tab_var.get() == 0:
             return self._exact.is_valid()
         return self._pool.is_valid()
 
     def has_compat_errors(self) -> bool:
         """True if the Exact Relic tab has incompatible passive combinations."""
-        tab = self._nb.index(self._nb.select())
-        if tab == 0:
+        if self._active_tab_var.get() == 0:
             return self._exact.has_compat_errors()
         return False
 
@@ -1701,14 +1825,13 @@ class RelicBuilderFrame(ttk.LabelFrame):
         """
         if self._combine_var.get():
             return min(self._exact.get_min_hit_threshold(), self._pool.get_min_hit_threshold())
-        tab = self._nb.index(self._nb.select())
-        if tab == 0:
+        if self._active_tab_var.get() == 0:
             return self._exact.get_min_hit_threshold()
         return self._pool.get_min_hit_threshold()
 
     def get_state(self) -> dict:
         return {
-            "active_tab": self._nb.index(self._nb.select()),
+            "active_tab": self._active_tab_var.get(),
             "combine": self._combine_var.get(),
             "exact": self._exact.get_state(),
             "pool": self._pool.get_state(),
@@ -1719,7 +1842,9 @@ class RelicBuilderFrame(ttk.LabelFrame):
             self._exact.set_state(state["exact"])
         if "pool" in state:
             self._pool.set_state(state["pool"])
+        self._active_tab_var.set(state.get("active_tab", 0))
         self._combine_var.set(state.get("combine", False))
+        self._on_combine_toggle()
         try:
             self._nb.select(state.get("active_tab", 0))
         except Exception:

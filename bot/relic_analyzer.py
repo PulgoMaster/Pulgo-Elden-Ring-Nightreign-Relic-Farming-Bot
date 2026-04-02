@@ -280,11 +280,22 @@ def _check_criteria(found: list, criteria: dict) -> tuple:
                 matched.append(hit)
 
         # Pairings — both sides must be present; counts as 1 match
+        # Optional pool: if a third-passive pool is defined, one of those
+        # must also be present for the pairing to count.
         for pairing in criteria.get("pairings", []):
             left_hit  = next((p for p in pairing.get("left",  []) if p in found_set), None)
             right_hit = next((p for p in pairing.get("right", []) if p in found_set), None)
+            pool      = pairing.get("pool", [])
             if left_hit and right_hit:
-                matched.append(f"{left_hit} \u2194 {right_hit}")
+                if pool:
+                    pool_hit = next((p for p in pool if p in found_set), None)
+                    if pool_hit:
+                        matched.append(f"{left_hit} \u2194 {right_hit} + {pool_hit}")
+                    else:
+                        # Left+right present but no pool passive — near miss
+                        near_miss_passives.append(f"{left_hit} \u2194 {right_hit}")
+                else:
+                    matched.append(f"{left_hit} \u2194 {right_hit}")
             elif left_hit or right_hit:
                 near_miss_passives.append(left_hit or right_hit)
 

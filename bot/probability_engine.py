@@ -19,8 +19,8 @@ if _PROJECT_ROOT not in sys.path:
 
 from database.pool_weights import (
     TABLE_100, TABLE_110, TABLE_200, TABLE_210, TABLE_300, TABLE_310,
+    TABLE_110_TOTAL, TABLE_210_TOTAL, TABLE_310_TOTAL,
     TABLE_2000000, TABLE_2100000,
-    TABLE_100_TOTAL, TABLE_200_TOTAL, TABLE_300_TOTAL,
     TABLE_2000000_TOTAL, TABLE_2100000_TOTAL,
     NUM_CURSES, DEEP_CURSE_COUNT_DIST,
 )
@@ -45,16 +45,16 @@ DEEP_SIZE_PROBS:   dict[str, float] = {"delicate": 0.10, "polished": 0.50, "gran
 # (table_dict, total_weight, key_prefix)
 _NORMAL_SLOTS: dict[str, list[tuple]] = {
     "delicate": [
-        (TABLE_100, TABLE_100_TOTAL, "<Delicate Scene> "),
+        (TABLE_110, TABLE_110_TOTAL, "<Delicate Scene> "),
     ],
     "polished": [
-        (TABLE_200, TABLE_200_TOTAL, "<Polished Scene> "),
-        (TABLE_100, TABLE_100_TOTAL, "<Delicate Scene> "),
+        (TABLE_210, TABLE_210_TOTAL, "<Polished Scene> "),
+        (TABLE_110, TABLE_110_TOTAL, "<Delicate Scene> "),
     ],
     "grand": [
-        (TABLE_300, TABLE_300_TOTAL, "<Grand Scene> "),
-        (TABLE_200, TABLE_200_TOTAL, "<Polished Scene> "),
-        (TABLE_100, TABLE_100_TOTAL, "<Delicate Scene> "),
+        (TABLE_310, TABLE_310_TOTAL, "<Grand Scene> "),
+        (TABLE_210, TABLE_210_TOTAL, "<Polished Scene> "),
+        (TABLE_110, TABLE_110_TOTAL, "<Delicate Scene> "),
     ],
 }
 
@@ -398,7 +398,7 @@ DEEP_POOL_PASSIVES: frozenset = frozenset(
 
 NORMAL_POOL_PASSIVES: frozenset = frozenset(
     k.split("> ", 1)[1]
-    for table in (TABLE_100, TABLE_110, TABLE_200, TABLE_210, TABLE_300, TABLE_310)
+    for table in (TABLE_110, TABLE_210, TABLE_310)
     for k, v in table.items()
     if any(k.startswith(pfx) for pfx in _NORMAL_PREFIXES) and v > 0
 )
