@@ -622,6 +622,11 @@ def analyze(
             }
 
     match, matched_passives, near_misses = _check_criteria(passives, criteria)
+    # Patch near-miss records with the actual relic name (criteria checker
+    # uses a placeholder because it doesn't receive the name).
+    for _nm in near_misses:
+        if _nm.get("relic_name") == "current relic" and relic_name:
+            _nm["relic_name"] = relic_name
 
     return {
         "relics_found": [{"name": relic_name, "passives": passives, "curses": curses}],

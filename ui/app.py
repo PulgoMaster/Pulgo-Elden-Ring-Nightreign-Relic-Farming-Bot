@@ -2421,6 +2421,81 @@ class RelicBotApp(tk.Tk):
             "matches_hotkey_display": self._matches_hotkey_display,
         }
 
+    # Passive names renamed between versions — profiles may contain old names.
+    # Applied during profile load so searches match the current analyzer output.
+    _PASSIVE_MIGRATION: dict[str, str] = {
+        # Art gauge renames
+        "Art gauge charged from successful guarding":    "Successful guarding fills more of the Art gauge",
+        "Art gauge charged from successful guarding +1": "Successful guarding fills more of the Art gauge +1",
+        "Art gauge fills moderately upon critical hit":   "Critical hits fill more of the Art gauge",
+        "Art gauge fills moderately upon critical hit +1":"Critical hits fill more of the Art gauge +1",
+        # Ultimate Art
+        "Ultimate Art Gauge":    "Ultimate Art Auto Charge",
+        "Ultimate Art Gauge +1": "Ultimate Art Auto Charge +1",
+        "Ultimate Art Gauge +2": "Ultimate Art Auto Charge +2",
+        "Ultimate Art Gauge +3": "Ultimate Art Auto Charge +3",
+        # Grease
+        "Attack power increases after using grease items":    "Physical attack power increases after using grease items",
+        "Attack power increases after using grease items +1": "Physical attack power increases after using grease items +1",
+        "Attack power increases after using grease items +2": "Physical attack power increases after using grease items +2",
+        # Calling Bell
+        "Wrath Calling Bell in possession at start of expedition": "Wraith Calling Bell in possession at start of expedition",
+        # Evergaol / Night Invader
+        "Attack power permanently increased for each evergaol prisoner defeated": "Attack power increased for each evergaol prisoner defeated",
+        "Attack power up after defeating a Night Invader": "Attack power increased for each Night Invader defeated",
+        # Frostbite / Sorcerer's Rise
+        "Nearby Frostbite Conceals Self":  "Frostbite in Vicinity Conceals Self",
+        "Max FP permanently increased after releasing Sorcerer's Rise mechanism": "Max FP increased for each Sorcerer's Rise unlocked",
+        # Medicinal boluses
+        "HP restored when using cured meats, medicinal boluses, etc.": "HP restored when using medicinal boluses, etc.",
+        # Character passives (colon → bracket format + content fixes)
+        "Wylder: Follow-up attacks possible when using Character Skill (greatsword only)": "[Wylder] Standard attacks enhanced with fiery follow-ups when using Character Skill (greatsword only)",
+        "Duchess: Dagger chain attack reprises event upon nearby enemies": "[Duchess] Reprise events upon nearby enemies by landing the final blow of a chain attack with dagger",
+        "Raider: Damage taken while using Character Skill improves attack power and stamina": "[Raider] Damage taken while using Character Skill",
+        "Executor: Character Skill Boosts Attack but Attacking Drains HP": "[Executor] Character Skill Boosts Attack but Lowers Damage Negation While Attacking",
+    }
+    # Also generate colon→bracket for all characters with unchanged descriptions
+    for _char in ("Wylder", "Guardian", "Ironeye", "Duchess", "Raider",
+                  "Revenant", "Recluse", "Executor", "Scholar", "Undertaker"):
+        # Generic colon→bracket: "Name: desc" → "[Name] desc"
+        # Only for entries not already in the explicit map above
+        pass  # handled by _migrate_passive below
+
+    @staticmethod
+    def _migrate_passive(name: str) -> str:
+        """Map a passive name from an old profile to the current canonical name."""
+        if not name:
+            return name
+        # Explicit renames
+        migrated = RelicBotApp._PASSIVE_MIGRATION.get(name)
+        if migrated:
+            return migrated
+        # Generic colon→bracket for character passives: "Name: desc" → "[Name] desc"
+        for char in ("Wylder", "Guardian", "Ironeye", "Duchess", "Raider",
+                     "Revenant", "Recluse", "Executor", "Scholar", "Undertaker"):
+            prefix = f"{char}: "
+            if name.startswith(prefix):
+                return f"[{char}] {name[len(prefix):]}"
+        return name
+
+    @staticmethod
+    def _migrate_criteria(criteria: dict) -> dict:
+        """Apply passive name migration to a saved criteria dict."""
+        migrate = RelicBotApp._migrate_passive
+        if "entries" in criteria:
+            for e in criteria["entries"]:
+                if "accepted" in e:
+                    e["accepted"] = [migrate(p) for p in e["accepted"]]
+        if "passives" in criteria:
+            criteria["passives"] = [migrate(p) for p in criteria["passives"]]
+        if "pairings" in criteria:
+            for p in criteria["pairings"]:
+                if "left" in p:
+                    p["left"] = [migrate(n) for n in p["left"]]
+                if "right" in p:
+                    p["right"] = [migrate(n) for n in p["right"]]
+        return criteria
+
     def _dict_to_profile(self, data: dict):
         _default_backup = os.path.join(_REPO_ROOT, "save_backups")
         _default_output = os.path.join(_REPO_ROOT, "batch_output")
@@ -2487,9 +2562,10 @@ class RelicBotApp(tk.Tk):
         if "excluded_passives" in data:
             self._excl_clear()
             for item in data["excluded_passives"]:
-                if item and item not in self._excluded_passives_list:
-                    self._excluded_passives_list.append(item)
-                    self._excluded_lb.insert("end", item)
+                _migrated = self._migrate_passive(item) if item else item
+                if _migrated and _migrated not in self._excluded_passives_list:
+                    self._excluded_passives_list.append(_migrated)
+                    self._excluded_lb.insert("end", _migrated)
             # Sync dormant checkbox: checked if every dormant power is in the exclusion list
             from bot.passives import UI_CATEGORIES as _UCATS
             _dormant = _UCATS.get("Dormant Powers", [])
@@ -2505,7 +2581,7 @@ class RelicBotApp(tk.Tk):
         self._gem_mode_var.set("don" if self.relic_type_var.get() == "night" else "normal")
         self._refresh_gem_images()
         if "criteria" in data:
-            self.relic_builder.set_state(data["criteria"])
+            self.relic_builder.set_state(self._migrate_criteria(data["criteria"]))
         # Overlay settings
         self._overlay_enabled_var.set(data.get("overlay_enabled", True))
         self._ov_show_stats_var.set(data.get("ov_show_stats", True))
