@@ -166,6 +166,35 @@ _PREVIEW_CROP_TOP_FRAC  = 0.38   # fraction of height to skip (preview screen)
 _MAX_OCR_WIDTH = 1000
 
 
+def has_passive_text_pixels(image_bytes: bytes,
+                            min_bright_pixels: int = 80) -> bool:
+    """Fast pixel check: is there bright (white) text in the passive region?
+
+    Checks a tight rectangle on the preview screen where passive text renders.
+    Region defined as fractions of the FULL screenshot (calibrated from real
+    screenshots at 2560x1440 — fractions are resolution-independent):
+      x: 33%-75%  (passive text starts after the relic icon at ~32%)
+      y: 59%-75%  (below the relic name at ~54%, above the F:Close bar at ~82%)
+
+    Counts pixels where all 3 RGB channels exceed 200 (white passive text on
+    dark background).  Curse text is blue and won't trigger this check.
+    ~0.5 ms per call (pure numpy, no OCR).  Used by the settle check to
+    confirm passives are rendered without running full analyze().
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        w, h = img.size
+        # Tight crop: only the passive text band
+        x0, x1 = int(w * 0.33), int(w * 0.75)
+        y0, y1 = int(h * 0.59), int(h * 0.75)
+        passive_region = np.array(img.crop((x0, y0, x1, y1)))
+        # White-ish text: all 3 channels > 200
+        bright = np.all(passive_region > 200, axis=2)
+        return int(np.sum(bright)) >= min_bright_pixels
+    except Exception:
+        return False
+
+
 def _to_array(image_bytes: bytes, max_width: int = 0) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     if max_width and img.width > max_width:
