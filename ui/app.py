@@ -42,6 +42,26 @@ def _app_root() -> str:
 _REPO_ROOT    = _app_root()
 _PROFILES_DIR       = os.path.join(_REPO_ROOT, "profiles")
 _LAST_PROFILE_FILE  = os.path.join(_PROFILES_DIR, ".last_profile")
+_APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
+
+
+def _detect_game_exe() -> str:
+    """Probe common Steam install paths for the Nightreign executable."""
+    candidates = [
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                     "Steam", "steamapps", "common",
+                     "ELDEN RING NIGHTREIGN", "Game", "nightreign.exe"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     "Steam", "steamapps", "common",
+                     "ELDEN RING NIGHTREIGN", "Game", "nightreign.exe"),
+        # Common alternative Steam library locations
+        r"D:\SteamLibrary\steamapps\common\ELDEN RING NIGHTREIGN\Game\nightreign.exe",
+        r"E:\SteamLibrary\steamapps\common\ELDEN RING NIGHTREIGN\Game\nightreign.exe",
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -663,6 +683,7 @@ class RelicBotApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
         os.makedirs(_PROFILES_DIR, exist_ok=True)
+        self._load_app_config()
         self._refresh_profile_list()
         self._auto_load_last_profile()
         self.after(0, self._on_relic_type_change)   # apply curse frame visibility after UI settles
@@ -775,10 +796,11 @@ class RelicBotApp(tk.Tk):
         _exe_browse_btn = ttk.Button(save_frame, text="Browse", command=self._browse_game_exe)
         _exe_browse_btn.grid(row=3, column=2, **pad)
         _Tooltip(_exe_browse_btn,
-                 "Path to the Elden Ring game executable. Typical Steam path:\n"
-                 "  C:\\Program Files (x86)\\Steam\\steamapps\\common\\ELDEN RING\\Game\\eldenring.exe\n\n"
-                 "The bot uses this path to relaunch the game after each iteration.\n"
-                 "Without this set, the bot cannot restart the game automatically.")
+                 "Path to the Nightreign game executable.\n"
+                 "Auto-detected from common Steam install locations on startup.\n\n"
+                 "The bot launches via Steam — this path is used for process\n"
+                 "detection (window focus and game close). If your game is on\n"
+                 "a different drive, browse to the correct nightreign.exe.")
 
         ttk.Label(
             save_frame,
@@ -960,6 +982,14 @@ class RelicBotApp(tk.Tk):
         self._excluded_passives_list: list[str] = []
         self._save_exclusion_matches_var = tk.BooleanVar(value=False)
         self._excl_dormant_var = tk.BooleanVar(value=False)
+
+        # Per-mode storage: criteria, curses, and exclusions are stored
+        # separately for Normal and Deep of Night so switching modes
+        # live-swaps the relevant settings without losing either.
+        self._mode_data: dict[str, dict] = {
+            "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+            "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+        }
         self._smart_analyze_var = tk.BooleanVar(value=False)
         self._ov_smart_hits: int = 0
 
@@ -2201,9 +2231,47 @@ class RelicBotApp(tk.Tk):
         # Phase 1 buy sequence (F→DOWN→F) is now fully programmatic —
         # no recorded sequence needed.  See _run_iteration_phases.
 
+    def _stash_mode_data(self, mode: str):
+        """Save current UI criteria/curses/exclusions into per-mode storage."""
+        self._mode_data[mode] = {
+            "criteria":           self.relic_builder.get_state(),
+            "blocked_curses":     list(self._blocked_curses_list),
+            "excluded_passives":  list(self._excluded_passives_list),
+        }
+
+    def _restore_mode_data(self, mode: str):
+        """Load per-mode criteria/curses/exclusions into the UI."""
+        md = self._mode_data.get(mode, {})
+        # Criteria
+        self.relic_builder.set_state(md.get("criteria", {}))
+        # Blocked curses
+        self._curse_clear()
+        for item in md.get("blocked_curses", []):
+            if item and item not in self._blocked_curses_list:
+                self._blocked_curses_list.append(item)
+                self._blocked_curses_lb.insert("end", item)
+        # Excluded passives
+        self._excl_clear()
+        for item in md.get("excluded_passives", []):
+            if item and item not in self._excluded_passives_list:
+                self._excluded_passives_list.append(item)
+                self._excluded_lb.insert("end", item)
+        # Sync dormant checkbox
+        from bot.passives import UI_CATEGORIES as _UCATS
+        _dormant = _UCATS.get("Dormant Powers", [])
+        self._excl_dormant_var.set(
+            bool(_dormant) and all(d in self._excluded_passives_list for d in _dormant if d)
+        )
+
     def _on_relic_type_change(self):
-        """Swap Phase 0 sequence and sync gem images when the user switches relic type."""
+        """Swap Phase 0 sequence, gem images, and per-mode criteria/curses/exclusions."""
         rtype = self.relic_type_var.get()
+        old_mode = "normal" if rtype == "night" else "night"
+        # Stash current mode's criteria/curses/exclusions before switching
+        # (skip during profile load — mode_data is populated separately)
+        _loading = getattr(self, "_loading_profile", False)
+        if hasattr(self, "_mode_data") and not _loading:
+            self._stash_mode_data(old_mode)
         self._gem_mode_var.set("don" if rtype == "night" else "normal")
         self._refresh_gem_images()
         fname = ("phase0_setup_don.json" if rtype == "night" else "phase0_setup_normal.json")
@@ -2218,6 +2286,10 @@ class RelicBotApp(tk.Tk):
             except Exception as e:
                 self._log(f"WARNING: Could not load Phase 0 for '{rtype}': {e}")
         self.relic_builder.set_relic_context(rtype, self._get_allowed_colors())
+        # Restore the new mode's criteria/curses/exclusions
+        # (skip during profile load — handled after mode_data is populated)
+        if hasattr(self, "_mode_data") and not _loading:
+            self._restore_mode_data(rtype)
         # Curse Filter is only relevant for Deep of Night — hide it in Normal mode
         if hasattr(self, "_curse_frame"):
             if rtype == "night":
@@ -2252,16 +2324,19 @@ class RelicBotApp(tk.Tk):
         path = filedialog.askopenfilename(title="Select save file")
         if path:
             self.save_path_var.set(path)
+            self._save_app_config()
 
     def _browse_backup(self):
         path = filedialog.askdirectory(title="Choose backup folder")
         if path:
             self.backup_path_var.set(path)
+            self._save_app_config()
 
     def _browse_batch_output(self):
         path = filedialog.askdirectory(title="Choose batch output folder")
         if path:
             self.batch_output_var.set(path)
+            self._save_app_config()
 
     def _on_overlay_enable_toggle(self, *_) -> None:
         """Gray out overlay element widgets when the overlay is disabled."""
@@ -2357,6 +2432,7 @@ class RelicBotApp(tk.Tk):
         )
         if path:
             self.game_exe_var.set(path)
+            self._save_app_config()
 
     # ------------------------------------------------------------------ #
     #  PROFILE MANAGEMENT
@@ -2374,21 +2450,21 @@ class RelicBotApp(tk.Tk):
         self._profile_cb["values"] = names
 
     def _profile_to_dict(self) -> dict:
+        # save_path, backup_folder, game_executable, batch_output are in
+        # relicbot_config.json (app-level, not per-profile).
+        # Stash current mode before saving so both modes are captured.
+        rtype = self.relic_type_var.get()
+        self._stash_mode_data(rtype)
         return {
-            "save_path": self.save_path_var.get(),
-            "backup_folder": self.backup_path_var.get(),
-            "game_executable": self.game_exe_var.get(),
             "batch_limit_type": self.batch_limit_type.get(),
             "batch_limit": self.batch_limit_var.get(),
-            "batch_output": self.batch_output_var.get(),
             "relic_type": self.relic_type_var.get(),
             "hotkey_str": self._hotkey_str,
             "hotkey_display": self._hotkey_display,
-            "blocked_curses": list(self._blocked_curses_list),
-            "excluded_passives":      list(self._excluded_passives_list),
+            # Per-mode criteria, curses, and exclusions
+            "mode_data": self._mode_data,
             "save_exclusion_matches": self._save_exclusion_matches_var.get(),
             "allowed_colors": self._get_allowed_colors(),
-            "criteria": self.relic_builder.get_state(),
             "parallel_enabled": self._parallel_enabled_var.get(),
             "parallel_workers": self._parallel_workers_var.get(),
             "async_enabled":      self._async_enabled_var.get(),
@@ -2490,19 +2566,29 @@ class RelicBotApp(tk.Tk):
         return criteria
 
     def _dict_to_profile(self, data: dict):
-        _default_backup = os.path.join(_REPO_ROOT, "save_backups")
-        _default_output = os.path.join(_REPO_ROOT, "batch_output")
-        self.save_path_var.set(data.get("save_path", ""))
-        self.backup_path_var.set(data.get("backup_folder", _default_backup))
-        self.game_exe_var.set(data.get("game_executable", ""))
+        # Migrate old profiles: if the profile has app-config fields that
+        # aren't in relicbot_config.json yet, adopt them once.
+        if not os.path.isfile(_APP_CONFIG_FILE):
+            _migrated = False
+            if data.get("save_path") and not self.save_path_var.get():
+                self.save_path_var.set(data["save_path"]); _migrated = True
+            if data.get("backup_folder") and self.backup_path_var.get() == os.path.join(_REPO_ROOT, "save_backups"):
+                self.backup_path_var.set(data["backup_folder"]); _migrated = True
+            if data.get("game_executable") and not self.game_exe_var.get():
+                self.game_exe_var.set(data["game_executable"]); _migrated = True
+            if data.get("batch_output") and self.batch_output_var.get() == os.path.join(_REPO_ROOT, "batch_output"):
+                self.batch_output_var.set(data["batch_output"]); _migrated = True
+            if _migrated:
+                self._save_app_config()
         self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
         self.batch_limit_var.set(str(data.get("batch_limit", "20")))
-        self.batch_output_var.set(data.get("batch_output", _default_output))
         # Input sequences (phase_events) are intentionally NOT loaded from profiles.
         # Sequences are recorded independently and must not be overwritten by profile
         # switches. If a user has recorded sequences they want to keep, they stay as-is.
+        self._loading_profile = True   # suppress stash/restore in _on_relic_type_change
         self.relic_type_var.set(data.get("relic_type", "night"))
         self._on_relic_type_change()
+        self._loading_profile = False
         self._parallel_enabled_var.set(data.get("parallel_enabled", False))
         self._parallel_workers_var.set(data.get("parallel_workers", 2))
         self._async_enabled_var.set(data.get("async_enabled", False))
@@ -2541,40 +2627,45 @@ class RelicBotApp(tk.Tk):
                                                     self._matches_hotkey_str.replace("Key.", "").upper())
             self._matches_hotkey_btn.config(text=f"Rec: {self._matches_hotkey_display}")
             self._start_global_hotkey_listener()
-        if "blocked_curses" in data:
-            self._curse_clear()
-            saved = data["blocked_curses"]
-            # Support old format (newline-separated string) and new (list)
-            if isinstance(saved, str):
-                items = [s.strip() for s in saved.splitlines() if s.strip()]
-            else:
-                items = list(saved)
-            for item in items:
-                self._blocked_curses_list.append(item)
-                self._blocked_curses_lb.insert("end", item)
-        if "excluded_passives" in data:
-            self._excl_clear()
-            for item in data["excluded_passives"]:
-                _migrated = self._migrate_passive(item) if item else item
-                if _migrated and _migrated not in self._excluded_passives_list:
-                    self._excluded_passives_list.append(_migrated)
-                    self._excluded_lb.insert("end", _migrated)
-            # Sync dormant checkbox: checked if every dormant power is in the exclusion list
-            from bot.passives import UI_CATEGORIES as _UCATS
-            _dormant = _UCATS.get("Dormant Powers", [])
-            self._excl_dormant_var.set(
-                bool(_dormant) and all(d in self._excluded_passives_list for d in _dormant if d)
-            )
+        # ── Per-mode criteria / curses / exclusions ────────────────────── #
+        # New profiles: "mode_data" dict with "normal" and "night" sub-keys.
+        # Old profiles: flat "criteria", "blocked_curses", "excluded_passives"
+        # assigned to the profile's relic_type mode (other mode starts blank).
+        _rtype = self.relic_type_var.get()
+        if "mode_data" in data:
+            # New format — load both modes, apply migration
+            for _m in ("normal", "night"):
+                _md = data["mode_data"].get(_m, {})
+                _crit = _md.get("criteria", {})
+                self._mode_data[_m] = {
+                    "criteria":          self._migrate_criteria(_crit) if _crit else {},
+                    "blocked_curses":    list(_md.get("blocked_curses", [])),
+                    "excluded_passives": [self._migrate_passive(p) for p in _md.get("excluded_passives", []) if p],
+                }
+        else:
+            # Old format — assign to the mode the profile was saved with
+            _old_curses = data.get("blocked_curses", [])
+            if isinstance(_old_curses, str):
+                _old_curses = [s.strip() for s in _old_curses.splitlines() if s.strip()]
+            _old_excl = [self._migrate_passive(p) for p in data.get("excluded_passives", []) if p]
+            _old_crit = self._migrate_criteria(data.get("criteria", {})) if data.get("criteria") else {}
+            self._mode_data[_rtype] = {
+                "criteria":          _old_crit,
+                "blocked_curses":    list(_old_curses),
+                "excluded_passives": _old_excl,
+            }
+            _other = "normal" if _rtype == "night" else "night"
+            self._mode_data[_other] = {"criteria": {}, "blocked_curses": [], "excluded_passives": []}
+        # Restore the active mode into the UI
+        self._restore_mode_data(_rtype)
         self._save_exclusion_matches_var.set(data.get("save_exclusion_matches", False))
         if "allowed_colors" in data:
             saved = data["allowed_colors"]
             for color, var in self._color_vars.items():
                 var.set(color in saved)
         # gem images follow relic_type — sync after relic_type is loaded
-        self._gem_mode_var.set("don" if self.relic_type_var.get() == "night" else "normal")
+        self._gem_mode_var.set("don" if _rtype == "night" else "normal")
         self._refresh_gem_images()
-        if "criteria" in data:
-            self.relic_builder.set_state(self._migrate_criteria(data["criteria"]))
         # Overlay settings
         self._overlay_enabled_var.set(data.get("overlay_enabled", True))
         self._ov_show_stats_var.set(data.get("ov_show_stats", True))
@@ -2583,6 +2674,51 @@ class RelicBotApp(tk.Tk):
         self._ov_show_proc_log_var.set(data.get("ov_show_process_log", True))
         self._ov_show_relic_log_var.set(data.get("ov_show_relic_log", True))
         self._on_overlay_enable_toggle()
+
+    # ── App-level config (not per-profile) ──────────────────────────────── #
+
+    def _load_app_config(self):
+        """Load machine-specific settings from relicbot_config.json.
+
+        These are NOT profile settings — they're the same regardless of which
+        profile is active: save file path, backup folder, output folder, game
+        executable.  If the config file doesn't exist, defaults are applied
+        and the game exe is auto-detected from common Steam paths.
+        """
+        defaults = {
+            "save_path":        "",
+            "backup_folder":    os.path.join(_REPO_ROOT, "save_backups"),
+            "batch_output":     os.path.join(_REPO_ROOT, "batch_output"),
+            "game_executable":  _detect_game_exe(),
+        }
+        data = {}
+        if os.path.isfile(_APP_CONFIG_FILE):
+            try:
+                with open(_APP_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                pass
+        self.save_path_var.set(data.get("save_path", defaults["save_path"]))
+        self.backup_path_var.set(data.get("backup_folder", defaults["backup_folder"]))
+        self.batch_output_var.set(data.get("batch_output", defaults["batch_output"]))
+        self.game_exe_var.set(data.get("game_executable", defaults["game_executable"]))
+        # Log auto-detection result
+        if not data.get("game_executable") and self.game_exe_var.get():
+            self._log(f"Auto-detected game: {self.game_exe_var.get()}")
+
+    def _save_app_config(self):
+        """Persist machine-specific settings to relicbot_config.json."""
+        data = {
+            "save_path":        self.save_path_var.get(),
+            "backup_folder":    self.backup_path_var.get(),
+            "batch_output":     self.batch_output_var.get(),
+            "game_executable":  self.game_exe_var.get(),
+        }
+        try:
+            with open(_APP_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
     def _auto_load_last_profile(self):
         """On startup, silently load the last-used profile if it still exists."""
