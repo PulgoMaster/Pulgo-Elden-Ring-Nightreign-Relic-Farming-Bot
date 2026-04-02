@@ -2198,15 +2198,8 @@ class RelicBotApp(tk.Tk):
             else:
                 self._log(f"WARNING: Sequence file not found for Phase {i}: {path}")
 
-        # Load safe buy alternative (F→DOWN→F, no extra F press)
-        _alt_path = os.path.join(self._SEQ_DIR, "phase1_buy_alt.json")
-        if os.path.exists(_alt_path):
-            try:
-                self.recorder.load(_alt_path)
-                self._phase1_alt_events = list(self.recorder.events)
-                self._log(f"Auto-loaded Phase 1 alt (safe buy): {len(self._phase1_alt_events)} events")
-            except Exception as e:
-                self._log(f"WARNING: Failed to load phase1_buy_alt.json: {e}")
+        # Phase 1 buy sequence (F→DOWN→F) is now fully programmatic —
+        # no recorded sequence needed.  See _run_iteration_phases.
 
     def _on_relic_type_change(self):
         """Swap Phase 0 sequence and sync gem images when the user switches relic type."""
@@ -6819,13 +6812,21 @@ class RelicBotApp(tk.Tk):
                         self._iter_p1_settle_retries += 1  # each retry = settle missed
                     self._iter_safe_path_used = True   # alt sequence always used
                     self._set_ocr_throttle(True)   # pause workers during Phase 1 buy inputs
-                    # Always use alt sequence (F→DOWN→F) — more reliable than the fast
-                    # path (F→DOWN→F→F) which can miss the preview on slow machines or
-                    # when the last cycle has fewer relics.  No fixed sleep after play —
-                    # the settle poll below waits until the relic screen is detected.
-                    _safe_seq = self._phase1_alt_events or self.phase_events[1]
+                    # Programmatic F→DOWN→F with controlled hold times (0.03 s)
+                    # and adaptive inter-key gaps.  Replaces the recorded alt sequence
+                    # to eliminate variable hold durations — a DOWN hold of 100 ms+
+                    # can double-register on CPU spikes.  0.03 s is well below any
+                    # key repeat threshold while still registering reliably.
+                    _p1_hold = 0.03
+                    _p1_gap  = max(0.12, 0.12 + 0.05 * max(0.0, self._perf_gap_mult - 1.0))
+                    if _lpm:
+                        _p1_gap += 0.10
                     _t_p1_start = time.perf_counter()
-                    self.player.play(_safe_seq, extra_delay=_p1_extra_delay)
+                    self.player.tap("f", hold=_p1_hold)
+                    time.sleep(_p1_gap)
+                    self.player.tap("Key.down", hold=_p1_hold)
+                    time.sleep(_p1_gap)
+                    self.player.tap("f", hold=_p1_hold)
                     _path_name = f"alt (mult {self._perf_gap_mult:.2f}×)"
                     # Keep throttle ON through the settle poll below.
                     # Releasing it here lets async workers run OCR concurrently,
@@ -9464,19 +9465,6 @@ class RelicBotApp(tk.Tk):
         if d_total > 0:
             self._last_cpu_pct = max(0.0, min(100.0, (1.0 - d_idle / d_total) * 100))
         return self._last_cpu_pct
-
-    def _should_use_fast_buy_path(self) -> bool:
-        """
-        Returns True if system is healthy enough to use the fast buy sequence
-        (F→DOWN→F→F, extra F skips the 2-second auto-transition).
-        Falls back to safe path (F→DOWN→F + 2.5s settle) when stressed.
-        Thresholds: perf_gap_mult ≤ 1.3 AND recent CPU < 70%.
-        """
-        if not self._phase1_alt_events:
-            return True   # no alt sequence loaded — always use fast
-        mult_ok = self._perf_gap_mult <= 1.3
-        cpu_ok  = self._last_cpu_pct < 70.0
-        return mult_ok and cpu_ok
 
     def _curse_filter_list(self, *_):
         q = self._curse_search_var.get().strip().lower()
