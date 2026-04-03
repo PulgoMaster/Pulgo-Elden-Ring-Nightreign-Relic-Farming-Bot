@@ -2248,12 +2248,19 @@ class RelicBotApp(tk.Tk):
         """
         import json
         state = self.relic_builder.get_state()
-        # Deep copy via JSON to guarantee no shared references between modes
-        self._mode_data[mode] = json.loads(json.dumps({
+        built = {
             "criteria":           state,
             "blocked_curses":     list(self._blocked_curses_list),
             "excluded_passives":  list(self._excluded_passives_list),
-        }))
+        }
+        self._mode_data[mode] = json.loads(json.dumps(built))
+        # Debug: log what we stashed
+        _n_entries = len(state.get("pool", {}).get("entries", []))
+        _n_pairs = len(state.get("pool", {}).get("pairings", []))
+        _n_exact = len([t for t in state.get("exact", {}).get("targets", []) if any(t.get("slots", []))])
+        other = "normal" if mode == "night" else "night"
+        _o_entries = len(self._mode_data.get(other, {}).get("criteria", {}).get("pool", {}).get("entries", []))
+        self._log(f"  [MODE] Stashed {mode}: {_n_entries} pool + {_n_pairs} pairs + {_n_exact} exact targets | other({other})={_o_entries} pool")
 
     def _restore_mode_data(self, mode: str):
         """Load per-mode criteria/curses/exclusions into the UI.
@@ -2262,8 +2269,12 @@ class RelicBotApp(tk.Tk):
         If mode has no stored data, UI is reset to blank defaults.
         """
         md = self._mode_data.get(mode, {})
+        _crit = md.get("criteria", {})
+        _n_entries = len(_crit.get("pool", {}).get("entries", []))
+        _n_pairs = len(_crit.get("pool", {}).get("pairings", []))
+        self._log(f"  [MODE] Restoring {mode}: {_n_entries} pool + {_n_pairs} pairs")
         # Criteria — set_state always clears first (even with empty dict)
-        self.relic_builder.set_state(md.get("criteria", {}))
+        self.relic_builder.set_state(_crit)
         # Blocked curses — clear then repopulate
         self._curse_clear()
         for item in md.get("blocked_curses", []):
@@ -2284,15 +2295,26 @@ class RelicBotApp(tk.Tk):
         )
 
     def _on_relic_type_change(self):
-        """Swap Phase 0 sequence, gem images, and per-mode criteria/curses/exclusions."""
+        """Swap Phase 0 sequence, gem images, and per-mode criteria/curses/exclusions.
+
+        Mode switch is a critical section: stash old mode, restore new mode,
+        then update UI context. A _switching_mode flag blocks any re-entrant
+        callbacks from corrupting data during the swap.
+        """
+        if getattr(self, "_switching_mode", False):
+            return  # block re-entrant calls from traces during swap
         rtype = self.relic_type_var.get()
         old_mode = "normal" if rtype == "night" else "night"
         _loading = getattr(self, "_loading_profile", False)
 
-        # ── Stash current mode BEFORE anything else changes ────────────
-        # Must happen before set_relic_context which triggers UI updates.
-        if hasattr(self, "_mode_data") and not _loading:
-            self._stash_mode_data(old_mode)
+        # ── Critical section: stash + restore with callbacks blocked ───
+        self._switching_mode = True
+        try:
+            if hasattr(self, "_mode_data") and not _loading:
+                self._stash_mode_data(old_mode)
+                self._restore_mode_data(rtype)
+        finally:
+            self._switching_mode = False
 
         # ── Phase 0 sequence swap (no UI state impact) ─────────────────
         self._gem_mode_var.set("don" if rtype == "night" else "normal")
@@ -2309,14 +2331,7 @@ class RelicBotApp(tk.Tk):
             except Exception as e:
                 self._log(f"WARNING: Could not load Phase 0 for '{rtype}': {e}")
 
-        # ── Restore NEW mode into UI BEFORE set_relic_context ──────────
-        # This ensures the UI has the correct mode's data when
-        # set_relic_context triggers _update_odds / _propagate_p.
-        if hasattr(self, "_mode_data") and not _loading:
-            self._restore_mode_data(rtype)
-
         # ── Update mode-specific UI elements (categories, odds) ────────
-        # Now safe because the UI already has the new mode's data.
         self.relic_builder.set_relic_context(rtype, self._get_allowed_colors())
         # Curse Filter is only relevant for Deep of Night — hide it in Normal mode
         if hasattr(self, "_curse_frame"):

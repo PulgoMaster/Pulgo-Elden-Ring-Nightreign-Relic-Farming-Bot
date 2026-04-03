@@ -398,6 +398,15 @@ class _ExactRelicTab(ttk.Frame):
     def _save_current(self):
         if self._active >= len(self._targets):
             return
+        # Block saves during state restore — the UI is being populated,
+        # reading slots now would capture stale/partial data.
+        try:
+            nb = self.nametowidget(self.winfo_parent())
+            rb = self.nametowidget(nb.winfo_parent())
+            if getattr(rb, "_restoring_state", False):
+                return
+        except Exception:
+            pass
         t = self._targets[self._active]
         t["slots"] = [s.get() for s in self._slots]
         t["threshold"] = self._threshold_var.get()
@@ -650,6 +659,8 @@ class _ExactRelicTab(ttk.Frame):
         try:
             nb = self.nametowidget(self.winfo_parent())
             rb = self.nametowidget(nb.winfo_parent())
+            if getattr(rb, "_restoring_state", False):
+                return  # suppress during state restore
             if hasattr(rb, "_set_p_per_relic"):
                 rb._set_p_per_relic(p)
         except Exception:
@@ -1465,6 +1476,8 @@ class _PassivePoolTab(ttk.Frame):
         try:
             nb = self.nametowidget(self.winfo_parent())
             rb = self.nametowidget(nb.winfo_parent())
+            if getattr(rb, "_restoring_state", False):
+                return  # suppress during state restore
             if hasattr(rb, "_set_p_per_relic"):
                 rb._set_p_per_relic(p)
         except Exception:
@@ -2079,14 +2092,19 @@ class RelicBuilderFrame(ttk.LabelFrame):
         }
 
     def set_state(self, state: dict):
-        # Always clear + restore both tabs, even if state is empty.
-        # This prevents stale data from the other mode lingering in the UI.
-        self._exact.set_state(state.get("exact", {}))
-        self._pool.set_state(state.get("pool", {}))
-        self._active_tab_var.set(state.get("active_tab", 0))
-        self._combine_var.set(state.get("combine", False))
-        self._on_combine_toggle()
+        # Block odds/propagation callbacks during state restore to prevent
+        # partial state from corrupting _last_p or triggering re-entrant saves.
+        self._restoring_state = True
         try:
-            self._nb.select(state.get("active_tab", 0))
-        except Exception:
-            pass
+            # Always clear + restore both tabs, even if state is empty.
+            self._exact.set_state(state.get("exact", {}))
+            self._pool.set_state(state.get("pool", {}))
+            self._active_tab_var.set(state.get("active_tab", 0))
+            self._combine_var.set(state.get("combine", False))
+            self._on_combine_toggle()
+            try:
+                self._nb.select(state.get("active_tab", 0))
+            except Exception:
+                pass
+        finally:
+            self._restoring_state = False
