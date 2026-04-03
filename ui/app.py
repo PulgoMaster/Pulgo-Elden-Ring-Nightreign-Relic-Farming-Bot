@@ -510,7 +510,7 @@ class RelicBotApp(tk.Tk):
         # under python.exe and iconbitmap has no effect on the taskbar icon.
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "PulgoMaster.RelicBot.v1.6.1"
+                "PulgoMaster.RelicBot.v1.6.2"
             )
         except Exception:
             pass
@@ -518,7 +518,7 @@ class RelicBotApp(tk.Tk):
         super().__init__()
         self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.6.1  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.6.2  |  Made by Pulgo")
         self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
