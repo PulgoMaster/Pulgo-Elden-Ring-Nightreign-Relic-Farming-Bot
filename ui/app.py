@@ -3946,7 +3946,12 @@ class RelicBotApp(tk.Tk):
                                     pass
                         # Tag the task with the worker's device so _analyze_relic_task
                         # can skip the memory pressure gate for GPU workers with GPU AA.
-                        _task["_use_gpu"] = use_gpu
+                        # Respect _force_cpu: if a task failed on GPU and was re-queued
+                        # for CPU retry, don't override back to GPU.
+                        if _task.get("_force_cpu"):
+                            _task["_use_gpu"] = False
+                        else:
+                            _task["_use_gpu"] = use_gpu
                         # Overflow tasks embed their own state so main workers can
                         # handle them without extra threads.
                         _ovf = _task.pop("_ovf_state", None)
@@ -3959,9 +3964,28 @@ class RelicBotApp(tk.Tk):
                             self._analyze_relic_task(
                                 _task, _w_state, _w_lock, _w_dmap, _w_res)
                         except Exception as _re:
-                            self._log(f"ERROR in async relic worker: {_re}")
-                            self._mark_relic_failed(
-                                _task, _w_state, _w_lock, _w_dmap, _w_res)
+                            _retries = _task.get("_retry_count", 0)
+                            _was_gpu = bool(_task.get("_use_gpu"))
+                            if _retries < 2:
+                                # Re-queue for retry. After 2 GPU failures,
+                                # force CPU on next attempt.
+                                _task["_retry_count"] = _retries + 1
+                                if _was_gpu and _retries >= 1:
+                                    _task["_force_cpu"] = True
+                                self._log(
+                                    f"  [Async] Relic {_task.get('step_i', 0) + 1}"
+                                    f" retry {_retries + 1}/2"
+                                    f" ({'→CPU' if _task.get('_force_cpu') else 'same'}):"
+                                    f" {_re}")
+                                _async_relic_q.put((
+                                    _task.get("iteration", 0) * 10000
+                                    + _task.get("step_i", 0),
+                                    _task))
+                            else:
+                                self._log(f"  [Async] Relic {_task.get('step_i', 0) + 1}"
+                                          f" failed after {_retries + 1} attempts — discarding: {_re}")
+                                self._mark_relic_failed(
+                                    _task, _w_state, _w_lock, _w_dmap, _w_res)
                         finally:
                             _async_relic_q.task_done()
                 return _worker
