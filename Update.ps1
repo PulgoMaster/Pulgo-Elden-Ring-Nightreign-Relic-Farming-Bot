@@ -1,18 +1,22 @@
 <#
 .SYNOPSIS
-    In-place RelicBot updater — preserves GPU torch, profiles, and calibration.
+    In-place RelicBot updater — preserves GPU torch, profiles, and settings.
 .DESCRIPTION
-    Drop a new RelicBot*.zip next to this script (or one folder up) and run it.
-    GPU acceleration, profiles, and calibration are kept; everything else is
-    replaced with the new version.  Works for both release and test ZIPs.
+    Usage:
+      1. Drag-and-drop a RelicBot*.zip onto Update.bat, OR
+      2. Place the ZIP next to this script and double-click Update.bat, OR
+      3. Run from terminal: powershell -ExecutionPolicy Bypass -File Update.ps1 -ZipPath "path\to\zip"
 
-    The update does a CLEAN replacement: all old files are deleted first, then
-    new files are copied, then preserved items are restored.  This prevents
-    stale files from previous versions interfering with the new version.
+    GPU acceleration, profiles, app config, and calibration are preserved.
+    Everything else is replaced with the new version.
 .NOTES
-    Run by right-clicking -> "Run with PowerShell", or from a terminal:
-        powershell -ExecutionPolicy Bypass -File Update.ps1
+    The update does a CLEAN replacement: old files deleted, new files copied,
+    then preserved items restored. Prevents stale files from interfering.
 #>
+
+param(
+    [string]$ZipPath = ""
+)
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -24,16 +28,32 @@ Write-Host ""
 
 # ── Find the ZIP ──────────────────────────────────────────────────────────── #
 $zipFile = $null
-foreach ($searchDir in @($scriptDir, (Split-Path -Parent $scriptDir))) {
-    if (-not $searchDir) { continue }
-    $found = Get-ChildItem -Path $searchDir -Filter "RelicBot*.zip" -ErrorAction SilentlyContinue |
-             Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($found) { $zipFile = $found.FullName; break }
+
+# Priority 1: ZIP path passed as argument (drag-and-drop or command line)
+if ($ZipPath -and (Test-Path $ZipPath) -and $ZipPath -like "*.zip") {
+    $zipFile = (Resolve-Path $ZipPath).Path
+    Write-Host "ZIP provided via drag-and-drop." -ForegroundColor Green
 }
+
+# Priority 2: Search next to script and one level up
 if (-not $zipFile) {
-    Write-Host "ERROR: No RelicBot*.zip found in this folder or the parent folder." -ForegroundColor Red
-    Write-Host "Put the new ZIP next to this script (or one level up), then run again."
-    Write-Host ""; Read-Host "Press Enter to exit"; exit 1
+    foreach ($searchDir in @($scriptDir, (Split-Path -Parent $scriptDir))) {
+        if (-not $searchDir) { continue }
+        $found = Get-ChildItem -Path $searchDir -Filter "RelicBot*.zip" -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($found) { $zipFile = $found.FullName; break }
+    }
+}
+
+if (-not $zipFile) {
+    Write-Host "ERROR: No RelicBot*.zip found." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "How to update:" -ForegroundColor Yellow
+    Write-Host "  1. Download the new RelicBot ZIP from GitHub"
+    Write-Host "  2. Drag the ZIP file onto Update.bat"
+    Write-Host "  OR place the ZIP next to Update.bat and double-click it."
+    Write-Host ""
+    exit 1
 }
 Write-Host "ZIP      : $zipFile"
 Write-Host "Install  : $scriptDir"
