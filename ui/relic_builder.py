@@ -2079,10 +2079,10 @@ class RelicBuilderFrame(ttk.LabelFrame):
         }
 
     def set_state(self, state: dict):
-        if "exact" in state:
-            self._exact.set_state(state["exact"])
-        if "pool" in state:
-            self._pool.set_state(state["pool"])
+        # Always clear + restore both tabs, even if state is empty.
+        # This prevents stale data from the other mode lingering in the UI.
+        self._exact.set_state(state.get("exact", {}))
+        self._pool.set_state(state.get("pool", {}))
         self._active_tab_var.set(state.get("active_tab", 0))
         self._combine_var.set(state.get("combine", False))
         self._on_combine_toggle()
