@@ -152,7 +152,7 @@ Write-Host "--- Installing new version (clean replacement) ---" -ForegroundColor
 # Delete all old items
 $removed = 0
 Get-ChildItem -Path $scriptDir -ErrorAction SilentlyContinue | Where-Object {
-    $_.Name -ne "Update.ps1" -and $_.Name -notlike "RelicBot*.zip"
+    $_.Name -ne "Update.ps1" -and $_.Name -ne "Update.bat" -and $_.Name -notlike "RelicBot*.zip"
 } | ForEach-Object {
     try {
         Remove-Item -Recurse -Force $_.FullName
