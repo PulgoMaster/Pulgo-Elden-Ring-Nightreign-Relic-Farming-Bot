@@ -482,6 +482,31 @@ def analyze(
                     "matched": None,
                 })
 
+    # ── Token-merge pass ─────────────────────────────────────────────────── #
+    # Long passive names (e.g. "Changes compatible armament's incantation
+    # to Lightning Spear at start of expedition") may be split by EasyOCR
+    # into 2+ tokens that individually don't match anything.  Merge
+    # adjacent unmatched tokens (sorted by Y position) and retry.
+    _unmatched = [(d["text"], d["y"]) for d in _dbg_tokens
+                  if d["status"] == "NO_MATCH" and len(d["text"]) >= 5]
+    _unmatched.sort(key=lambda x: x[1])   # sort by Y so adjacent lines merge
+    for i in range(len(_unmatched)):
+        for j in range(i + 1, min(i + 3, len(_unmatched))):  # try 2-3 token combos
+            merged = _unmatched[i][0] + " " + " ".join(
+                _unmatched[k][0] for k in range(i + 1, j + 1))
+            merged_match = _match_passive(merged, ALL_PASSIVES_SORTED, cutoff=0.80)
+            if merged_match and merged_match not in passives:
+                passives.append(merged_match)
+                # Mark the merged tokens in diagnostics
+                for k in range(i, j + 1):
+                    for _dt in _dbg_tokens:
+                        if _dt["text"] == _unmatched[k][0] and _dt["status"] == "NO_MATCH":
+                            _dt["status"] = "PASSIVE"
+                            _dt["reason"] = "token_merge"
+                            _dt["matched"] = merged_match
+                            break
+                break  # stop extending this merge, move to next starting token
+
     # ── Passive-rescue pass ──────────────────────────────────────────────── #
     # Retry low-confidence tokens against ALL_PASSIVES_SORTED.  Motivated by
     # Delicate relics (1 passive): the single passive line can land at the top
