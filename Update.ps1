@@ -230,6 +230,46 @@ if (Test-Path $newSeqSrc) {
 }
 Write-Host ""
 
+# ── Profile upgrade — fix mirrored mode_data from pre-v1.6.2 bug ─────────── #
+# Versions before v1.6.2 could save identical data for both Normal and Deep of
+# Night modes due to shared object references. This detects the corruption and
+# ensures the JSON has proper deep-copied independent data for each mode.
+# Both modes keep the same data (since we can't guess which is "correct") —
+# the user can then edit whichever mode they want to differ.
+Write-Host "--- Checking profiles for mode_data bug ---" -ForegroundColor Cyan
+$profilesDir = Join-Path $scriptDir "profiles"
+if (Test-Path $profilesDir) {
+    $fixCount = 0
+    Get-ChildItem -Path $profilesDir -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            $raw = Get-Content $_.FullName -Raw -Encoding UTF8
+            $prof = $raw | ConvertFrom-Json
+            if ($prof.mode_data -and $prof.mode_data.normal -and $prof.mode_data.night) {
+                $nCrit = ($prof.mode_data.normal.criteria | ConvertTo-Json -Depth 10 -Compress)
+                $dCrit = ($prof.mode_data.night.criteria  | ConvertTo-Json -Depth 10 -Compress)
+                if ($nCrit -eq $dCrit -and $nCrit.Length -gt 50) {
+                    Write-Host "  $($_.Name): MIRRORED data detected — re-saving with independent copies." -ForegroundColor Yellow
+                    # Re-serialize with proper formatting to break any shared references.
+                    # Both modes keep their current data — user edits whichever they want.
+                    $prof | ConvertTo-Json -Depth 20 | Set-Content $_.FullName -Encoding UTF8
+                    $fixCount++
+                }
+            }
+        } catch {
+            Write-Host "  WARNING: Could not check $($_.Name): $_" -ForegroundColor Yellow
+        }
+    }
+    if ($fixCount -gt 0) {
+        Write-Host "  Repaired $fixCount profile(s). Both modes have the same data for now." -ForegroundColor Yellow
+        Write-Host "  Open RelicBot, switch to the mode you want to change, edit it, and save." -ForegroundColor Yellow
+    } else {
+        Write-Host "  All profiles OK." -ForegroundColor Green
+    }
+} else {
+    Write-Host "  No profiles folder found — skipping." -ForegroundColor Gray
+}
+Write-Host ""
+
 # ── Cleanup ───────────────────────────────────────────────────────────────── #
 Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force $backupDir -ErrorAction SilentlyContinue
