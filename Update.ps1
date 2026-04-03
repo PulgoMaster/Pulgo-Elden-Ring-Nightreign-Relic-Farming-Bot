@@ -247,10 +247,24 @@ if (Test-Path $profilesDir) {
             if ($prof.mode_data -and $prof.mode_data.normal -and $prof.mode_data.night) {
                 $nCrit = ($prof.mode_data.normal.criteria | ConvertTo-Json -Depth 10 -Compress)
                 $dCrit = ($prof.mode_data.night.criteria  | ConvertTo-Json -Depth 10 -Compress)
-                if ($nCrit -eq $dCrit -and $nCrit.Length -gt 50) {
-                    Write-Host "  $($_.Name): MIRRORED data detected — re-saving with independent copies." -ForegroundColor Yellow
-                    # Re-serialize with proper formatting to break any shared references.
-                    # Both modes keep their current data — user edits whichever they want.
+                # Detect mirrored data OR just ensure both modes have proper data
+                $nLen = $nCrit.Length
+                $dLen = $dCrit.Length
+                $needsFix = ($nCrit -eq $dCrit -and $nLen -gt 50)
+                if ($needsFix -or ($nLen -lt 10 -and $dLen -gt 50) -or ($dLen -lt 10 -and $nLen -gt 50)) {
+                    # Pick the richer mode's data and copy to both as starting point
+                    if ($dLen -ge $nLen) {
+                        $source = "night"
+                        $prof.mode_data.normal = $prof.mode_data.night | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+                    } else {
+                        $source = "normal"
+                        $prof.mode_data.night = $prof.mode_data.normal | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+                    }
+                    if ($needsFix) {
+                        Write-Host "  $($_.Name): MIRRORED data detected — copied $source data to both modes." -ForegroundColor Yellow
+                    } else {
+                        Write-Host "  $($_.Name): One mode was empty — copied $source data to both modes." -ForegroundColor Yellow
+                    }
                     $prof | ConvertTo-Json -Depth 20 | Set-Content $_.FullName -Encoding UTF8
                     $fixCount++
                 }
