@@ -212,12 +212,18 @@ def _check_criteria(found: list, criteria: dict) -> tuple:
     """
     Check found passives against a structured criteria dict.
     Returns (match: bool, matched_passives: list, near_misses: list).
+
+    The relic's passives (the "key") are tested against EVERY door.
+    If multiple doors open, the one with the most matched passives wins.
+    A 2-passive pool hit is never shadowed by a 1-passive target that
+    happened to be listed first.
     """
     found_set = set(found)
     mode = criteria.get("mode", "exact")
 
     if mode == "exact":
         near_misses = []
+        best_hits = []   # passives from the best-matching target
         for target in criteria.get("targets", []):
             required = [p for p in target.get("passives", []) if p]
             threshold = target.get("threshold", 2)
@@ -225,13 +231,17 @@ def _check_criteria(found: list, criteria: dict) -> tuple:
                 continue
             hits = [p for p in required if p in found_set]
             if len(hits) >= threshold:
-                return True, hits, []
-            if hits:
+                # This door opened — keep it if it's better than what we have
+                if len(hits) > len(best_hits):
+                    best_hits = hits
+            elif hits:
                 near_misses.append({
                     "relic_name": "current relic",
                     "matching_passive_count": len(hits),
                     "matching_passives": hits,
                 })
+        if best_hits:
+            return True, best_hits, []
         return False, [], near_misses
 
     if mode == "pool":
@@ -300,10 +310,23 @@ def _check_criteria(found: list, criteria: dict) -> tuple:
         return False, [], []
 
     if mode == "combine":
-        m, mp, nm = _check_criteria(found, {**criteria.get("exact", {}), "mode": "exact"})
-        if m:
-            return m, mp, nm
-        return _check_criteria(found, {**criteria.get("pool", {}), "mode": "pool"})
+        # Test ALL doors — exact targets AND pool — then keep the best.
+        exact_m, exact_mp, exact_nm = _check_criteria(
+            found, {**criteria.get("exact", {}), "mode": "exact"})
+        pool_m, pool_mp, pool_nm = _check_criteria(
+            found, {**criteria.get("pool", {}), "mode": "pool"})
+
+        # Pick whichever door gave the most matched passives
+        if exact_m and pool_m:
+            if len(pool_mp) > len(exact_mp):
+                return pool_m, pool_mp, pool_nm
+            return exact_m, exact_mp, exact_nm
+        if exact_m:
+            return exact_m, exact_mp, exact_nm
+        if pool_m:
+            return pool_m, pool_mp, pool_nm
+        # Neither matched — merge near misses from both
+        return False, [], exact_nm + pool_nm
 
     return False, [], []
 

@@ -4939,12 +4939,18 @@ class RelicBotApp(tk.Tk):
             )
             all_relics = [rf for r in relic_results for rf in r.get("relics_found", [])]
             all_near_misses = [nm for r in relic_results for nm in r.get("near_misses", [])]
-            matched_result = next(
-                (r for r in relic_results
-                 if r.get("match")
-                 and not self._is_curse_blocked(r, blocked_curses)
-                 and not self._is_passive_excluded(r, excluded_passives, explicitly_included)),
-                None
+            # Pick the BEST matching relic (most matched passives), not just
+            # the first — a 1-passive target-12/13 hit must not shadow a
+            # 2-passive pool hit later in the scan.
+            _eligible = [
+                r for r in relic_results
+                if r.get("match")
+                and not self._is_curse_blocked(r, blocked_curses)
+                and not self._is_passive_excluded(r, excluded_passives, explicitly_included)
+            ]
+            matched_result = (
+                max(_eligible, key=lambda r: len(r.get("matched_passives", [])))
+                if _eligible else None
             )
             matched_relic = matched_result.get("matched_relic") if matched_result else None
             matched_passives = matched_result.get("matched_passives", []) if matched_result else []
@@ -4965,9 +4971,6 @@ class RelicBotApp(tk.Tk):
             # hit_min is 2 normally, but 3 when the user requires ALL passives to match —
             # in that case a 2/3 near-miss is not a HIT and won't get a folder rename.
             num_matched = len(matched_passives)
-            # Pairing matches (↔) are labelled HIT at most — never GOD ROLL
-            if num_matched > 2 and any("\u2194" in str(p) for p in matched_passives):
-                num_matched = 2
             if num_matched == 0 and all_near_misses:
                 num_matched = max(
                     nm.get("matching_passive_count", len(nm.get("matching_passives", [])))
@@ -6411,12 +6414,17 @@ class RelicBotApp(tk.Tk):
                       for rf in r.get("relics_found", [])]
         all_near_misses = [nm for r in relic_results
                            for nm in r.get("near_misses", [])]
-        matched_result = next(
-            (r for r in relic_results
-             if r.get("match")
-             and not self._is_curse_blocked(r, blocked_curses)
-             and not self._is_passive_excluded(r, excluded_passives, explicitly_included)),
-            None
+        # Pick the BEST matching relic (most matched passives), not just
+        # the first — a 1-passive target hit must not shadow a 2+ pool hit.
+        _eligible = [
+            r for r in relic_results
+            if r.get("match")
+            and not self._is_curse_blocked(r, blocked_curses)
+            and not self._is_passive_excluded(r, excluded_passives, explicitly_included)
+        ]
+        matched_result = (
+            max(_eligible, key=lambda r: len(r.get("matched_passives", [])))
+            if _eligible else None
         )
         matched_relic    = matched_result.get("matched_relic") if matched_result else None
         matched_passives = (matched_result.get("matched_passives", [])
@@ -6430,9 +6438,6 @@ class RelicBotApp(tk.Tk):
 
         iter_g3, iter_g2, _ = self._count_relic_tiers(relic_results, hit_min)
         num_matched = len(matched_passives)
-        # Pairing matches (↔) are labelled HIT at most — never GOD ROLL
-        if num_matched > 2 and any("\u2194" in str(p) for p in matched_passives):
-            num_matched = 2
         if num_matched == 0 and all_near_misses:
             num_matched = max(
                 nm.get("matching_passive_count",
@@ -8234,9 +8239,6 @@ class RelicBotApp(tk.Tk):
         for r in relic_results:
             _mp = r.get("matched_passives", [])
             n = len(_mp)
-            # Pairing matches (↔) are labelled HIT at most — never GOD ROLL
-            if n > 2 and any("\u2194" in str(p) for p in _mp):
-                n = 2
             if n == 0 and r.get("near_misses"):
                 n = max(
                     nm.get("matching_passive_count",

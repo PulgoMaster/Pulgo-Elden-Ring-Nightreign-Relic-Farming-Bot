@@ -92,6 +92,7 @@ New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop | Out-Null
 
 $preserveItems = @(
     "profiles",
+    "sequences",
     "relicbot_config.json",
     "relicbot_calibration.json",
     "relicbot_timing.json",
@@ -180,11 +181,17 @@ $seqDst    = Join-Path $scriptDir "sequences"
 if (Test-Path $newSeqSrc) {
     New-Item -ItemType Directory -Path $seqDst -Force | Out-Null
     $seqCount = 0
+    $seqSkipped = 0
     Get-ChildItem -Path $newSeqSrc -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
-        Copy-Item $_.FullName (Join-Path $seqDst $_.Name) -Force
-        $seqCount++
+        $dst = Join-Path $seqDst $_.Name
+        if (Test-Path $dst) {
+            $seqSkipped++
+        } else {
+            Copy-Item $_.FullName $dst -Force
+            $seqCount++
+        }
     }
-    Write-Host "  Refreshed $seqCount default sequence file(s)." -ForegroundColor Green
+    Write-Host "  Added $seqCount new sequence(s), kept $seqSkipped existing." -ForegroundColor Green
 } else {
     Write-Host "  WARNING: sequences not found -- not refreshed." -ForegroundColor Yellow
 }
