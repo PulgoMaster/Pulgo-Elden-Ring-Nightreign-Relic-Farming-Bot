@@ -2287,11 +2287,14 @@ class RelicBotApp(tk.Tk):
         """Swap Phase 0 sequence, gem images, and per-mode criteria/curses/exclusions."""
         rtype = self.relic_type_var.get()
         old_mode = "normal" if rtype == "night" else "night"
-        # Stash current mode's criteria/curses/exclusions before switching
-        # (skip during profile load — mode_data is populated separately)
         _loading = getattr(self, "_loading_profile", False)
+
+        # ── Stash current mode BEFORE anything else changes ────────────
+        # Must happen before set_relic_context which triggers UI updates.
         if hasattr(self, "_mode_data") and not _loading:
             self._stash_mode_data(old_mode)
+
+        # ── Phase 0 sequence swap (no UI state impact) ─────────────────
         self._gem_mode_var.set("don" if rtype == "night" else "normal")
         self._refresh_gem_images()
         fname = ("phase0_setup_don.json" if rtype == "night" else "phase0_setup_normal.json")
@@ -2305,11 +2308,16 @@ class RelicBotApp(tk.Tk):
                 self._log(f"Phase 0 (Setup) swapped to {rtype} sequence ({n} events).")
             except Exception as e:
                 self._log(f"WARNING: Could not load Phase 0 for '{rtype}': {e}")
-        self.relic_builder.set_relic_context(rtype, self._get_allowed_colors())
-        # Restore the new mode's criteria/curses/exclusions
-        # (skip during profile load — handled after mode_data is populated)
+
+        # ── Restore NEW mode into UI BEFORE set_relic_context ──────────
+        # This ensures the UI has the correct mode's data when
+        # set_relic_context triggers _update_odds / _propagate_p.
         if hasattr(self, "_mode_data") and not _loading:
             self._restore_mode_data(rtype)
+
+        # ── Update mode-specific UI elements (categories, odds) ────────
+        # Now safe because the UI already has the new mode's data.
+        self.relic_builder.set_relic_context(rtype, self._get_allowed_colors())
         # Curse Filter is only relevant for Deep of Night — hide it in Normal mode
         if hasattr(self, "_curse_frame"):
             if rtype == "night":
