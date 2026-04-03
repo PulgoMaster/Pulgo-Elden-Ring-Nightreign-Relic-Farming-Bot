@@ -83,7 +83,9 @@ New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop | Out-Null
 # User data to preserve across updates
 $preserveItems = @(
     "profiles",
+    "relicbot_config.json",
     "relicbot_calibration.json",
+    "relicbot_timing.json",
     ".last_profile"
 )
 
@@ -260,4 +262,6 @@ if ($gpuLost) {
 }
 
 Write-Host ""
-Read-Host "Press Enter to exit"
+# When run via Update.bat, the .bat handles the pause.
+# When run directly, also pause so the window stays open.
+if (-not $env:PROMPT) { Read-Host "Press Enter to exit" }
