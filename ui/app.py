@@ -3967,15 +3967,18 @@ class RelicBotApp(tk.Tk):
                             _retries = _task.get("_retry_count", 0)
                             _was_gpu = bool(_task.get("_use_gpu"))
                             if _retries < 2:
-                                # Re-queue for retry. After 2 GPU failures,
-                                # force CPU on next attempt.
+                                # Re-queue for retry.
+                                # Hybrid mode: after 2 GPU failures, force CPU.
+                                # Non-hybrid: just retry on same worker type.
                                 _task["_retry_count"] = _retries + 1
-                                if _was_gpu and _retries >= 1:
+                                if _async_hybrid and _was_gpu and _retries >= 1:
                                     _task["_force_cpu"] = True
+                                _device_note = ""
+                                if _task.get("_force_cpu"):
+                                    _device_note = " (switching to CPU)"
                                 self._log(
                                     f"  [Async] Relic {_task.get('step_i', 0) + 1}"
-                                    f" retry {_retries + 1}/2"
-                                    f" ({'→CPU' if _task.get('_force_cpu') else 'same'}):"
+                                    f" retry {_retries + 1}/2{_device_note}:"
                                     f" {_re}")
                                 _async_relic_q.put((
                                     _task.get("iteration", 0) * 10000
@@ -7422,16 +7425,24 @@ class RelicBotApp(tk.Tk):
                                 self.after(0, lambda s=_sto: (
                                     self._overlay.update(stored=s)
                                     if self._overlay and self._overlay._win else None))
-                            try:
-                                result = relic_analyzer.analyze(
-                                    img, criteria,
-                                    crop_left=relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
-                                    crop_top=relic_analyzer._PREVIEW_CROP_TOP_FRAC,
-                                    relic_type=self.relic_type_var.get(),
-                                )
-                            except Exception as _ae:
-                                self._log(f"  ERROR analyzing relic {_relic_num}: {_ae}")
-                                result = None
+                            for _sync_attempt in range(3):
+                                try:
+                                    result = relic_analyzer.analyze(
+                                        img, criteria,
+                                        crop_left=relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
+                                        crop_top=relic_analyzer._PREVIEW_CROP_TOP_FRAC,
+                                        relic_type=self.relic_type_var.get(),
+                                    )
+                                    break  # success
+                                except Exception as _ae:
+                                    if _sync_attempt < 2:
+                                        self._log(
+                                            f"  Relic {_relic_num} analysis retry"
+                                            f" {_sync_attempt + 1}/2: {_ae}")
+                                    else:
+                                        self._log(f"  ERROR analyzing relic {_relic_num}"
+                                                  f" after 3 attempts: {_ae}")
+                                        result = None
                             self._ov_stored_count = max(0, self._ov_stored_count - 1)
                             if self._overlay:
                                 _sto = self._ov_stored_count
