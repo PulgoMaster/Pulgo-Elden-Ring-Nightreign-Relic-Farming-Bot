@@ -2241,32 +2241,36 @@ class RelicBotApp(tk.Tk):
         # no recorded sequence needed.  See _run_iteration_phases.
 
     def _stash_mode_data(self, mode: str):
-        """Save current UI criteria/curses/exclusions into per-mode storage."""
+        """Save current UI criteria/curses/exclusions into per-mode storage.
+
+        Uses deep copy via JSON round-trip to ensure the two modes never
+        share object references.  Each mode's data is fully independent.
+        """
+        import json
         state = self.relic_builder.get_state()
-        self._mode_data[mode] = {
+        # Deep copy via JSON to guarantee no shared references between modes
+        self._mode_data[mode] = json.loads(json.dumps({
             "criteria":           state,
             "blocked_curses":     list(self._blocked_curses_list),
             "excluded_passives":  list(self._excluded_passives_list),
-        }
-        # Defensive: log if stashing would overwrite the OTHER mode's data
-        other = "normal" if mode == "night" else "night"
-        if other in self._mode_data:
-            other_crit = self._mode_data[other].get("criteria", {})
-            if other_crit == state and state.get("pool", {}).get("entries"):
-                self._log(f"  WARNING: stash({mode}) has same criteria as {other} — possible overwrite")
+        }))
 
     def _restore_mode_data(self, mode: str):
-        """Load per-mode criteria/curses/exclusions into the UI."""
+        """Load per-mode criteria/curses/exclusions into the UI.
+
+        Always clears UI first, then populates from stored data.
+        If mode has no stored data, UI is reset to blank defaults.
+        """
         md = self._mode_data.get(mode, {})
-        # Criteria
+        # Criteria — set_state always clears first (even with empty dict)
         self.relic_builder.set_state(md.get("criteria", {}))
-        # Blocked curses
+        # Blocked curses — clear then repopulate
         self._curse_clear()
         for item in md.get("blocked_curses", []):
             if item and item not in self._blocked_curses_list:
                 self._blocked_curses_list.append(item)
                 self._blocked_curses_lb.insert("end", item)
-        # Excluded passives
+        # Excluded passives — clear then repopulate
         self._excl_clear()
         for item in md.get("excluded_passives", []):
             if item and item not in self._excluded_passives_list:
@@ -2471,14 +2475,11 @@ class RelicBotApp(tk.Tk):
         Machine config (paths, batch settings, overlay, hotkeys, GPU) lives in
         relicbot_config.json and is NOT saved per-profile.
         """
+        import json
         rtype = self.relic_type_var.get()
-        # Stash current UI into the active mode. The non-active mode's data
-        # should already be in _mode_data from the last mode switch.
+        # Stash current UI into the active mode's storage.
+        # The non-active mode's data is untouched (already in _mode_data).
         self._stash_mode_data(rtype)
-        # Defensive: verify both modes have data (not just the active one)
-        other = "normal" if rtype == "night" else "night"
-        if not self._mode_data.get(other, {}).get("criteria"):
-            self._log(f"  NOTE: {other} mode has no criteria — profile will save it as empty.")
         return {
             "relic_type": self.relic_type_var.get(),
             "mode_data": {m: {k: list(v) if isinstance(v, list) else v
@@ -2590,15 +2591,19 @@ class RelicBotApp(tk.Tk):
         # assigned to the profile's relic_type mode (other mode starts blank).
         _rtype = self.relic_type_var.get()
         if "mode_data" in data:
-            # New format — load both modes, apply migration
+            # New format — load both modes independently, apply migration.
+            # Each mode gets its own deep-copied data — no shared references.
+            import json as _json
             for _m in ("normal", "night"):
                 _md = data["mode_data"].get(_m, {})
                 _crit = _md.get("criteria", {})
-                self._mode_data[_m] = {
+                _built = {
                     "criteria":          self._migrate_criteria(_crit) if _crit else {},
                     "blocked_curses":    list(_md.get("blocked_curses", [])),
                     "excluded_passives": [self._migrate_passive(p) for p in _md.get("excluded_passives", []) if p],
                 }
+                # Deep copy to guarantee independence between modes
+                self._mode_data[_m] = _json.loads(_json.dumps(_built))
         else:
             # Old format — assign to the mode the profile was saved with
             _old_curses = data.get("blocked_curses", [])
