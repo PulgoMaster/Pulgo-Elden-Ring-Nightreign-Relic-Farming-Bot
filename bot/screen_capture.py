@@ -45,6 +45,34 @@ def capture(region: Optional[Tuple[int, int, int, int]] = None) -> bytes:
     return buf.getvalue()
 
 
+def compare_crop(img_bytes: bytes,
+                  left_frac: float = 0.25, top_frac: float = 0.15,
+                  right_frac: float = 0.75, bot_frac: float = 0.35,
+                  thumb_size: tuple = (80, 40)):
+    """Return a tiny numpy array of the top icon-row area for fast comparison."""
+    try:
+        import numpy as np
+        img = Image.open(io.BytesIO(img_bytes))
+        w, h = img.size
+        crop = img.crop((int(w * left_frac), int(h * top_frac),
+                         int(w * right_frac), int(h * bot_frac)))
+        crop = crop.resize(thumb_size, Image.NEAREST)
+        return np.array(crop, dtype=np.int16)
+    except Exception:
+        return None
+
+
+def crops_differ(crop_a, crop_b, threshold: float = 2.0) -> bool:
+    """True if two compare_crop arrays are meaningfully different."""
+    if crop_a is None or crop_b is None:
+        return True  # assume different if either failed
+    try:
+        import numpy as np
+        return float(np.mean(np.abs(crop_a - crop_b))) > threshold
+    except Exception:
+        return True
+
+
 def is_black_frame(image_bytes: bytes, threshold: int = 15, dark_ratio: float = 0.95) -> bool:
     """Check if a captured frame is mostly black (monitor off / sleep).
 

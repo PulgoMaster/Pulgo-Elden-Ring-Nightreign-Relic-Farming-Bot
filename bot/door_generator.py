@@ -458,6 +458,57 @@ def generate_smart_doors(relic_type: str = "night") -> list[tuple[frozenset, str
             for sp in _skill_candidates:
                 _add([_NIGHT_INVADER, sp], "smart:night_invader_skill")
 
+    # ── Rule 7: Same-class passive doubles ──────────────────────────── #
+    # "Improved X Attack Power" + "Improved Attack Power with 3+ Xs Equipped"
+    # Explicit mapping avoids substring false positives (e.g. Greatsword matching
+    # Curved Greatswords, Hammer matching Great Hammers).
+    _CLASS_TO_3X_KEYWORD = {
+        "Dagger": "Daggers", "Thrusting Sword": "Thrusting Swords",
+        "Heavy Thrusting Sword": "Heavy Thrusting Swords",
+        "Straight Sword": "Straight Swords", "Greatsword": "Greatswords",
+        "Colossal Sword": "Colossal Swords", "Curved Sword": "Curved Swords",
+        "Curved Greatsword": "Curved Greatswords", "Katana": "Katana",
+        "Twinblade": "Twinblades", "Axe": "Axes", "Greataxe": "Greataxes",
+        "Hammer": "Hammers", "Flail": "Flails", "Great Hammer": "Great Hammers",
+        "Colossal Weapon": "Colossal Weapons", "Spear": "Spears",
+        "Great Spear": "Great Spears", "Halberd": "Halberds",
+        "Reaper": "Reapers", "Whip": "Whips", "Fist": "Fists",
+        "Claw": "Claws", "Bow": "Bows",
+    }
+    for wclass, attack_p in WEAPON_CLASS_TO_ATTACK_PASSIVE.items():
+        plural = _CLASS_TO_3X_KEYWORD.get(wclass)
+        if not plural:
+            continue
+        _3x_name = f"Improved Attack Power with 3+ {plural} Equipped"
+        if _3x_name in pool:
+            _add([attack_p, _3x_name], "smart:same_class_double")
+
+    # ── Rule 8: High-tier singles (+4 passives, Deep only) ───────────── #
+    if relic_type == "night":
+        for p in pool:
+            if "+4" in p:
+                _add([p], "smart:high_tier_single")
+
+    # ── Rule 9: Stat pairs for hybrid scaling ────────────────────────── #
+    from database.passive_groups import (
+        GROUP_STRENGTH, GROUP_DEXTERITY, GROUP_INTELLIGENCE,
+        GROUP_FAITH, GROUP_ARCANE,
+    )
+    _STAT_GROUPS = {
+        "STR": GROUP_STRENGTH, "DEX": GROUP_DEXTERITY,
+        "INT": GROUP_INTELLIGENCE, "FAI": GROUP_FAITH,
+        "ARC": GROUP_ARCANE,
+    }
+    _HYBRID_PAIRS = [
+        ("STR", "DEX"), ("STR", "INT"), ("STR", "FAI"),
+        ("DEX", "INT"), ("DEX", "FAI"), ("DEX", "ARC"),
+        ("INT", "FAI"),
+    ]
+    for stat_a, stat_b in _HYBRID_PAIRS:
+        for pa in _STAT_GROUPS[stat_a]:
+            for pb in _STAT_GROUPS[stat_b]:
+                _add([pa, pb], f"smart:stat_pair_{stat_a}_{stat_b}")
+
     # Sort largest first, deduplicate
     doors.sort(key=lambda d: len(d[0]), reverse=True)
     return doors

@@ -167,6 +167,8 @@ _SKILL_WEAPON_TYPES: dict[str, list[str]] = {
     "Troll's Roar":         ["Colossal Sword", "Colossal Weapon", "Great Hammer", "Greataxe"],
     "Unsheathe":            ["Katana"],
     "Vow of the Indomitable": ["Greatshield", "Medium Shield", "Small Shield"],
+    "Waterfowl Dance":      ["Katana"],
+    "Bloodhound's Finesse": ["Curved Greatsword"],
 }
 
 # Spell school booster passives (school name → passive)

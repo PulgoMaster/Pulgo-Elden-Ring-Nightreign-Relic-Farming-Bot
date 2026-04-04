@@ -7763,7 +7763,12 @@ class RelicBotApp(tk.Tk):
                         f"{_batch_size} relic(s)…", "#006600")
                     _t_p2_start = time.perf_counter()
 
-                    for _slot in range(_batch_size):
+                    _p2_confirmed = 0
+                    _p2_prev_crop = None
+                    _p2_retries   = 0
+                    _P2_MAX_RETRIES = 3
+
+                    while _p2_confirmed < _batch_size:
                         if not self.bot_running or self._reset_iter_requested:
                             if _exclude_buy_phase:
                                 self._set_ocr_throttle(False)
@@ -7772,13 +7777,9 @@ class RelicBotApp(tk.Tk):
                             return relic_results
 
                         # Advance RIGHT for every slot after the first.
-                        # Use a direct tap rather than replaying the recorded sequence —
-                        # the recording has a ~0.914 s pre-press idle gap that adds no
-                        # value in automation. The settle after RIGHT is kept and scaled
-                        # so the preview transition completes before capture.
-                        if _slot > 0:
+                        if _p2_confirmed > 0:
                             self.player.tap("Key.right", hold=0.05)
-                            _p2_advance_settle = (0.25 if _lpm else 0.15) * max(1.0, self._perf_gap_mult)
+                            _p2_advance_settle = 0.20 * max(1.0, self._perf_gap_mult)
                             time.sleep(_p2_advance_settle)
                             if not self.bot_running or self._reset_iter_requested:
                                 if _exclude_buy_phase:
@@ -7799,7 +7800,7 @@ class RelicBotApp(tk.Tk):
                             ) if ov._win else None)
                         self.after(0, self._flash_capture)
 
-                        if _slot == 0 and _settle_img is not None:
+                        if _p2_confirmed == 0 and _settle_img is not None:
                             # Reuse the settle-check capture — no extra screenshot
                             img    = _settle_img
                             result = _settle_result
@@ -7810,6 +7811,30 @@ class RelicBotApp(tk.Tk):
                                 self._log(f"  ERROR capturing relic {_relic_num}: {_ce}")
                                 img = None
                             result = None
+
+                        # Duplicate detection: compare crop of current vs previous
+                        # capture. If identical, the RIGHT input was dropped — retry.
+                        if _p2_confirmed > 0 and img is not None and _p2_prev_crop is not None:
+                            _p2_cur_crop = screen_capture.compare_crop(img)
+                            if _p2_cur_crop is not None and not screen_capture.crops_differ(
+                                    _p2_prev_crop, _p2_cur_crop):
+                                _p2_retries += 1
+                                if _p2_retries < _P2_MAX_RETRIES:
+                                    self._log(
+                                        f"  Relic advance retry {_p2_retries}/"
+                                        f"{_P2_MAX_RETRIES} — input dropped, re-pressing RIGHT")
+                                    continue
+                                else:
+                                    self._log(
+                                        f"  Relic advance failed after {_P2_MAX_RETRIES}"
+                                        f" retries — accepting duplicate")
+                                    _p2_retries = 0
+                                    _p2_prev_crop = _p2_cur_crop
+                            else:
+                                _p2_retries = 0
+                                _p2_prev_crop = _p2_cur_crop
+                        elif img is not None:
+                            _p2_prev_crop = screen_capture.compare_crop(img)
 
                         # Backlog capture-only mode: save image bytes without analysing.
                         # capture_only=True with no async_iter_meta means pure backlog
@@ -7825,6 +7850,7 @@ class RelicBotApp(tk.Tk):
                                         self._overlay.update(stored=s)
                                         if self._overlay and self._overlay._win else None))
                             _relics_scanned += 1
+                            _p2_confirmed += 1
                             continue
 
                         # Async mode: ALL slots go straight to the worker queue —
@@ -7864,6 +7890,7 @@ class RelicBotApp(tk.Tk):
                                         self._overlay.update(stored=s)
                                         if self._overlay and self._overlay._win else None))
                             _relics_scanned += 1
+                            _p2_confirmed += 1
                             continue   # skip inline processing for this slot
 
                         # Normal (non-async) mode: analyze inline if not already done.
@@ -7905,7 +7932,9 @@ class RelicBotApp(tk.Tk):
                         if result is not None:
                             self._log_result(result)
 
-                            # Smart Analyze
+                            # Smart Analyze — detect smart hit (flag only, counters in single-pass below)
+                            _is_smart_s = False
+                            _smart_reasons_s = []
                             if (self._smart_analyze_var.get()
                                     and self._smart_doors
                                     and not result.get("match", False)):
@@ -7919,15 +7948,15 @@ class RelicBotApp(tk.Tk):
                                     _name_sa  = (_r0_sa.get("name", "Unknown")
                                                  if isinstance(_r0_sa, dict) else "Unknown")
                                     _sm, _smp, _ = _check_smart(_pass_sa, self._smart_doors)
-                                    _smart_reasons = []
                                     if _sm:
                                         _relic_set = set(_pass_sa)
                                         for _sd_p, _sd_l in self._smart_doors:
                                             if _sd_p <= _relic_set:
-                                                _smart_reasons.append(
+                                                _smart_reasons_s.append(
                                                     f"{_sd_l}: {' + '.join(sorted(_sd_p))}")
                                                 break
-                                    if _smart_reasons and iter_dir and img:
+                                        _is_smart_s = bool(_smart_reasons_s)
+                                    if _is_smart_s and iter_dir and img:
                                         _smart_dir = os.path.join(
                                             os.path.dirname(iter_dir), "Smart Analyze Hits")
                                         os.makedirs(_smart_dir, exist_ok=True)
@@ -7947,22 +7976,13 @@ class RelicBotApp(tk.Tk):
                                                     + "".join(f"  + {p}\n" for p in _pass_sa)
                                                     + "".join(f"  ✗ {c}  (curse)\n" for c in _curse_sa)
                                                     + "  Smart rules:\n"
-                                                    + "".join(f"    • {r}\n" for r in _smart_reasons)
+                                                    + "".join(f"    • {r}\n" for r in _smart_reasons_s)
                                                     + "\n")
                                             self._log(
                                                 f"  SMART HIT FOUND — Relic {_relic_num} — "
-                                                f"{'; '.join(_smart_reasons)}", overlay=True)
+                                                f"{'; '.join(_smart_reasons_s)}", overlay=True)
                                         except Exception:
                                             pass
-                                        self._ov_smart_hits += 1
-                                        # Smart hit is not a dud — correct the dud counter
-                                        self._ov_duds    = max(0, self._ov_duds - 1)
-                                        self._ov_at_duds = max(0, self._ov_at_duds - 1)
-                                        if self._overlay:
-                                            _sh = self._ov_smart_hits
-                                            self.after(0, lambda _sh=_sh:
-                                                       self._overlay.update(smart_hits=_sh)
-                                                       if self._overlay and self._overlay._win else None)
                                 except Exception:
                                     pass
 
@@ -7995,89 +8015,99 @@ class RelicBotApp(tk.Tk):
                             result["_screenshot_file"] = _saved_fname
                             result["_relic_index"]     = _relic_num
 
-                            if live_log_path:
-                                try:
-                                    _relics_f   = result.get("relics_found", [])
-                                    _r0f        = _relics_f[0] if _relics_f else {}
-                                    _rname_f    = (_r0f.get("name", "Unknown")
-                                                   if isinstance(_r0f, dict) else str(_r0f))
-                                    _pass_f     = (_r0f.get("passives", [])
-                                                   if isinstance(_r0f, dict) else [])
-                                    _status_f   = "MATCH" if result.get("match") else "no match"
-                                    _line_f     = (f"  Relic {_relic_num:02d}: [{_status_f}] "
-                                                   f"{_rname_f}  | {', '.join(_pass_f) or '—'}")
-                                    if _saved_fname:
-                                        _line_f += f"  → {_saved_fname}"
-                                    with open(live_log_path, "a", encoding="utf-8") as _f:
-                                        _f.write(_line_f + "\n")
-                                except Exception:
-                                    pass
-
                             relic_results.append(result)
 
                             # In async mode, slot 0 is processed inline but must
                             # also be added to the iter state so _finalize_async_iter_state
                             # sees it alongside the async slot 1+ results.
-                            if _p2_async and iteration and _slot == 0:
+                            if _p2_async and iteration and _p2_confirmed == 0:
                                 with self._async_state_lock:
                                     _s0_istate = self._async_iter_state.get(iteration)
                                     if _s0_istate is not None:
                                         _s0_istate["results"].append((-1, result))
 
-                            # Overlay tier counters
-                            _r_g3, _r_g2, _r_dud = self._count_relic_tiers([result], hit_min)
-                            # Check exclusion — excluded relics don't inflate hit counters
-                            _is_excl = False
-                            if _r_g3 > 0 or _r_g2 > 0:
+                            # ── Single-pass category (matches async path) ──── #
+                            _is_match_s = result.get("match", False)
+                            _n_mp_s = len(result.get("matched_passives", []))
+                            _near_misses_s = result.get("near_misses", [])
+                            _best_nm_s = max(
+                                (nm.get("matching_passive_count",
+                                        len(nm.get("matching_passives", [])))
+                                 for nm in _near_misses_s), default=0)
+
+                            _is_excl_s = False
+                            if _is_match_s:
                                 _excl_p  = self._get_excluded_passives()
                                 _excl_i  = self._get_explicitly_included_passives()
-                                _is_excl = (
+                                _is_excl_s = (
                                     self._is_passive_excluded(result, _excl_p, _excl_i)
                                     or self._is_curse_blocked(result, self._get_blocked_curses()))
-                            # Log using original tiers (before exclusion adjustment)
-                            if _r_g3 > 0:
-                                if _is_excl:
-                                    self._log(
-                                        f"  EXCLUDED HIT FOUND — Batch {iteration} · Relic {_relic_num}"
-                                        f" — 3/3 match but has excluded passive.")
-                                else:
-                                    self._log(
-                                        f"★★★ GOD ROLL FOUND!  Batch {iteration} · "
-                                        f"Relic {_relic_num} — 3/3")
-                                    _write_match_entry(iteration, _relic_num,
-                                                       "★★★ GOD ROLL (3/3)", result)
-                            elif _r_g2 > 0:
-                                if _is_excl:
-                                    self._log(
-                                        f"  EXCLUDED HIT FOUND — Batch {iteration} · Relic {_relic_num}"
-                                        f" — 2/3 match but has excluded passive.")
-                                else:
-                                    self._log(
-                                        f"★★ HIT FOUND!  Batch {iteration} · "
-                                        f"Relic {_relic_num} — 2/3")
-                                    _write_match_entry(iteration, _relic_num,
-                                                       "★★  HIT (2/3)", result)
-                            # Adjust counters: excluded relics count as duds
-                            if _is_excl:
-                                _r_dud += _r_g3 + _r_g2
-                                _r_g3 = _r_g2 = 0
-                            self._ov_hits_33      += _r_g3
-                            self._ov_at_33        += _r_g3
-                            self._ov_hits_23      += _r_g2
-                            self._ov_at_23        += _r_g2
-                            self._ov_duds         += _r_dud
-                            self._ov_at_duds      += _r_dud
-                            self._ov_total_relics += _r_g3 + _r_g2 + _r_dud
+
+                            if _is_match_s and not _is_excl_s and _n_mp_s >= 3:
+                                _cat_s = "GOD_ROLL"
+                            elif _is_match_s and not _is_excl_s and _n_mp_s >= 1:
+                                _cat_s = "HIT"
+                            elif not _is_match_s and _best_nm_s >= 2:
+                                _cat_s = "NEAR_MISS"
+                            elif _is_smart_s:
+                                _cat_s = "SMART"
+                            elif _is_match_s and _is_excl_s:
+                                _cat_s = "EXCLUDED"
+                            else:
+                                _cat_s = "DUD"
+                            result["_category"] = _cat_s
+
+                            # Log
+                            if _cat_s == "GOD_ROLL":
+                                self._log(
+                                    f"★★★ GOD ROLL FOUND!  Batch {iteration} · "
+                                    f"Relic {_relic_num} — 3/3")
+                                _write_match_entry(iteration, _relic_num,
+                                                   "★★★ GOD ROLL (3/3)", result)
+                            elif _cat_s == "HIT":
+                                self._log(
+                                    f"★★ HIT FOUND!  Batch {iteration} · "
+                                    f"Relic {_relic_num} — {_n_mp_s}/3")
+                                _write_match_entry(iteration, _relic_num,
+                                                   f"★★  HIT ({_n_mp_s}/3)", result)
+                            elif _cat_s == "EXCLUDED":
+                                self._log(
+                                    f"  EXCLUDED HIT FOUND — Batch {iteration} · Relic {_relic_num}"
+                                    f" — {_n_mp_s}/3 match but has excluded passive.")
+
+                            # Single counter increment
+                            _c_g3 = _c_g2 = _c_dud = 0
+                            if _cat_s == "GOD_ROLL":
+                                _c_g3 = 1
+                            elif _cat_s == "HIT":
+                                _c_g2 = 1
+                            elif _cat_s == "NEAR_MISS":
+                                self._ov_near_miss_hits += 1
+                            elif _cat_s == "SMART":
+                                self._ov_smart_hits += 1
+                            elif _cat_s == "EXCLUDED":
+                                _c_dud = 1
+                                self._ov_excl_hits += 1
+                            else:
+                                _c_dud = 1
+
+                            self._ov_hits_33      += _c_g3
+                            self._ov_at_33        += _c_g3
+                            self._ov_hits_23      += _c_g2
+                            self._ov_at_23        += _c_g2
+                            self._ov_duds         += _c_dud
+                            self._ov_at_duds      += _c_dud
+                            self._ov_total_relics += 1
                             if iteration:
                                 with self._iter_contrib_lock:
                                     c = self._iter_contributions.setdefault(iteration, {})
-                                    c["at_33"]        = c.get("at_33",        0) + _r_g3
-                                    c["at_23"]        = c.get("at_23",        0) + _r_g2
-                                    c["at_duds"]      = c.get("at_duds",      0) + _r_dud
-                                    c["hits_33"]      = c.get("hits_33",      0) + _r_g3
-                                    c["hits_23"]      = c.get("hits_23",      0) + _r_g2
-                                    c["duds"]         = c.get("duds",         0) + _r_dud
-                                    c["total_relics"] = c.get("total_relics", 0) + _r_g3 + _r_g2 + _r_dud
+                                    c["hits_33"]      = c.get("hits_33",      0) + _c_g3
+                                    c["hits_23"]      = c.get("hits_23",      0) + _c_g2
+                                    c["duds"]         = c.get("duds",         0) + _c_dud
+                                    c["at_33"]        = c.get("at_33",        0) + _c_g3
+                                    c["at_23"]        = c.get("at_23",        0) + _c_g2
+                                    c["at_duds"]      = c.get("at_duds",      0) + _c_dud
+                                    c["total_relics"] = c.get("total_relics", 0) + 1
                             if self._overlay:
                                 ov = self._overlay
                                 h33, h23, dds = self._ov_hits_33, self._ov_hits_23, self._ov_duds
@@ -8090,7 +8120,32 @@ class RelicBotApp(tk.Tk):
                                                      stored=0, analyzed=tot)
                                            if ov._win else None)
 
+                            # Live log (after category is determined)
+                            if live_log_path:
+                                try:
+                                    _relics_f   = result.get("relics_found", [])
+                                    _r0f        = _relics_f[0] if _relics_f else {}
+                                    _rname_f    = (_r0f.get("name", "Unknown")
+                                                   if isinstance(_r0f, dict) else str(_r0f))
+                                    _pass_f     = (_r0f.get("passives", [])
+                                                   if isinstance(_r0f, dict) else [])
+                                    _status_map_f = {
+                                        "GOD_ROLL": "GOD ROLL", "HIT": "HIT",
+                                        "NEAR_MISS": "NEAR MISS", "SMART": "SMART HIT",
+                                        "EXCLUDED": "EXCLUDED", "DUD": "no match",
+                                    }
+                                    _status_f = _status_map_f.get(_cat_s, "no match")
+                                    _line_f     = (f"  Relic {_relic_num:02d}: [{_status_f}] "
+                                                   f"{_rname_f}  | {', '.join(_pass_f) or '—'}")
+                                    if _saved_fname:
+                                        _line_f += f"  → {_saved_fname}"
+                                    with open(live_log_path, "a", encoding="utf-8") as _f:
+                                        _f.write(_line_f + "\n")
+                                except Exception:
+                                    pass
+
                         _relics_scanned += 1
+                        _p2_confirmed += 1
 
                     if self._diag:
                         self._diag.phase_end(
