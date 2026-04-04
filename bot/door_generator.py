@@ -319,9 +319,18 @@ def generate_smart_doors(relic_type: str = "night") -> list[tuple[frozenset, str
     doors: list[tuple[frozenset, str]] = []
     seen: set[frozenset] = set()
 
+    from database.passive_groups import are_compatible as _compat
+
     def _add(passives: list[str], label: str):
         fs = frozenset(passives)
         if fs not in seen and all(p in pool for p in passives):
+            # Reject doors with incompatible passives (same compat group
+            # or tier variants of the same passive).
+            _plist = list(fs)
+            for _i in range(len(_plist)):
+                for _j in range(_i + 1, len(_plist)):
+                    if not _compat(_plist[_i], _plist[_j]):
+                        return
             seen.add(fs)
             doors.append((fs, label))
 
@@ -333,6 +342,7 @@ def generate_smart_doors(relic_type: str = "night") -> list[tuple[frozenset, str
         INCANTATION_SCHOOL_PASSIVE, SORCERY_SCHOOL_PASSIVE,
         INCANTATION_SCHOOLS, SORCERY_SCHOOLS,
         PASSIVE_CATEGORY, SPECIFIC_AFFINITY_ELEMENT,
+        WEAPON_CLASS_TO_DORMANT_POWER,
     )
 
     # Also build school synergy doors from school passives + element passives
@@ -384,6 +394,13 @@ def generate_smart_doors(relic_type: str = "night") -> list[tuple[frozenset, str
                     for sp in _found:
                         pool_members.append(sp)
 
+        # Dormant catalyst (Sacred Seals for incantations, Staves for sorceries)
+        _dormant_cat = (WEAPON_CLASS_TO_DORMANT_POWER.get("Sacred Seal", "")
+                        if is_incant
+                        else WEAPON_CLASS_TO_DORMANT_POWER.get("Glintstone Staff", ""))
+        if _dormant_cat and _dormant_cat in pool:
+            pool_members.append(_dormant_cat)
+
         # Generate all 2-combinations: school_passive + any pool member
         for member in pool_members:
             if member != school_p:
@@ -394,6 +411,52 @@ def generate_smart_doors(relic_type: str = "night") -> list[tuple[frozenset, str
             for m2 in pool_members[i + 1:]:
                 if m1 != m2:
                     _add([m1, m2], "smart:school_synergy")
+
+        # 3-passive SMART GOD ROLL doors: school_passive + any 2 pool members
+        for i, m1 in enumerate(pool_members):
+            for m2 in pool_members[i + 1:]:
+                if m1 != school_p and m2 != school_p and m1 != m2:
+                    _add([school_p, m1, m2], "smart:school_synergy_3")
+
+        # Also: any 3 from pool_members (without school_p)
+        for i in range(len(pool_members)):
+            for j in range(i + 1, len(pool_members)):
+                for k in range(j + 1, len(pool_members)):
+                    _add([pool_members[i], pool_members[j], pool_members[k]],
+                         "smart:school_synergy_3")
+
+    # ── 3-passive doors: starting spell + school passive + damage booster ── #
+    # Normal mode only.  If 2 of 3 passives present → SMART HIT.
+    # If all 3 present → SMART GOD ROLL.
+    if relic_type != "night":
+        for school_p in all_school_passives:
+            is_incant = school_p in INCANTATION_SCHOOL_PASSIVE
+            school_name = (INCANTATION_SCHOOL_PASSIVE.get(school_p) if is_incant
+                           else SORCERY_SCHOOL_PASSIVE.get(school_p))
+            schools_dict = INCANTATION_SCHOOLS if is_incant else SORCERY_SCHOOLS
+            affinities = schools_dict.get(school_name, [])
+            primary = affinities[0] if affinities else None
+
+            # Find starting spells for this school
+            for spell, sp_school in _STARTING_SPELL_SCHOOL.items():
+                if sp_school != school_p:
+                    continue
+                spell_type = _STARTING_SPELL_TYPE[spell]
+                _keyword = f"{spell_type} to {spell}"
+                _found = [p for p in pool if _keyword in p]
+                for starting_passive in _found:
+                    # 3-door: starting_spell + school_passive + damage tier
+                    if primary:
+                        for tier in _element_tiers(primary, relic_type):
+                            _add([starting_passive, school_p, tier],
+                                 "smart:school_synergy_3")
+                    else:
+                        for tier in _physical_tiers(relic_type):
+                            _add([starting_passive, school_p, tier],
+                                 "smart:school_synergy_3")
+                    # 3-door: starting_spell + school_passive + Night Invader
+                    _add([starting_passive, school_p, _NIGHT_INVADER],
+                         "smart:school_synergy_3")
 
     # Starting spells with no school passive (e.g., Magma Shot, Wrath of Gold)
     # Normal mode only — starting armament passives don't exist in Deep.
@@ -483,31 +546,7 @@ def generate_smart_doors(relic_type: str = "night") -> list[tuple[frozenset, str
         if _3x_name in pool:
             _add([attack_p, _3x_name], "smart:same_class_double")
 
-    # ── Rule 8: High-tier singles (+4 passives, Deep only) ───────────── #
-    if relic_type == "night":
-        for p in pool:
-            if "+4" in p:
-                _add([p], "smart:high_tier_single")
 
-    # ── Rule 9: Stat pairs for hybrid scaling ────────────────────────── #
-    from database.passive_groups import (
-        GROUP_STRENGTH, GROUP_DEXTERITY, GROUP_INTELLIGENCE,
-        GROUP_FAITH, GROUP_ARCANE,
-    )
-    _STAT_GROUPS = {
-        "STR": GROUP_STRENGTH, "DEX": GROUP_DEXTERITY,
-        "INT": GROUP_INTELLIGENCE, "FAI": GROUP_FAITH,
-        "ARC": GROUP_ARCANE,
-    }
-    _HYBRID_PAIRS = [
-        ("STR", "DEX"), ("STR", "INT"), ("STR", "FAI"),
-        ("DEX", "INT"), ("DEX", "FAI"), ("DEX", "ARC"),
-        ("INT", "FAI"),
-    ]
-    for stat_a, stat_b in _HYBRID_PAIRS:
-        for pa in _STAT_GROUPS[stat_a]:
-            for pb in _STAT_GROUPS[stat_b]:
-                _add([pa, pb], f"smart:stat_pair_{stat_a}_{stat_b}")
 
     # Sort largest first, deduplicate
     doors.sort(key=lambda d: len(d[0]), reverse=True)

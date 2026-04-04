@@ -12,6 +12,7 @@ Two modes:
 import ctypes
 import datetime
 import gc
+import io
 import json
 import math
 import os
@@ -1014,6 +1015,7 @@ class RelicBotApp(tk.Tk):
         self._ov_near_miss_hits: int = 0
         self._good_iterations: set = set()      # iteration numbers with any notable result
         self._smart_iterations: set = set()     # iterations with smart hits (for folder prefix)
+        self._smart_gr_iterations: set = set() # iterations with smart god rolls (3-passive smart door)
         self._nearmiss_iterations: set = set()  # iterations with near misses (for folder prefix)
 
         # ── Excluded Passives ─────────────────────────────────────── #
@@ -3654,6 +3656,7 @@ class RelicBotApp(tk.Tk):
         self._ov_near_miss_hits = 0
         self._good_iterations = set()
         self._smart_iterations = set()
+        self._smart_gr_iterations = set()
         self._nearmiss_iterations = set()
         # Show/hide conditional overlay rows based on active settings
         if self._overlay:
@@ -5120,6 +5123,8 @@ class RelicBotApp(tk.Tk):
                 tier_name = f"HIT {iteration:03d}"
             elif iteration in self._nearmiss_iterations:
                 tier_name = f"NEAR MISS {iteration:03d}"
+            elif iteration in self._smart_gr_iterations:
+                tier_name = f"SMART GOD ROLL {iteration:03d}"
             elif iteration in self._smart_iterations:
                 tier_name = f"SMART {iteration:03d}"
             elif _excl_match_results:
@@ -5157,12 +5162,14 @@ class RelicBotApp(tk.Tk):
                         _ah_passives = _ah_rf.get("passives", []) if isinstance(_ah_rf, dict) else []
                         _ah_curses   = _ah_rf.get("curses",   []) if isinstance(_ah_rf, dict) else []
                         _ah_mp = _ah_rr.get("matched_passives", [])
-                        if "MATCH" in _ah_fname:
+                        if "EXCLUDED" in _ah_fname:
+                            continue
+                        elif _ah_fname.endswith("_MATCH.jpg"):
                             _dest_dir = os.path.join(run_dir, "All God Rolls")
                             _summary_name = "god_rolls_summary.txt"
                             _header = "God Rolls Found"
                             _label = "GOD ROLL"
-                        elif "HIT" in _ah_fname:
+                        elif _ah_fname.endswith("_HIT.jpg"):
                             _dest_dir = os.path.join(run_dir, "All Hits")
                             _summary_name = "hits_summary.txt"
                             _header = "Hits Found"
@@ -6193,6 +6200,7 @@ class RelicBotApp(tk.Tk):
         # Check Smart Analyze (for non-matching, non-excluded relics only)
         _smart_reasons: list[str] = []
         _is_smart = False
+        _smart_door_size = 0
         if (not is_match
                 and self._smart_analyze_var.get()
                 and self._smart_doors
@@ -6209,6 +6217,7 @@ class RelicBotApp(tk.Tk):
                         if _sd_p <= _relic_set:
                             _smart_reasons.append(
                                 f"{_sd_l}: {' + '.join(sorted(_sd_p))}")
+                            _smart_door_size = len(_sd_p)
                             break
                     _is_smart = True
             except Exception:
@@ -6224,12 +6233,15 @@ class RelicBotApp(tk.Tk):
         elif not is_match and _best_nm >= 2:
             _category = "NEAR_MISS"
             tag = "NEARMISS"
+        elif _is_smart and _smart_door_size >= 3:
+            _category = "SMART_GOD_ROLL"
+            tag = "SMART_GOD_ROLL"
         elif _is_smart:
             _category = "SMART"
             tag = "SMART"
         elif is_match and _is_excluded:
             _category = "EXCLUDED"
-            tag = "HIT" if _n_mp < 3 else "MATCH"  # keep tag for screenshot
+            tag = "EXCLUDED_HIT" if _n_mp < 3 else "EXCLUDED_MATCH"
         else:
             _category = "DUD"
             tag = ""
@@ -6239,15 +6251,20 @@ class RelicBotApp(tk.Tk):
 
         # ── Smart Analyze folder (if smart hit) ──────────────────────── #
         _smart_file_handled = False
-        if _category == "SMART" and iter_dir:
+        if _category in ("SMART", "SMART_GOD_ROLL") and iter_dir:
             try:
                 smart_dir = os.path.join(run_dir, "Smart Analyze Hits")
                 os.makedirs(smart_dir, exist_ok=True)
                 sa_fname = f"Iter_{iteration}_Relic_{step_i + 1}_SMART.jpg"
                 if _backlog_img_path and os.path.exists(_backlog_img_path):
                     import shutil as _shutil
-                    _shutil.move(_backlog_img_path,
-                                 os.path.join(smart_dir, sa_fname))
+                    if _category == "SMART_GOD_ROLL":
+                        # Copy — keep original for iteration folder save
+                        _shutil.copy2(_backlog_img_path,
+                                      os.path.join(smart_dir, sa_fname))
+                    else:
+                        _shutil.move(_backlog_img_path,
+                                     os.path.join(smart_dir, sa_fname))
                     _smart_file_handled = True
                 elif img_bytes:
                     with open(os.path.join(smart_dir, sa_fname), "wb") as _f:
@@ -6269,8 +6286,9 @@ class RelicBotApp(tk.Tk):
                         + "  Smart rules:\n"
                         + "".join(f"    \u2022 {r}\n" for r in _smart_reasons)
                         + "\n")
+                _smart_label = "SMART GOD ROLL" if _category == "SMART_GOD_ROLL" else "SMART HIT"
                 self._log(
-                    f"  SMART HIT FOUND \u2014 Relic {step_i + 1} \u2014 {'; '.join(_smart_reasons)}",
+                    f"  {_smart_label} FOUND \u2014 Relic {step_i + 1} \u2014 {'; '.join(_smart_reasons)}",
                     overlay=True)
             except Exception:
                 pass
@@ -6326,7 +6344,8 @@ class RelicBotApp(tk.Tk):
                 passives_found = r0.get("passives", []) if isinstance(r0, dict) else []
                 _status_map = {
                     "GOD_ROLL": "GOD ROLL", "HIT": "HIT", "NEAR_MISS": "NEAR MISS",
-                    "SMART": "SMART HIT", "EXCLUDED": "EXCLUDED", "DUD": "no match",
+                    "SMART_GOD_ROLL": "SMART GOD ROLL", "SMART": "SMART HIT",
+                    "EXCLUDED": "EXCLUDED", "DUD": "no match",
                 }
                 status = _status_map.get(_category, "no match")
                 line = (f"  Relic {step_i + 1:02d}: [{status}] {rname}"
@@ -6358,9 +6377,11 @@ class RelicBotApp(tk.Tk):
                 self._ov_near_miss_hits += 1
                 self._nearmiss_iterations.add(iteration)
                 self._good_iterations.add(iteration)
-            elif _category == "SMART":
+            elif _category in ("SMART", "SMART_GOD_ROLL"):
                 self._ov_smart_hits += 1
                 self._smart_iterations.add(iteration)
+                if _category == "SMART_GOD_ROLL":
+                    self._smart_gr_iterations.add(iteration)
                 self._good_iterations.add(iteration)
             elif _category == "EXCLUDED":
                 _c_dud = 1
@@ -6395,7 +6416,7 @@ class RelicBotApp(tk.Tk):
                 sto = self._ov_stored_count
                 _ov_kwargs = dict(
                     at_33=at33, at_23=at23, at_duds=atd, stored=sto, analyzed=tot)
-                if _category == "SMART":
+                if _category in ("SMART", "SMART_GOD_ROLL"):
                     _ov_kwargs["smart_hits"] = self._ov_smart_hits
                 if _category == "EXCLUDED":
                     _ov_kwargs["excl_hits"] = self._ov_excl_hits
@@ -6797,6 +6818,8 @@ class RelicBotApp(tk.Tk):
             tier_name = f"HIT {iteration:03d}"
         elif iteration in self._nearmiss_iterations:
             tier_name = f"NEAR MISS {iteration:03d}"
+        elif iteration in self._smart_gr_iterations:
+            tier_name = f"SMART GOD ROLL {iteration:03d}"
         elif iteration in self._smart_iterations:
             tier_name = f"SMART {iteration:03d}"
         elif _excl_match_results:
@@ -6840,13 +6863,16 @@ class RelicBotApp(tk.Tk):
                     _ah_mp = _ah_rr.get("matched_passives", [])
 
                     # Determine destination folder based on tag
-                    if "MATCH" in _ah_fname:
+                    # EXCLUDED_MATCH / EXCLUDED_HIT must NOT end up here
+                    if "EXCLUDED" in _ah_fname:
+                        continue
+                    elif _ah_fname.endswith("_MATCH.jpg"):
                         # GOD ROLL (3/3)
                         _dest_dir = os.path.join(run_dir, "All God Rolls")
                         _summary_name = "god_rolls_summary.txt"
                         _header = "God Rolls Found"
                         _label = "GOD ROLL"
-                    elif "HIT" in _ah_fname:
+                    elif _ah_fname.endswith("_HIT.jpg"):
                         # HIT (1/3 or 2/3)
                         _dest_dir = os.path.join(run_dir, "All Hits")
                         _summary_name = "hits_summary.txt"
@@ -7007,6 +7033,23 @@ class RelicBotApp(tk.Tk):
                 self.after(0, lambda _nmh=_nmh:
                            self._overlay.update(near_miss_hits=_nmh)
                            if self._overlay._win else None)
+
+        # ── Copy SMART screenshots into iteration folder ─────────────── #
+        # SMART screenshots are saved to centralized "Smart Analyze Hits/"
+        # during analysis but never placed in the iteration folder.
+        if iteration in self._smart_iterations and final_iter_dir:
+            try:
+                _sa_dir = os.path.join(run_dir, "Smart Analyze Hits")
+                if os.path.isdir(_sa_dir):
+                    _sa_prefix = f"Iter_{iteration}_Relic_"
+                    for _sa_f in os.listdir(_sa_dir):
+                        if _sa_f.startswith(_sa_prefix) and _sa_f.endswith(".jpg"):
+                            _sa_src = os.path.join(_sa_dir, _sa_f)
+                            _sa_dst = os.path.join(final_iter_dir, _sa_f)
+                            if not os.path.exists(_sa_dst):
+                                shutil.copy2(_sa_src, _sa_dst)
+            except Exception:
+                pass
 
         with lock:
             dir_map[iteration] = final_iter_dir
@@ -7503,6 +7546,7 @@ class RelicBotApp(tk.Tk):
                     _settle_insufficient_murk = False  # buy failed — no murk left
                     _settle_deadline = time.monotonic() + 15.0
                     _sc = 0
+                    time.sleep(0.25)  # let the relic screen fully render before first capture
                     while time.monotonic() < _settle_deadline:
                         if not self.bot_running or self._reset_iter_requested:
                             self._set_ocr_throttle(False)
@@ -7804,20 +7848,41 @@ class RelicBotApp(tk.Tk):
                             # Reuse the settle-check capture — no extra screenshot
                             img    = _settle_img
                             result = _settle_result
+                            # Extract compare crops from settle image (JPEG decode)
+                            try:
+                                import numpy as np
+                                from PIL import Image as _PILImg
+                                _si = _PILImg.open(io.BytesIO(img))
+                                _sw, _sh = _si.size
+                                _p2_prev_crop = (
+                                    np.array(_si.crop((
+                                        int(_sw * 0.25), int(_sh * 0.15),
+                                        int(_sw * 0.75), int(_sh * 0.35)
+                                    )), dtype=np.int16),
+                                    np.array(_si.crop((
+                                        int(_sw * 0.30), int(_sh * 0.53),
+                                        int(_sw * 0.70), int(_sh * 0.75)
+                                    )), dtype=np.int16),
+                                )
+                            except Exception:
+                                _p2_prev_crop = None
                         else:
                             try:
-                                img = screen_capture.capture(region)
+                                _cap_result = screen_capture.capture(
+                                    region, with_compare_crop=True)
+                                img, _p2_cur_crop = _cap_result
                             except Exception as _ce:
                                 self._log(f"  ERROR capturing relic {_relic_num}: {_ce}")
                                 img = None
+                                _p2_cur_crop = None
                             result = None
 
-                        # Duplicate detection: compare crop of current vs previous
-                        # capture. If identical, the RIGHT input was dropped — retry.
-                        if _p2_confirmed > 0 and img is not None and _p2_prev_crop is not None:
-                            _p2_cur_crop = screen_capture.compare_crop(img)
-                            if _p2_cur_crop is not None and not screen_capture.crops_differ(
-                                    _p2_prev_crop, _p2_cur_crop):
+                            # Duplicate detection: compare description crop vs previous.
+                            # If identical, RIGHT input was dropped — retry.
+                            if (_p2_prev_crop is not None
+                                    and _p2_cur_crop is not None
+                                    and not screen_capture.crops_differ(
+                                        _p2_prev_crop, _p2_cur_crop)):
                                 _p2_retries += 1
                                 if _p2_retries < _P2_MAX_RETRIES:
                                     self._log(
@@ -7829,12 +7894,8 @@ class RelicBotApp(tk.Tk):
                                         f"  Relic advance failed after {_P2_MAX_RETRIES}"
                                         f" retries — accepting duplicate")
                                     _p2_retries = 0
-                                    _p2_prev_crop = _p2_cur_crop
-                            else:
-                                _p2_retries = 0
-                                _p2_prev_crop = _p2_cur_crop
-                        elif img is not None:
-                            _p2_prev_crop = screen_capture.compare_crop(img)
+                            _p2_prev_crop = _p2_cur_crop
+                            _p2_retries = 0
 
                         # Backlog capture-only mode: save image bytes without analysing.
                         # capture_only=True with no async_iter_meta means pure backlog
@@ -7934,6 +7995,7 @@ class RelicBotApp(tk.Tk):
 
                             # Smart Analyze — detect smart hit (flag only, counters in single-pass below)
                             _is_smart_s = False
+                            _smart_door_size_s = 0
                             _smart_reasons_s = []
                             if (self._smart_analyze_var.get()
                                     and self._smart_doors
@@ -7954,6 +8016,7 @@ class RelicBotApp(tk.Tk):
                                             if _sd_p <= _relic_set:
                                                 _smart_reasons_s.append(
                                                     f"{_sd_l}: {' + '.join(sorted(_sd_p))}")
+                                                _smart_door_size_s = len(_sd_p)
                                                 break
                                         _is_smart_s = bool(_smart_reasons_s)
                                     if _is_smart_s and iter_dir and img:
@@ -7978,41 +8041,16 @@ class RelicBotApp(tk.Tk):
                                                     + "  Smart rules:\n"
                                                     + "".join(f"    • {r}\n" for r in _smart_reasons_s)
                                                     + "\n")
+                                            _smart_label_s = "SMART GOD ROLL" if _smart_door_size_s >= 3 else "SMART HIT"
                                             self._log(
-                                                f"  SMART HIT FOUND — Relic {_relic_num} — "
+                                                f"  {_smart_label_s} FOUND — Relic {_relic_num} — "
                                                 f"{'; '.join(_smart_reasons_s)}", overlay=True)
                                         except Exception:
                                             pass
                                 except Exception:
                                     pass
 
-                            # Save screenshot if match or near-miss
-                            _saved_fname = ""
-                            if iter_dir and img:
-                                _is_match = result.get("match", False)
-                                _best_nm  = max(
-                                    (nm.get("matching_passive_count",
-                                            len(nm.get("matching_passives", [])))
-                                     for nm in result.get("near_misses", [])),
-                                    default=0)
-                                if _is_match:
-                                    _n_mp = len(result.get("matched_passives", []))
-                                    _tag = "MATCH" if _n_mp >= 3 else "HIT"
-                                elif _best_nm >= 2:
-                                    _tag = "NEARMISS"
-                                else:
-                                    _tag = ""
-                                if _tag:
-                                    _saved_fname = f"Iter_{iteration}_Relic_{_relic_num}_{_tag}.jpg"
-                                    try:
-                                        with open(os.path.join(iter_dir, _saved_fname), "wb") as _f:
-                                            _f.write(img)
-                                    except Exception as _se:
-                                        self._log(f"  WARNING: could not save screenshot: {_se}")
-                                        _saved_fname = ""
-
                             result["_image_bytes"]     = None
-                            result["_screenshot_file"] = _saved_fname
                             result["_relic_index"]     = _relic_num
 
                             relic_results.append(result)
@@ -8049,6 +8087,8 @@ class RelicBotApp(tk.Tk):
                                 _cat_s = "HIT"
                             elif not _is_match_s and _best_nm_s >= 2:
                                 _cat_s = "NEAR_MISS"
+                            elif _is_smart_s and _smart_door_size_s >= 3:
+                                _cat_s = "SMART_GOD_ROLL"
                             elif _is_smart_s:
                                 _cat_s = "SMART"
                             elif _is_match_s and _is_excl_s:
@@ -8056,6 +8096,25 @@ class RelicBotApp(tk.Tk):
                             else:
                                 _cat_s = "DUD"
                             result["_category"] = _cat_s
+
+                            # Save screenshot based on category
+                            _saved_fname = ""
+                            _tag_map = {
+                                "GOD_ROLL": "MATCH", "HIT": "HIT",
+                                "NEAR_MISS": "NEARMISS",
+                                "SMART_GOD_ROLL": "SMART_GOD_ROLL",
+                                "EXCLUDED": f"EXCLUDED_{'MATCH' if _n_mp_s >= 3 else 'HIT'}",
+                            }
+                            _tag_s = _tag_map.get(_cat_s, "")
+                            if _tag_s and iter_dir and img:
+                                _saved_fname = f"Iter_{iteration}_Relic_{_relic_num}_{_tag_s}.jpg"
+                                try:
+                                    with open(os.path.join(iter_dir, _saved_fname), "wb") as _f:
+                                        _f.write(img)
+                                except Exception as _se:
+                                    self._log(f"  WARNING: could not save screenshot: {_se}")
+                                    _saved_fname = ""
+                            result["_screenshot_file"] = _saved_fname
 
                             # Log
                             if _cat_s == "GOD_ROLL":
@@ -8079,15 +8138,24 @@ class RelicBotApp(tk.Tk):
                             _c_g3 = _c_g2 = _c_dud = 0
                             if _cat_s == "GOD_ROLL":
                                 _c_g3 = 1
+                                self._good_iterations.add(iteration)
                             elif _cat_s == "HIT":
                                 _c_g2 = 1
+                                self._good_iterations.add(iteration)
                             elif _cat_s == "NEAR_MISS":
                                 self._ov_near_miss_hits += 1
-                            elif _cat_s == "SMART":
+                                self._nearmiss_iterations.add(iteration)
+                                self._good_iterations.add(iteration)
+                            elif _cat_s in ("SMART", "SMART_GOD_ROLL"):
                                 self._ov_smart_hits += 1
+                                self._smart_iterations.add(iteration)
+                                if _cat_s == "SMART_GOD_ROLL":
+                                    self._smart_gr_iterations.add(iteration)
+                                self._good_iterations.add(iteration)
                             elif _cat_s == "EXCLUDED":
                                 _c_dud = 1
                                 self._ov_excl_hits += 1
+                                self._good_iterations.add(iteration)
                             else:
                                 _c_dud = 1
 
@@ -8131,7 +8199,9 @@ class RelicBotApp(tk.Tk):
                                                    if isinstance(_r0f, dict) else [])
                                     _status_map_f = {
                                         "GOD_ROLL": "GOD ROLL", "HIT": "HIT",
-                                        "NEAR_MISS": "NEAR MISS", "SMART": "SMART HIT",
+                                        "NEAR_MISS": "NEAR MISS",
+                                        "SMART_GOD_ROLL": "SMART GOD ROLL",
+                                        "SMART": "SMART HIT",
                                         "EXCLUDED": "EXCLUDED", "DUD": "no match",
                                     }
                                     _status_f = _status_map_f.get(_cat_s, "no match")
