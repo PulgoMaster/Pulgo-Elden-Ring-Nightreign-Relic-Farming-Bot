@@ -332,11 +332,27 @@ class BotOverlay:
         tk.Label(row_top, textvariable=sv("best_hits", "N/A"), bg=_BG, fg=_FG,
                  font=("Consolas", 8)).pack(side="left")
 
-        row_smart = tk.Frame(bb, bg=_BG)
-        row_smart.pack(fill="x", pady=1)
-        tk.Label(row_smart, text="Smart Hits:", bg=_BG, fg="#9966ff",
+        self._row_nearmiss = tk.Frame(bb, bg=_BG)
+        self._row_nearmiss.pack(fill="x", pady=1)
+        tk.Label(self._row_nearmiss, text="Near Miss:", bg=_BG, fg="#cccc00",
                  font=("Consolas", 8, "bold"), width=11, anchor="w").pack(side="left")
-        tk.Label(row_smart, textvariable=sv("smart_hits", "0"), bg=_BG, fg=_FG,
+        tk.Label(self._row_nearmiss, textvariable=sv("near_miss_hits", "0"), bg=_BG, fg=_FG,
+                 font=("Consolas", 8)).pack(side="left")
+
+        self._row_smart = tk.Frame(bb, bg=_BG)
+        self._row_smart.pack(fill="x", pady=1)
+        self._row_smart.pack_forget()  # hidden by default — shown when Smart Analyze is on
+        tk.Label(self._row_smart, text="Smart Hits:", bg=_BG, fg="#9966ff",
+                 font=("Consolas", 8, "bold"), width=11, anchor="w").pack(side="left")
+        tk.Label(self._row_smart, textvariable=sv("smart_hits", "0"), bg=_BG, fg=_FG,
+                 font=("Consolas", 8)).pack(side="left")
+
+        self._row_excl = tk.Frame(bb, bg=_BG)
+        self._row_excl.pack(fill="x", pady=1)
+        self._row_excl.pack_forget()  # hidden by default — shown when Excluded Hits is on
+        tk.Label(self._row_excl, text="Excl. Hits:", bg=_BG, fg="#cc6600",
+                 font=("Consolas", 8, "bold"), width=11, anchor="w").pack(side="left")
+        tk.Label(self._row_excl, textvariable=sv("excl_hits", "0"), bg=_BG, fg=_FG,
                  font=("Consolas", 8)).pack(side="left")
 
         # ── Overflow hits section ────────────────────────────────────── #
@@ -622,6 +638,26 @@ class BotOverlay:
                 threading.Event().wait(2.0)
 
         threading.Thread(target=_poll, daemon=True).start()
+
+    # ── Conditional row visibility ────────────────────────────────── #
+
+    def set_smart_visible(self, visible: bool) -> None:
+        """Show/hide the Smart Hits row based on whether Smart Analyze is enabled."""
+        if not self._win:
+            return
+        if visible:
+            self._row_smart.pack(fill="x", pady=1)
+        else:
+            self._row_smart.pack_forget()
+
+    def set_excl_visible(self, visible: bool) -> None:
+        """Show/hide the Excluded Hits row based on whether the feature is enabled."""
+        if not self._win:
+            return
+        if visible:
+            self._row_excl.pack(fill="x", pady=1)
+        else:
+            self._row_excl.pack_forget()
 
     # ── Data updates ───────────────────────────────────────────────── #
 

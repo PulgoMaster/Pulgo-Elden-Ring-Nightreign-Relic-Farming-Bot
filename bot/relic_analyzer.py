@@ -366,6 +366,7 @@ def analyze(
     crop_left: float = _CROP_LEFT_FRAC,
     crop_top: float  = _CROP_TOP_FRAC,
     relic_type: str  = "",
+    doors: "list[tuple] | None" = None,
 ) -> dict:
     """
     Analyze a relic screenshot and check if it matches the criteria.
@@ -379,6 +380,9 @@ def analyze(
         crop_top:     Fraction of image height to skip from the top (default:
                       sell-screen crop).  Pass _PREVIEW_CROP_TOP_FRAC for the
                       bazaar post-buy preview screen.
+        doors:        Pre-computed door list from door_generator.generate_doors().
+                      If provided, uses fast door matching instead of runtime
+                      criteria evaluation.
 
     Returns:
         dict with keys: relics_found, match, matched_relic, matched_passives,
@@ -438,97 +442,175 @@ def analyze(
     # main pass since curse text can still be readable at conf < 0.35.
     _low_conf_tokens: list[tuple] = []
 
+    # ── Phase 1: Collect all tokens with full bbox data ──────────────────── #
+    # Line clustering tolerance scales with image height so it works at any
+    # resolution.  At the reference 1000px-wide image (post-downscale), 15px
+    # is correct.  Scale proportionally for smaller or larger images.
+    _img_h, _img_w = img.shape[:2]
+    _LINE_CLUSTER_PX = max(8, int(15 * _img_w / 1000))
+
+    _raw_tokens: list[dict] = []
     for bbox, text, conf in results:
         _text = text.strip()
-        # Compute bbox top-left Y (relative to crop, for ordering context)
-        _y = int(min(pt[1] for pt in bbox)) if bbox else -1
+        if not bbox:
+            continue
+        # Compute spatial metrics from bbox corners
+        _y_top = int(min(pt[1] for pt in bbox))
+        _y_bot = int(max(pt[1] for pt in bbox))
+        _y_center = (_y_top + _y_bot) // 2
+        _x_left = int(min(pt[0] for pt in bbox))
+        _raw_tokens.append({
+            "text": _text, "conf": conf,
+            "y_top": _y_top, "y_bot": _y_bot, "y_center": _y_center,
+            "x_left": _x_left,
+        })
 
-        if len(_text) < 3:
+    # ── Phase 2: Group tokens into lines by Y-center clustering ──────────── #
+    _raw_tokens.sort(key=lambda t: (t["y_center"], t["x_left"]))
+
+    _lines: list[list[dict]] = []
+    for tok in _raw_tokens:
+        placed = False
+        for line in _lines:
+            # Compare against the first token's Y-center (strict — no drift)
+            line_y = line[0]["y_center"]
+            if abs(tok["y_center"] - line_y) <= _LINE_CLUSTER_PX:
+                line.append(tok)
+                placed = True
+                break
+        if not placed:
+            _lines.append([tok])
+
+    # Sort each line left-to-right by X, then sort lines top-to-bottom
+    for line in _lines:
+        line.sort(key=lambda t: t["x_left"])
+    _lines.sort(key=lambda line: sum(t["y_center"] for t in line) // len(line))
+
+    # ── Phase 3: Reconstruct line text and match ─────────────────────────── #
+    for line in _lines:
+        # Build reconstructed line from all tokens on this line
+        line_text = " ".join(t["text"] for t in line).strip()
+        line_conf = min(t["conf"] for t in line) if line else 0
+        line_avg_conf = (sum(t["conf"] for t in line) / len(line)) if line else 0
+        line_y = sum(t["y_center"] for t in line) // len(line) if line else -1
+        _individual_texts = [t["text"] for t in line]
+
+        # Record individual tokens in diagnostics (will be updated with match results)
+        _line_dbg_indices = []
+        for t in line:
+            idx = len(_dbg_tokens)
+            _line_dbg_indices.append(idx)
             _dbg_tokens.append({
-                "text": _text, "conf": conf, "y": _y,
-                "status": "DROPPED",
-                "reason": "too_short",
+                "text": t["text"], "conf": t["conf"], "y": t["y_top"],
+                "status": "PENDING",
+                "reason": None,
                 "matched": None,
             })
+
+        # Skip very short reconstructed lines
+        if len(line_text) < 3:
+            for idx in _line_dbg_indices:
+                _dbg_tokens[idx]["status"] = "DROPPED"
+                _dbg_tokens[idx]["reason"] = "too_short"
             continue
 
-        if conf < 0.35:
-            # Low confidence — keep for curse-rescue pass below.
-            _low_conf_tokens.append((_text, conf, _y))
-            _dbg_tokens.append({
-                "text": _text, "conf": conf, "y": _y,
-                "status": "DROPPED",
-                "reason": "conf<0.35",
-                "matched": None,
-            })
+        # If the entire line is low confidence, defer to rescue pass
+        if line_avg_conf < 0.35:
+            for idx in _line_dbg_indices:
+                _dbg_tokens[idx]["status"] = "DROPPED"
+                _dbg_tokens[idx]["reason"] = "conf<0.35"
+            _low_conf_tokens.append((line_text, line_avg_conf, line_y))
             continue
 
-        # Try matching as a known passive first, then as a known curse.
-        # Curses render as light-blue text (smaller, below the passive line).
-        # Color-based classification is not used — matching against dedicated
-        # ALL_CURSES list is the reliable approach since confidence varies.
-        matched_passive = _match_passive(_text, ALL_PASSIVES_SORTED)
+        # Try matching the full reconstructed line first (best accuracy)
+        matched_passive = _match_passive(line_text, ALL_PASSIVES_SORTED)
         if matched_passive:
             if matched_passive not in passives:
                 passives.append(matched_passive)
-            _dbg_tokens.append({
-                "text": _text, "conf": conf, "y": _y,
-                "status": "PASSIVE",
-                "reason": None,
-                "matched": matched_passive,
-            })
-        else:
-            matched_curse = _match_passive(_text, ALL_CURSES)
-            if matched_curse:
-                if matched_curse not in curses:
-                    curses.append(matched_curse)
-                _dbg_tokens.append({
-                    "text": _text, "conf": conf, "y": _y,
-                    "status": "CURSE",
-                    "reason": None,
-                    "matched": matched_curse,
-                })
-            elif relic_name is None and conf > 0.55 \
-                    and _text and not _text[0].isdigit():
-                relic_name = _text
-                _dbg_tokens.append({
-                    "text": _text, "conf": conf, "y": _y,
-                    "status": "RELIC_NAME",
-                    "reason": None,
-                    "matched": _text,
-                })
-            else:
-                _dbg_tokens.append({
-                    "text": _text, "conf": conf, "y": _y,
-                    "status": "NO_MATCH",
-                    "reason": None,
-                    "matched": None,
-                })
+            for idx in _line_dbg_indices:
+                _dbg_tokens[idx]["status"] = "PASSIVE"
+                _dbg_tokens[idx]["reason"] = "line_reconstruct" if len(line) > 1 else None
+                _dbg_tokens[idx]["matched"] = matched_passive
+            continue
 
-    # ── Token-merge pass ─────────────────────────────────────────────────── #
-    # Long passive names (e.g. "Changes compatible armament's incantation
-    # to Lightning Spear at start of expedition") may be split by EasyOCR
-    # into 2+ tokens that individually don't match anything.  Merge
-    # adjacent unmatched tokens (sorted by Y position) and retry.
+        # Try matching as a curse
+        matched_curse = _match_passive(line_text, ALL_CURSES)
+        if matched_curse:
+            if matched_curse not in curses:
+                curses.append(matched_curse)
+            for idx in _line_dbg_indices:
+                _dbg_tokens[idx]["status"] = "CURSE"
+                _dbg_tokens[idx]["reason"] = "line_reconstruct" if len(line) > 1 else None
+                _dbg_tokens[idx]["matched"] = matched_curse
+            continue
+
+        # Try matching individual tokens if line didn't match as a whole
+        # (handles cases where a line contains unrelated fragments)
+        _any_individual = False
+        for ti, t in enumerate(line):
+            idx = _line_dbg_indices[ti]
+            if len(t["text"]) < 3:
+                _dbg_tokens[idx]["status"] = "DROPPED"
+                _dbg_tokens[idx]["reason"] = "too_short"
+                continue
+            if t["conf"] < 0.35:
+                _low_conf_tokens.append((t["text"], t["conf"], t["y_top"]))
+                _dbg_tokens[idx]["status"] = "DROPPED"
+                _dbg_tokens[idx]["reason"] = "conf<0.35"
+                continue
+            mp = _match_passive(t["text"], ALL_PASSIVES_SORTED)
+            if mp:
+                if mp not in passives:
+                    passives.append(mp)
+                _dbg_tokens[idx]["status"] = "PASSIVE"
+                _dbg_tokens[idx]["matched"] = mp
+                _any_individual = True
+                continue
+            mc = _match_passive(t["text"], ALL_CURSES)
+            if mc:
+                if mc not in curses:
+                    curses.append(mc)
+                _dbg_tokens[idx]["status"] = "CURSE"
+                _dbg_tokens[idx]["matched"] = mc
+                _any_individual = True
+                continue
+
+        # Relic name detection: first unmatched high-confidence line
+        if not _any_individual and relic_name is None and line_conf > 0.55:
+            _first = line_text
+            if _first and not _first[0].isdigit():
+                relic_name = _first
+                for idx in _line_dbg_indices:
+                    if _dbg_tokens[idx]["status"] == "PENDING":
+                        _dbg_tokens[idx]["status"] = "RELIC_NAME"
+                        _dbg_tokens[idx]["matched"] = _first
+
+        # Mark remaining PENDING tokens as NO_MATCH
+        for idx in _line_dbg_indices:
+            if _dbg_tokens[idx]["status"] == "PENDING":
+                _dbg_tokens[idx]["status"] = "NO_MATCH"
+
+    # ── Legacy token-merge fallback ──────────────────────────────────────── #
+    # Catch any remaining unmatched tokens that the line reconstruction missed
+    # (e.g. tokens that ended up in separate lines due to Y-center variance).
     _unmatched = [(d["text"], d["y"]) for d in _dbg_tokens
                   if d["status"] == "NO_MATCH" and len(d["text"]) >= 5]
-    _unmatched.sort(key=lambda x: x[1])   # sort by Y so adjacent lines merge
+    _unmatched.sort(key=lambda x: x[1])
     for i in range(len(_unmatched)):
-        for j in range(i + 1, min(i + 3, len(_unmatched))):  # try 2-3 token combos
+        for j in range(i + 1, min(i + 4, len(_unmatched))):  # try 2-4 token combos
             merged = _unmatched[i][0] + " " + " ".join(
                 _unmatched[k][0] for k in range(i + 1, j + 1))
             merged_match = _match_passive(merged, ALL_PASSIVES_SORTED, cutoff=0.80)
             if merged_match and merged_match not in passives:
                 passives.append(merged_match)
-                # Mark the merged tokens in diagnostics
                 for k in range(i, j + 1):
                     for _dt in _dbg_tokens:
                         if _dt["text"] == _unmatched[k][0] and _dt["status"] == "NO_MATCH":
                             _dt["status"] = "PASSIVE"
-                            _dt["reason"] = "token_merge"
+                            _dt["reason"] = "token_merge_fallback"
                             _dt["matched"] = merged_match
                             break
-                break  # stop extending this merge, move to next starting token
+                break
 
     # ── Passive-rescue pass ──────────────────────────────────────────────── #
     # Retry low-confidence tokens against ALL_PASSIVES_SORTED.  Motivated by
@@ -599,7 +681,11 @@ def analyze(
                 "_ocr_tokens": _dbg_tokens,
             }
 
-    match, matched_passives, near_misses = _check_criteria(passives, criteria)
+    if doors is not None:
+        from bot.door_generator import check_doors
+        match, matched_passives, near_misses = check_doors(passives, doors)
+    else:
+        match, matched_passives, near_misses = _check_criteria(passives, criteria)
     # Patch near-miss records with the actual relic name (criteria checker
     # uses a placeholder because it doesn't receive the name).
     for _nm in near_misses:

@@ -90,25 +90,25 @@ def generate_readme(
     run_mode: str,
     run_limit,
     results: list,
-    hit_min: int = 2,
+    hit_min: int = 1,
     p_per_relic: float | None = None,
 ) -> None:
     """Write README.txt into output_dir summarising a completed batch run."""
     total = len(results)
 
     def _tier(r):
-        n = len(r.get("matched_passives", []))
-        if n > 0:
-            return n
-        near = r.get("near_misses", [])
-        if near:
-            return max(nm.get("matching_passive_count", 0) for nm in near)
-        return 0
+        """Tier from the best door the relic passed through. No near-miss promotion."""
+        if not r.get("match"):
+            return 0
+        return len(r.get("matched_passives", []))
+
+    def _has_near_miss(r):
+        return not r.get("match") and bool(r.get("near_misses"))
 
     god_rolls = [r for r in results if _tier(r) >= 3]
-    hits      = [r for r in results if _tier(r) == 2]
-    near_miss = [r for r in results if _tier(r) == 1]
-    garbage   = [r for r in results if _tier(r) == 0]
+    hits      = [r for r in results if 1 <= _tier(r) < 3]
+    near_miss = [r for r in results if _has_near_miss(r)]
+    garbage   = [r for r in results if _tier(r) == 0 and not _has_near_miss(r)]
 
     def _find_relic_num(r, name):
         """Return the 1-based position of `name` in relics_found, or None."""
@@ -119,11 +119,12 @@ def generate_readme(
 
     def _hit_detail_block(r, indent="  "):
         """Full detail block for a matched or near-miss relic.
-        Only marks passives with * when the matching count meets hit_min."""
+        Marks matched passives with * when the relic is a match."""
         out = []
         matched_name = r.get("matched_relic")
         matched_passives = set(r.get("matched_passives", []))
         match_count = len(matched_passives)
+        relic_num = r.get("matched_relic_index")
 
         # If no full match, use best near-miss
         if not matched_name:
@@ -136,8 +137,11 @@ def generate_readme(
                 matched_name = best.get("relic_name")
                 matched_passives = set(best.get("matching_passives", []))
                 match_count = best.get("matching_passive_count", len(matched_passives))
+                relic_num = None  # near-miss doesn't carry index
 
-        relic_num = _find_relic_num(r, matched_name)
+        # Fall back to name-based lookup if index not available
+        if relic_num is None:
+            relic_num = _find_relic_num(r, matched_name)
         num_str = f"Relic #{relic_num}" if relic_num else "Relic #?"
         out.append(f"{indent}{num_str}: {matched_name or 'Unknown'}")
 
@@ -145,15 +149,26 @@ def generate_readme(
         if rarity_str:
             out.append(f"{indent}  Rarity: {rarity_str}")
 
-        mark = match_count >= hit_min
-        for relic in r.get("relics_found", []):
-            if isinstance(relic, dict) and relic.get("name") == matched_name:
-                for p in relic.get("passives", []):
-                    marker = "* " if (mark and p in matched_passives) else "  "
-                    out.append(f"{indent}  {marker}{p}")
-                for c in relic.get("curses", []):
-                    out.append(f"{indent}  [CURSE] {c}")
-                break
+        # Find the correct relic by index first, fall back to name
+        target_relic = None
+        if r.get("matched_relic_index"):
+            relics = r.get("relics_found", [])
+            idx = r["matched_relic_index"] - 1  # 0-based
+            if 0 <= idx < len(relics) and isinstance(relics[idx], dict):
+                target_relic = relics[idx]
+        if target_relic is None:
+            for relic in r.get("relics_found", []):
+                if isinstance(relic, dict) and relic.get("name") == matched_name:
+                    target_relic = relic
+                    break
+
+        mark = match_count >= 1
+        if target_relic:
+            for p in target_relic.get("passives", []):
+                marker = "* " if (mark and p in matched_passives) else "  "
+                out.append(f"{indent}  {marker}{p}")
+            for c in target_relic.get("curses", []):
+                out.append(f"{indent}  [CURSE] {c}")
         return out
 
     def _all_relics_block(r):
@@ -240,36 +255,27 @@ def generate_readme(
         f.write("\n".join(lines))
 
 
-def write_iter_info(iter_dir: str, iteration: int, relic_results: list, hit_min: int = 2,
+def write_iter_info(iter_dir: str, iteration: int, relic_results: list, hit_min: int = 1,
                     p_per_relic: float | None = None) -> None:
     """Write info.txt inside an iteration folder.
     Uses per-relic results directly so the MATCH/NEAR MISS labels are always
     accurate regardless of whether multiple relics share the same OCR name."""
     lines = [f"Batch #{iteration:03d}", "=" * 40, ""]
 
-    # ── HITS FOUND section (relics with 2/3 or 3/3 match, always at top) ─ #
+    # ── HITS FOUND section (relics that passed a door, always at top) ──── #
     hit_entries = []
     for relic_num, rr in enumerate(relic_results, 1):
         relic = (rr.get("relics_found") or [{}])[0]
         if not isinstance(relic, dict):
             continue
+        if not rr.get("match"):
+            continue
         passives   = relic.get("passives", [])
-        is_match   = rr.get("match", False)
         matched_ps = set(rr.get("matched_passives", []))
-        nms        = rr.get("near_misses", [])
-        best_nm    = max(nms, key=lambda n: n.get("matching_passive_count", 0), default={})
-        best_nm_count = best_nm.get("matching_passive_count", 0)
-        best_nm_ps    = set(best_nm.get("matching_passives", []))
-
-        n_matched = len(matched_ps) if is_match else best_nm_count
-        mark_ps   = matched_ps if is_match and matched_ps else best_nm_ps
-
-        if n_matched >= 3:
-            hit_entries.append((relic_num, "3/3", relic.get("name", "Unknown"),
-                                passives, mark_ps))
-        elif n_matched >= hit_min:
-            hit_entries.append((relic_num, "2/3", relic.get("name", "Unknown"),
-                                passives, mark_ps))
+        n_matched  = len(matched_ps)
+        tier_label = "3/3" if n_matched >= 3 else f"{n_matched}/3"
+        hit_entries.append((relic_num, tier_label, relic.get("name", "Unknown"),
+                            passives, matched_ps))
 
     if hit_entries:
         lines.append("=" * 40)
@@ -277,7 +283,7 @@ def write_iter_info(iter_dir: str, iteration: int, relic_results: list, hit_min:
         lines.append("=" * 40)
         _rarity = _fmt_rarity(p_per_relic)
         for rn, tier, rname, passives, mark_ps in hit_entries:
-            lines.append(f"  ★ Relic #{rn} [{tier}]  {rname}")
+            lines.append(f"  \u2605 Relic #{rn} [{tier}]  {rname}")
             if _rarity:
                 lines.append(f"    Rarity: {_rarity}")
             for p in passives:
@@ -292,22 +298,21 @@ def write_iter_info(iter_dir: str, iteration: int, relic_results: list, hit_min:
         relic = (rr.get("relics_found") or [{}])[0]
         if not isinstance(relic, dict):
             continue
-        name    = relic.get("name", "Unknown")
+        name     = relic.get("name", "Unknown")
         passives = relic.get("passives", [])
         curses   = relic.get("curses", [])
 
-        is_match       = rr.get("match", False)
-        matched_ps     = set(rr.get("matched_passives", []))
-        nms            = rr.get("near_misses", [])
-        best_nm        = max(nms, key=lambda n: n.get("matching_passive_count", 0), default={})
-        best_nm_count  = best_nm.get("matching_passive_count", 0)
-        best_nm_ps     = set(best_nm.get("matching_passives", []))
+        is_match   = rr.get("match", False)
+        matched_ps = set(rr.get("matched_passives", []))
+        nms        = rr.get("near_misses", [])
+        best_nm    = max(nms, key=lambda n: n.get("matching_passive_count", 0), default={})
+        best_nm_ps = set(best_nm.get("matching_passives", []))
 
-        if is_match and len(matched_ps) >= hit_min:
+        if is_match:
             lines.append(f"* Relic #{relic_num}: {name}  <-- MATCH")
             mark_ps, mark = matched_ps, True
-        elif best_nm_count >= hit_min:
-            lines.append(f"* Relic #{relic_num}: {name}  <-- NEAR MISS")
+        elif best_nm_ps:
+            lines.append(f"  Relic #{relic_num}: {name}  <-- NEAR MISS")
             mark_ps, mark = best_nm_ps, True
         else:
             lines.append(f"  Relic #{relic_num}: {name}")
@@ -510,7 +515,7 @@ class RelicBotApp(tk.Tk):
         # under python.exe and iconbitmap has no effect on the taskbar icon.
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "PulgoMaster.RelicBot.v1.6.2"
+                "PulgoMaster.RelicBot.v1.6.3"
             )
         except Exception:
             pass
@@ -518,7 +523,7 @@ class RelicBotApp(tk.Tk):
         super().__init__()
         self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.6.2  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.6.3  |  Made by Pulgo")
         self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
@@ -642,6 +647,8 @@ class RelicBotApp(tk.Tk):
         self._mouse_blocker_cb     = None   # keep-alive for hook callback (prevent GC)
         self._mouse_blocker_thread = None   # daemon thread running hook message pump
         self._mouse_blocker_tid    = 0      # thread ID for PostThreadMessage to stop hook
+        self._doors: list = []        # pre-computed matching doors (set at run start)
+        self._smart_doors: list = []  # pre-computed Smart Analyze doors (set at run start)
         # Per-run counters (reset each start)
         self._ov_hits_33 = 0
         self._ov_hits_23 = 0
@@ -1003,6 +1010,11 @@ class RelicBotApp(tk.Tk):
         self._loading_profile = False
         self._smart_analyze_var = tk.BooleanVar(value=False)
         self._ov_smart_hits: int = 0
+        self._ov_excl_hits: int = 0
+        self._ov_near_miss_hits: int = 0
+        self._good_iterations: set = set()      # iteration numbers with any notable result
+        self._smart_iterations: set = set()     # iterations with smart hits (for folder prefix)
+        self._nearmiss_iterations: set = set()  # iterations with near misses (for folder prefix)
 
         # ── Excluded Passives ─────────────────────────────────────── #
         excl_frame = ttk.LabelFrame(
@@ -2601,22 +2613,46 @@ class RelicBotApp(tk.Tk):
 
     @staticmethod
     def _migrate_criteria(criteria: dict) -> dict:
-        """Apply passive name migration to a saved criteria dict."""
+        """Apply passive name migration to a saved criteria dict.
+
+        Handles both formats:
+          - Old flat format: top-level "entries", "passives", "pairings"
+          - New nested format: "exact"/"pool" sub-dicts with their own entries
+        """
         migrate = RelicBotApp._migrate_passive
-        if "entries" in criteria:
-            for e in criteria["entries"]:
-                if "accepted" in e:
-                    e["accepted"] = [migrate(p) for p in e["accepted"]]
-        if "passives" in criteria:
-            criteria["passives"] = [migrate(p) for p in criteria["passives"]]
-        if "pairings" in criteria:
-            for p in criteria["pairings"]:
-                if "left" in p:
-                    p["left"] = [migrate(n) for n in p["left"]]
-                if "right" in p:
-                    p["right"] = [migrate(n) for n in p["right"]]
-                if "pool" in p:
-                    p["pool"] = [migrate(n) for n in p["pool"]]
+
+        def _migrate_flat(d: dict) -> None:
+            """Migrate passives in a flat criteria dict (entries/passives/pairings at top)."""
+            if "entries" in d:
+                for e in d["entries"]:
+                    if "accepted" in e:
+                        e["accepted"] = [migrate(p) for p in e["accepted"]]
+            if "passives" in d:
+                d["passives"] = [migrate(p) for p in d["passives"]]
+            if "pairings" in d:
+                for p in d["pairings"]:
+                    if "left" in p:
+                        p["left"] = [migrate(n) for n in p["left"]]
+                    if "right" in p:
+                        p["right"] = [migrate(n) for n in p["right"]]
+                    if "pool" in p:
+                        p["pool"] = [migrate(n) for n in p["pool"]]
+            if "targets" in d:
+                for t in d["targets"]:
+                    if "slots" in t:
+                        t["slots"] = [migrate(s) if s else s for s in t["slots"]]
+                    if "passives" in t:
+                        t["passives"] = [migrate(p) for p in t["passives"]]
+
+        # New nested format: recurse into exact/pool sub-dicts
+        if "exact" in criteria:
+            _migrate_flat(criteria["exact"])
+        if "pool" in criteria:
+            _migrate_flat(criteria["pool"])
+
+        # Also handle flat format (old profiles or direct criteria dicts)
+        _migrate_flat(criteria)
+
         return criteria
 
     def _dict_to_profile(self, data: dict):
@@ -2647,34 +2683,48 @@ class RelicBotApp(tk.Tk):
         # Old profiles: flat "criteria", "blocked_curses", "excluded_passives"
         # assigned to the profile's relic_type mode (other mode starts blank).
         _rtype = self.relic_type_var.get()
-        if "mode_data" in data:
-            # New format — load both modes independently, apply migration.
-            # Each mode gets its own deep-copied data — no shared references.
-            import json as _json
-            for _m in ("normal", "night"):
-                _md = data["mode_data"].get(_m, {})
-                _crit = _md.get("criteria", {})
-                _built = {
-                    "criteria":          self._migrate_criteria(_crit) if _crit else {},
-                    "blocked_curses":    list(_md.get("blocked_curses", [])),
-                    "excluded_passives": [self._migrate_passive(p) for p in _md.get("excluded_passives", []) if p],
+        try:
+            if "mode_data" in data:
+                # New format — load both modes independently, apply migration.
+                # Each mode gets its own deep-copied data — no shared references.
+                import json as _json
+                for _m in ("normal", "night"):
+                    _md = data["mode_data"].get(_m, {})
+                    _crit = _md.get("criteria", {})
+                    _built = {
+                        "criteria":          self._migrate_criteria(_crit) if _crit else {},
+                        "blocked_curses":    list(_md.get("blocked_curses", [])),
+                        "excluded_passives": [self._migrate_passive(p) for p in _md.get("excluded_passives", []) if p],
+                    }
+                    # Deep copy to guarantee independence between modes
+                    self._mode_data[_m] = _json.loads(_json.dumps(_built))
+            else:
+                # Old format — assign criteria to BOTH modes so the user can
+                # see their entries in either mode and manually adjust.
+                _old_curses = data.get("blocked_curses", [])
+                if isinstance(_old_curses, str):
+                    _old_curses = [s.strip() for s in _old_curses.splitlines() if s.strip()]
+                _old_excl = [self._migrate_passive(p) for p in data.get("excluded_passives", []) if p]
+                _old_crit = self._migrate_criteria(data.get("criteria", {})) if data.get("criteria") else {}
+                _old_data = {
+                    "criteria":          _old_crit,
+                    "blocked_curses":    list(_old_curses),
+                    "excluded_passives": _old_excl,
                 }
-                # Deep copy to guarantee independence between modes
-                self._mode_data[_m] = _json.loads(_json.dumps(_built))
-        else:
-            # Old format — assign to the mode the profile was saved with
-            _old_curses = data.get("blocked_curses", [])
-            if isinstance(_old_curses, str):
-                _old_curses = [s.strip() for s in _old_curses.splitlines() if s.strip()]
-            _old_excl = [self._migrate_passive(p) for p in data.get("excluded_passives", []) if p]
-            _old_crit = self._migrate_criteria(data.get("criteria", {})) if data.get("criteria") else {}
-            self._mode_data[_rtype] = {
-                "criteria":          _old_crit,
-                "blocked_curses":    list(_old_curses),
-                "excluded_passives": _old_excl,
+                import json as _json
+                # Populate BOTH modes with the old data so nothing is lost
+                self._mode_data[_rtype] = _json.loads(_json.dumps(_old_data))
+                _other = "normal" if _rtype == "night" else "night"
+                self._mode_data[_other] = _json.loads(_json.dumps(_old_data))
+                self._log(
+                    f"  [Profile] Old format detected — criteria copied to both "
+                    f"Normal and Deep modes. Please review and adjust each mode.")
+        except Exception as _prof_err:
+            self._log(f"WARNING: Profile migration error: {_prof_err} — loading blank criteria.")
+            self._mode_data = {
+                "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+                "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
             }
-            _other = "normal" if _rtype == "night" else "night"
-            self._mode_data[_other] = {"criteria": {}, "blocked_curses": [], "excluded_passives": []}
         # Restore the active mode into the UI
         self._restore_mode_data(_rtype)
         self._save_exclusion_matches_var.set(data.get("save_exclusion_matches", False))
@@ -3600,6 +3650,18 @@ class RelicBotApp(tk.Tk):
         self._ov_at_23       = 0
         self._ov_at_duds     = 0
         self._ov_smart_hits  = 0
+        self._ov_excl_hits   = 0
+        self._ov_near_miss_hits = 0
+        self._good_iterations = set()
+        self._smart_iterations = set()
+        self._nearmiss_iterations = set()
+        # Show/hide conditional overlay rows based on active settings
+        if self._overlay:
+            _ov = self._overlay
+            self.after(0, lambda: _ov.set_smart_visible(self._smart_analyze_var.get())
+                       if _ov._win else None)
+            self.after(0, lambda: _ov.set_excl_visible(self._save_exclusion_matches_var.get())
+                       if _ov._win else None)
         self._best_33_iter          = None
         self._best_hits_iter        = None
         self._ov_total_relics       = 0
@@ -3678,15 +3740,28 @@ class RelicBotApp(tk.Tk):
         criteria = self.relic_builder.get_criteria_dict()
         criteria_summary = self.relic_builder.get_criteria_summary()
         criteria["allowed_colors"] = self._get_allowed_colors()
+        # Pre-compute matching doors from criteria for fast relic comparison.
+        from bot.door_generator import generate_doors, generate_smart_doors
+        rtype = self.relic_type_var.get()
+        self._doors = generate_doors(criteria, rtype)
+        self._log(f"  [Doors] {len(self._doors)} door(s) generated "
+                  f"({sum(1 for d in self._doors if len(d[0]) == 3)} x3/3, "
+                  f"{sum(1 for d in self._doors if len(d[0]) == 2)} x2/3, "
+                  f"{sum(1 for d in self._doors if len(d[0]) == 1)} x1/3)")
+        # Smart Analyze doors — only generated when the feature is enabled.
+        if self._smart_analyze_var.get():
+            self._smart_doors = generate_smart_doors(rtype)
+            self._log(f"  [Smart Analyze] {len(self._smart_doors)} synergy door(s) generated")
+        else:
+            self._smart_doors = []
         region = self._get_region()
         limit_type = self.batch_limit_type.get()
         limit_value = float(self.batch_limit_var.get())
         mode_desc = "loops"
         base_output = self.batch_output_var.get()
-        # Minimum passive count for a result to be labelled a "HIT" tier.
-        # If the user's criteria requires all 3 passives, 2/3 near-misses are
-        # not counted as hits and won't get a HIT folder or ★★ log message.
-        hit_min = self.relic_builder.get_min_hit_threshold()
+        # hit_min is no longer needed — per-door thresholds handle everything.
+        # A relic that passes any door is a HIT; tier = len(matched_passives).
+        hit_min = 1
 
         # The run folder is created lazily — only when the first iteration actually runs.
         # This prevents empty batch_run_* folders when the bot is stopped before any iteration.
@@ -4953,6 +5028,7 @@ class RelicBotApp(tk.Tk):
                 if _eligible else None
             )
             matched_relic = matched_result.get("matched_relic") if matched_result else None
+            matched_relic_index = matched_result.get("_relic_index") if matched_result else None
             matched_passives = matched_result.get("matched_passives", []) if matched_result else []
             matched_curses = matched_result.get("matched_relic_curses", []) if matched_result else []
             reason = "; ".join(r.get("reason", "") for r in relic_results if r.get("reason"))
@@ -4960,6 +5036,7 @@ class RelicBotApp(tk.Tk):
             combined = {
                 "match": any_match,
                 "matched_relic": matched_relic,
+                "matched_relic_index": matched_relic_index,
                 "matched_passives": matched_passives,
                 "matched_relic_curses": matched_curses,
                 "near_misses": all_near_misses,
@@ -4967,15 +5044,9 @@ class RelicBotApp(tk.Tk):
                 "reason": reason,
             }
 
-            # Effective tier: consider full matches AND near-misses with hit_min+ passives.
-            # hit_min is 2 normally, but 3 when the user requires ALL passives to match —
-            # in that case a 2/3 near-miss is not a HIT and won't get a folder rename.
+            # Tier is determined by the best door the relic passed through.
+            # Near misses are NOT promoted to hits — only match=True counts.
             num_matched = len(matched_passives)
-            if num_matched == 0 and all_near_misses:
-                num_matched = max(
-                    nm.get("matching_passive_count", len(nm.get("matching_passives", [])))
-                    for nm in all_near_misses
-                )
 
             # Screenshots already saved inside _run_iteration_phases as each relic was analyzed.
             screenshots = [rr.get("_screenshot_file", "") for rr in relic_results
@@ -5042,11 +5113,17 @@ class RelicBotApp(tk.Tk):
             except Exception as e:
                 self._log(f"WARNING: could not write info.txt: {e}")
 
-            # Rename folder based on effective tier
+            # Rename folder: GOD ROLL > HIT > NEAR MISS > SMART > EXCLUDED
             if num_matched >= 3:
                 tier_name = f"GOD ROLL {iteration:03d}"
-            elif num_matched >= hit_min:
+            elif num_matched >= 1:
                 tier_name = f"HIT {iteration:03d}"
+            elif iteration in self._nearmiss_iterations:
+                tier_name = f"NEAR MISS {iteration:03d}"
+            elif iteration in self._smart_iterations:
+                tier_name = f"SMART {iteration:03d}"
+            elif _excl_match_results:
+                tier_name = f"EXCLUDED {iteration:03d}"
             else:
                 tier_name = None
 
@@ -5060,15 +5137,18 @@ class RelicBotApp(tk.Tk):
                 except Exception as e:
                     self._log(f"WARNING: could not rename folder: {e}")
 
-            # ── All Hits folder ───────────────────────────────────────── #
-            if num_matched >= hit_min:
+            # ── All Hits + All God Rolls folders ─────────────────────── #
+            # Only non-excluded matches go here. Excluded relics go to Excluded Hits only.
+            if num_matched >= 1:
                 try:
-                    _all_hits_dir = os.path.join(run_dir, "All Hits")
-                    os.makedirs(_all_hits_dir, exist_ok=True)
-                    _hits_summary_path = os.path.join(_all_hits_dir, "hits_summary.txt")
                     for _ah_idx, _ah_rr in enumerate(relic_results):
                         _ah_fname = _ah_rr.get("_screenshot_file", "")
-                        if not (_ah_fname and ("HIT" in _ah_fname or "MATCH" in _ah_fname)):
+                        if not _ah_fname:
+                            continue
+                        # Skip excluded relics — they go to Excluded Hits, not here
+                        if (_ah_rr.get("match")
+                                and (self._is_passive_excluded(_ah_rr, excluded_passives, explicitly_included)
+                                     or self._is_curse_blocked(_ah_rr, blocked_curses))):
                             continue
                         _ah_src = os.path.join(iter_dir, _ah_fname)
                         if not os.path.exists(_ah_src):
@@ -5076,17 +5156,34 @@ class RelicBotApp(tk.Tk):
                         _ah_rf = (_ah_rr.get("relics_found") or [{}])[0]
                         _ah_passives = _ah_rf.get("passives", []) if isinstance(_ah_rf, dict) else []
                         _ah_curses   = _ah_rf.get("curses",   []) if isinstance(_ah_rf, dict) else []
-                        _ah_dst = os.path.join(_all_hits_dir, f"iter_{iteration:03d}_relic_{_ah_idx + 1:03d}.jpg")
+                        _ah_mp = _ah_rr.get("matched_passives", [])
+                        if "MATCH" in _ah_fname:
+                            _dest_dir = os.path.join(run_dir, "All God Rolls")
+                            _summary_name = "god_rolls_summary.txt"
+                            _header = "God Rolls Found"
+                            _label = "GOD ROLL"
+                        elif "HIT" in _ah_fname:
+                            _dest_dir = os.path.join(run_dir, "All Hits")
+                            _summary_name = "hits_summary.txt"
+                            _header = "Hits Found"
+                            _label = "HIT"
+                        else:
+                            continue
+                        os.makedirs(_dest_dir, exist_ok=True)
+                        _summary_path = os.path.join(_dest_dir, _summary_name)
+                        _ah_dst = os.path.join(
+                            _dest_dir, f"iter_{iteration:03d}_relic_{_ah_idx + 1:03d}.jpg")
                         shutil.copy2(_ah_src, _ah_dst)
-                        _write_header = not os.path.exists(_hits_summary_path)
-                        with open(_hits_summary_path, "a", encoding="utf-8") as _hf:
+                        _write_header = not os.path.exists(_summary_path)
+                        with open(_summary_path, "a", encoding="utf-8") as _hf:
                             if _write_header:
-                                _hf.write("Matches Found\n")
+                                _hf.write(f"{_header}\n")
                                 _hf.write("=" * 40 + "\n\n")
-                            _hf.write(f"Batch {iteration:03d}  Relic #{_ah_idx + 1:03d}\n")
+                            _hf.write(f"[{_label}]  Batch {iteration:03d}  Relic #{_ah_idx + 1:03d}\n")
                             _hf.write("  Passives:\n")
                             for _p in _ah_passives:
-                                _hf.write(f"    {_p}\n")
+                                _marker = "  * " if _p in set(_ah_mp) else "    "
+                                _hf.write(f"{_marker}{_p}\n")
                             if not _ah_passives:
                                 _hf.write("    (none)\n")
                             _hf.write("  Curses:\n")
@@ -5145,6 +5242,85 @@ class RelicBotApp(tk.Tk):
                 self._log(
                     f"  {len(_excl_match_results)} relic(s) matched criteria but had "
                     f"excluded passive(s) (opt-in folder disabled).")
+            # Update excluded hits overlay counter
+            if _excl_match_results:
+                self._ov_excl_hits += len(_excl_match_results)
+                if self._overlay:
+                    _eh = self._ov_excl_hits
+                    self.after(0, lambda _eh=_eh:
+                               self._overlay.update(excl_hits=_eh)
+                               if self._overlay._win else None)
+
+            # ── Near Miss folder ───────────────────────────────────────── #
+            _nm_results = [
+                (i + 1, r) for i, r in enumerate(relic_results)
+                if not r.get("match") and r.get("near_misses")
+            ]
+            if _nm_results:
+                try:
+                    _nm_dir = os.path.join(run_dir, "Near Miss")
+                    os.makedirs(_nm_dir, exist_ok=True)
+                    _nm_info_path = os.path.join(_nm_dir, "Near Miss Info.txt")
+                    _nm_sep = "─" * 40
+                    for _nm_rnum, _nm_rr in _nm_results:
+                        _nm_fname = _nm_rr.get("_screenshot_file", "")
+                        _nm_rf = (_nm_rr.get("relics_found") or [{}])[0]
+                        _nm_rname    = _nm_rf.get("name", "Unknown") if isinstance(_nm_rf, dict) else "Unknown"
+                        _nm_passives = _nm_rf.get("passives", []) if isinstance(_nm_rf, dict) else []
+                        _nm_curses   = _nm_rf.get("curses",   []) if isinstance(_nm_rf, dict) else []
+                        _nm_matched  = set()
+                        for _nm_entry in _nm_rr.get("near_misses", []):
+                            _nm_matched.update(_nm_entry.get("matching_passives", []))
+                        _nm_dst_fname = f"Iter_{iteration}_Relic_{_nm_rnum}_NEARMISS.jpg"
+                        if _nm_fname:
+                            _nm_src = os.path.join(iter_dir, _nm_fname)
+                            if os.path.exists(_nm_src):
+                                _nm_dst = os.path.join(_nm_dir, _nm_dst_fname)
+                                try:
+                                    shutil.copy2(_nm_src, _nm_dst)
+                                except Exception:
+                                    pass
+                        with open(_nm_info_path, "a", encoding="utf-8") as _nf:
+                            _write_nm_header = _nf.tell() == 0
+                            if _write_nm_header:
+                                _nf.write("Near Misses — 2 of 3 requested passives found\n")
+                                _nf.write("=" * 50 + "\n\n")
+                            _nf.write(
+                                f"{_nm_sep}\n"
+                                f"  Iter #{iteration:03d}  ·  Relic {_nm_rnum}"
+                                f"  [{_nm_dst_fname}]\n"
+                                f"  Relic : {_nm_rname}\n"
+                                + "".join(
+                                    f"  {'+ ' if p in _nm_matched else '  '}{p}"
+                                    f"{'  [MATCHED]' if p in _nm_matched else ''}\n"
+                                    for p in _nm_passives)
+                                + ("  (no passives)\n" if not _nm_passives else "")
+                                + "".join(f"  ✗ {c}  (curse)\n" for c in _nm_curses)
+                                + "\n"
+                            )
+                    if _nm_results:
+                        self._log(
+                            f"  {len(_nm_results)} ★★ NEAR MISS FOUND — 2/3 passives matched"
+                            f" but not enough for a full hit.")
+                except Exception as _nme:
+                    self._log(f"WARNING: could not write to Near Miss folder: {_nme}")
+            # Update near miss overlay counter — near misses are NOT duds
+            if _nm_results:
+                self._ov_near_miss_hits += len(_nm_results)
+                self._nearmiss_iterations.add(iteration)
+                self._good_iterations.add(iteration)
+                # Correct dud counters (near miss relics were counted as duds per-relic)
+                self._ov_duds    = max(0, self._ov_duds - len(_nm_results))
+                self._ov_at_duds = max(0, self._ov_at_duds - len(_nm_results))
+                if self._overlay:
+                    _nmh = self._ov_near_miss_hits
+                    self.after(0, lambda _nmh=_nmh:
+                               self._overlay.update(near_miss_hits=_nmh)
+                               if self._overlay._win else None)
+
+            # Track "good" iterations — any with a HIT, GOD ROLL, excluded hit, or smart hit
+            if num_matched >= 1 or _excl_match_results:
+                self._good_iterations.add(iteration)
 
             # Deferred save copy — set AFTER any rename so the path is always valid
             _prev_save_dir = iter_dir
@@ -5155,6 +5331,7 @@ class RelicBotApp(tk.Tk):
                 "folder": folder_name,
                 "match": any_match,
                 "matched_relic": matched_relic,
+                "matched_relic_index": matched_relic_index,
                 "matched_passives": matched_passives,
                 "near_misses": all_near_misses,
                 "reason": reason,
@@ -5812,14 +5989,37 @@ class RelicBotApp(tk.Tk):
 
     def _show_batch_summary(self, run_dir: str, total: int, matches: int):
         self._reset_controls()
-        messagebox.showinfo(
-            "Batch Complete",
-            f"Batch run finished!\n\n"
-            f"Total iterations : {total}\n"
-            f"Matches found    : {matches}\n\n"
-            f"Results saved to:\n{run_dir}\n\n"
+        # Use overlay counters — these are accurate per-relic with no
+        # double-counting. Each relic increments exactly ONE counter:
+        #   GOD ROLL > Matches (HIT) > Smart Hits > Excluded Hits > Dud
+        _g3 = self._ov_at_33          # GOD ROLLs (3/3, not excluded)
+        _g2 = self._ov_at_23          # HITs (1/3 or 2/3, not excluded)
+        _good = len(self._good_iterations)
+        lines = [
+            "Batch run finished!\n",
+            f"Total iterations : {total}",
+            f"Good iterations  : {_good}",
+            "",
+        ]
+        if _g2 > 0:
+            lines.append(f"Matches found    : {_g2}")
+        if _g3 > 0:
+            lines.append(f"God Rolls found  : {_g3}")
+        if self._ov_near_miss_hits > 0:
+            lines.append(f"Near Misses      : {self._ov_near_miss_hits}")
+        if self._smart_analyze_var.get() and self._ov_smart_hits > 0:
+            lines.append(f"Smart Hits found : {self._ov_smart_hits}")
+        if self._save_exclusion_matches_var.get() and self._ov_excl_hits > 0:
+            lines.append(f"Excluded Hits    : {self._ov_excl_hits}")
+        if _g2 == 0 and _g3 == 0 and self._ov_smart_hits == 0 and self._ov_near_miss_hits == 0:
+            lines.append("No matches found.")
+        lines += [
+            "",
+            f"Results saved to:\n{run_dir}",
+            "",
             "Review README.txt for the full breakdown.",
-        )
+        ]
+        messagebox.showinfo("Batch Complete", "\n".join(lines))
 
     # ------------------------------------------------------------------ #
     #  BUY INPUT DIAGNOSTIC
@@ -5917,7 +6117,8 @@ class RelicBotApp(tk.Tk):
             result = relic_analyzer.analyze(img_bytes, criteria,
                                             crop_left=crop_left,
                                             crop_top=crop_top,
-                                            relic_type=relic_type)
+                                            relic_type=relic_type,
+                                            doors=self._doors)
             _ocr_dur = time.perf_counter() - _ocr_t0
             _gpu_was_on = bool(getattr(self, "_gpu_accel_var", None)
                                and self._gpu_accel_var.get())
@@ -5968,80 +6169,116 @@ class RelicBotApp(tk.Tk):
                 except Exception:
                     pass
 
-        # Smart Analyze: evaluate non-matching relics against curated rules
+        # ── Single-pass category determination ────────────────────────── #
+        # Determine the relic's FINAL category in one pass:
+        #   GOD ROLL > HIT > NEAR MISS > SMART > EXCLUDED > DUD
+        # All checks happen here — no retroactive counter corrections needed.
+
+        is_match = result.get("match", False)
+        _n_mp = len(result.get("matched_passives", []))
+        _near_misses = result.get("near_misses", [])
+        _best_nm = max(
+            (nm.get("matching_passive_count", len(nm.get("matching_passives", [])))
+             for nm in _near_misses), default=0)
+
+        # Check exclusion (for matched relics only)
+        _is_excluded = False
+        if is_match:
+            _excl_p = self._get_excluded_passives()
+            _excl_i = self._get_explicitly_included_passives()
+            _is_excluded = (
+                self._is_passive_excluded(result, _excl_p, _excl_i)
+                or self._is_curse_blocked(result, self._get_blocked_curses()))
+
+        # Check Smart Analyze (for non-matching, non-excluded relics only)
         _smart_reasons: list[str] = []
-        _smart_file_handled = False   # set when backlog file moved to smart dir
-        if (self._smart_analyze_var.get()
-                and is_current_batch
-                and not result.get("match", False)):
+        _is_smart = False
+        if (not is_match
+                and self._smart_analyze_var.get()
+                and self._smart_doors
+                and is_current_batch):
             try:
-                from bot.smart_rules import evaluate_relic as _eval_relic
-                relics_sa = result.get("relics_found", [])
-                r0_sa = relics_sa[0] if relics_sa else {}
-                passives_sa = (r0_sa.get("passives", [])
-                               if isinstance(r0_sa, dict) else [])
-                _smart_reasons = _eval_relic(passives_sa)
-                if _smart_reasons and iter_dir:
-                    smart_dir = os.path.join(run_dir, "Smart Analyze Hits")
-                    os.makedirs(smart_dir, exist_ok=True)
-                    sa_fname = f"Iter_{iteration}_Relic_{step_i + 1}_SMART.jpg"
-                    try:
-                        if _backlog_img_path and os.path.exists(_backlog_img_path):
-                            # Backlog: move the pre-saved file instead of writing bytes again
-                            import shutil as _shutil
-                            _shutil.move(_backlog_img_path,
-                                         os.path.join(smart_dir, sa_fname))
-                            _smart_file_handled = True
-                        elif img_bytes:
-                            with open(os.path.join(smart_dir, sa_fname), "wb") as _f:
-                                _f.write(img_bytes)
-                        _sa_relics = result.get("relics_found", [])
-                        _sa_r0 = _sa_relics[0] if _sa_relics else {}
-                        _sa_rname = _sa_r0.get("name", "Unknown") if isinstance(_sa_r0, dict) else "Unknown"
-                        _sa_pass  = _sa_r0.get("passives", []) if isinstance(_sa_r0, dict) else []
-                        _sa_curse = _sa_r0.get("curses",   []) if isinstance(_sa_r0, dict) else []
-                        _sa_sep   = "─" * 40
-                        with open(os.path.join(smart_dir, "Smart Analyze Info.txt"), "a",
-                                  encoding="utf-8") as _f:
-                            _f.write(
-                                f"{_sa_sep}\n"
-                                f"  Iter #{iteration:03d}  ·  Relic {step_i + 1}"
-                                f"  [{sa_fname}]\n"
-                                f"  Relic : {_sa_rname}\n"
-                                + "".join(f"  + {p}\n" for p in _sa_pass)
-                                + "".join(f"  ✗ {c}  (curse)\n" for c in _sa_curse)
-                                + "  Smart rules:\n"
-                                + "".join(f"    • {r}\n" for r in _smart_reasons)
-                                + "\n"
-                            )
-                        self._log(
-                            f"  [Smart] Relic {step_i + 1} — {'; '.join(_smart_reasons)}",
-                            overlay=True)
-                    except Exception:
-                        pass
-                    self._ov_smart_hits += 1
-                    if self._overlay:
-                        _sh = self._ov_smart_hits
-                        self.after(0, lambda _sh=_sh:
-                                   self._overlay.update(smart_hits=_sh)
-                                   if self._overlay and self._overlay._win else None)
+                from bot.door_generator import check_doors as _check_smart
+                _r0_sa = (result.get("relics_found") or [{}])[0]
+                _passives_sa = (_r0_sa.get("passives", [])
+                                if isinstance(_r0_sa, dict) else [])
+                _sm, _, _ = _check_smart(_passives_sa, self._smart_doors)
+                if _sm:
+                    _relic_set = set(_passives_sa)
+                    for _sd_p, _sd_l in self._smart_doors:
+                        if _sd_p <= _relic_set:
+                            _smart_reasons.append(
+                                f"{_sd_l}: {' + '.join(sorted(_sd_p))}")
+                            break
+                    _is_smart = True
             except Exception:
                 pass
 
-        saved_fname = ""
-        is_match = result.get("match", False)
-        best_nm = max(
-            (nm.get("matching_passive_count",
-                     len(nm.get("matching_passives", [])))
-             for nm in result.get("near_misses", [])),
-            default=0,
-        )
-        tag = "MATCH" if is_match else ("HIT" if best_nm >= hit_min else "")
+        # Assign final category
+        if is_match and not _is_excluded and _n_mp >= 3:
+            _category = "GOD_ROLL"
+            tag = "MATCH"
+        elif is_match and not _is_excluded and _n_mp >= 1:
+            _category = "HIT"
+            tag = "HIT"
+        elif not is_match and _best_nm >= 2:
+            _category = "NEAR_MISS"
+            tag = "NEARMISS"
+        elif _is_smart:
+            _category = "SMART"
+            tag = "SMART"
+        elif is_match and _is_excluded:
+            _category = "EXCLUDED"
+            tag = "HIT" if _n_mp < 3 else "MATCH"  # keep tag for screenshot
+        else:
+            _category = "DUD"
+            tag = ""
 
-        if iter_dir and tag:
+        # Store category on result for finalization
+        result["_category"] = _category
+
+        # ── Smart Analyze folder (if smart hit) ──────────────────────── #
+        _smart_file_handled = False
+        if _category == "SMART" and iter_dir:
+            try:
+                smart_dir = os.path.join(run_dir, "Smart Analyze Hits")
+                os.makedirs(smart_dir, exist_ok=True)
+                sa_fname = f"Iter_{iteration}_Relic_{step_i + 1}_SMART.jpg"
+                if _backlog_img_path and os.path.exists(_backlog_img_path):
+                    import shutil as _shutil
+                    _shutil.move(_backlog_img_path,
+                                 os.path.join(smart_dir, sa_fname))
+                    _smart_file_handled = True
+                elif img_bytes:
+                    with open(os.path.join(smart_dir, sa_fname), "wb") as _f:
+                        _f.write(img_bytes)
+                _sa_r0 = (result.get("relics_found") or [{}])[0]
+                _sa_rname = _sa_r0.get("name", "Unknown") if isinstance(_sa_r0, dict) else "Unknown"
+                _sa_pass  = _sa_r0.get("passives", []) if isinstance(_sa_r0, dict) else []
+                _sa_curse = _sa_r0.get("curses",   []) if isinstance(_sa_r0, dict) else []
+                _sa_sep   = "\u2500" * 40
+                with open(os.path.join(smart_dir, "Smart Analyze Info.txt"), "a",
+                          encoding="utf-8") as _f:
+                    _f.write(
+                        f"{_sa_sep}\n"
+                        f"  Iter #{iteration:03d}  \u00b7  Relic {step_i + 1}"
+                        f"  [{sa_fname}]\n"
+                        f"  Relic : {_sa_rname}\n"
+                        + "".join(f"  + {p}\n" for p in _sa_pass)
+                        + "".join(f"  \u2717 {c}  (curse)\n" for c in _sa_curse)
+                        + "  Smart rules:\n"
+                        + "".join(f"    \u2022 {r}\n" for r in _smart_reasons)
+                        + "\n")
+                self._log(
+                    f"  SMART HIT FOUND \u2014 Relic {step_i + 1} \u2014 {'; '.join(_smart_reasons)}",
+                    overlay=True)
+            except Exception:
+                pass
+
+        # ── Screenshot save (non-smart categories) ───────────────────── #
+        saved_fname = ""
+        if iter_dir and tag and _category != "SMART":
             if _backlog_img_path and os.path.exists(_backlog_img_path):
-                # Backlog: rename the pre-saved file to add the result tag.
-                # No duplicate write needed — content is already on disk.
                 saved_fname = f"Iter_{iteration}_Relic_{step_i + 1}_{tag}.jpg"
                 try:
                     os.rename(_backlog_img_path,
@@ -6064,8 +6301,7 @@ class RelicBotApp(tk.Tk):
                         self._log(f"WARNING: could not save screenshot: {_e}")
                     saved_fname = ""
 
-        # Backlog only: delete the on-disk file if this relic is neither a
-        # match/HIT nor a Smart Analyze hit — no reason to keep it.
+        # Backlog: delete on-disk file if this relic is not notable
         if (_backlog_img_path
                 and not _smart_file_handled
                 and not saved_fname
@@ -6075,81 +6311,116 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
 
-        img_bytes = None   # release screenshot bytes after saving (or skipping if not a hit)
+        img_bytes = None
 
         result["_image_bytes"]    = None
         result["_screenshot_file"] = saved_fname
+        result["_relic_index"]    = step_i + 1
 
-        # Always write per-relic result to the live_log (scoped to the task's own batch)
+        # ── Live log ─────────────────────────────────────────────────── #
         if live_log_path:
             try:
                 relics = result.get("relics_found", [])
                 r0 = relics[0] if relics else {}
                 rname = r0.get("name", "Unknown") if isinstance(r0, dict) else str(r0)
                 passives_found = r0.get("passives", []) if isinstance(r0, dict) else []
-                status = "MATCH" if result.get("match") else "no match"
+                _status_map = {
+                    "GOD_ROLL": "GOD ROLL", "HIT": "HIT", "NEAR_MISS": "NEAR MISS",
+                    "SMART": "SMART HIT", "EXCLUDED": "EXCLUDED", "DUD": "no match",
+                }
+                status = _status_map.get(_category, "no match")
                 line = (f"  Relic {step_i + 1:02d}: [{status}] {rname}"
-                        f"  | {', '.join(passives_found) or '—'}")
+                        f"  | {', '.join(passives_found) or '\u2014'}")
                 if saved_fname:
-                    line += f"  → {saved_fname}"
+                    line += f"  \u2192 {saved_fname}"
+                if (_category == "DUD"
+                        and "Delicate" in rname
+                        and len(passives_found) <= 1
+                        and self._doors):
+                    from bot.door_generator import min_door_size as _mds
+                    if _mds(self._doors) > 1:
+                        line += "  [Delicate \u2014 skipped, all doors require 2+ passives]"
                 with open(live_log_path, "a", encoding="utf-8") as _f:
                     _f.write(line + "\n")
             except Exception:
                 pass
 
-        # Only update current-batch overlay counters; skip if this iteration was cancelled
+        # ── Single counter update (one category per relic) ───────────── #
         if is_current_batch and iteration not in self._async_cancelled_iters:
-            r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
-            self._ov_at_33        += r_g3
-            self._ov_at_23        += r_g2
-            self._ov_at_duds      += r_dud
-            self._ov_total_relics += r_g3 + r_g2 + r_dud
-            # Track this iteration's contributions so it can be rolled back on cancel
+            _c_g3 = _c_g2 = _c_dud = 0
+            if _category == "GOD_ROLL":
+                _c_g3 = 1
+                self._good_iterations.add(iteration)
+            elif _category == "HIT":
+                _c_g2 = 1
+                self._good_iterations.add(iteration)
+            elif _category == "NEAR_MISS":
+                self._ov_near_miss_hits += 1
+                self._nearmiss_iterations.add(iteration)
+                self._good_iterations.add(iteration)
+            elif _category == "SMART":
+                self._ov_smart_hits += 1
+                self._smart_iterations.add(iteration)
+                self._good_iterations.add(iteration)
+            elif _category == "EXCLUDED":
+                _c_dud = 1
+                self._ov_excl_hits += 1
+                self._good_iterations.add(iteration)
+            else:
+                _c_dud = 1
+
+            self._ov_hits_33      += _c_g3
+            self._ov_hits_23      += _c_g2
+            self._ov_duds         += _c_dud
+            self._ov_at_33        += _c_g3
+            self._ov_at_23        += _c_g2
+            self._ov_at_duds      += _c_dud
+            self._ov_total_relics += 1
+
             with self._iter_contrib_lock:
                 c = self._iter_contributions.setdefault(iteration, {})
-                c["at_33"]        = c.get("at_33",        0) + r_g3
-                c["at_23"]        = c.get("at_23",        0) + r_g2
-                c["at_duds"]      = c.get("at_duds",      0) + r_dud
-                c["total_relics"] = c.get("total_relics", 0) + r_g3 + r_g2 + r_dud
+                c["hits_33"]      = c.get("hits_33",      0) + _c_g3
+                c["hits_23"]      = c.get("hits_23",      0) + _c_g2
+                c["duds"]         = c.get("duds",         0) + _c_dud
+                c["at_33"]        = c.get("at_33",        0) + _c_g3
+                c["at_23"]        = c.get("at_23",        0) + _c_g2
+                c["at_duds"]      = c.get("at_duds",      0) + _c_dud
+                c["total_relics"] = c.get("total_relics", 0) + 1
+            # Push updated counters to overlay
             if self._overlay:
                 ov = self._overlay
                 at33, at23, atd = self._ov_at_33, self._ov_at_23, self._ov_at_duds
                 tot = self._ov_total_relics
                 self._ov_stored_count = max(0, self._ov_stored_count - 1)
                 sto = self._ov_stored_count
-                self.after(0, lambda at33=at33, at23=at23, atd=atd, tot=tot, sto=sto:
-                           ov.update(at_33=at33, at_23=at23, at_duds=atd, stored=sto, analyzed=tot)
-                           if ov._win else None)
-            if r_g3 > 0 or r_g2 > 0:
-                # Check if this relic would be excluded at finalization so the
-                # per-relic log message correctly labels it rather than announcing
-                # a full match that will later be moved to Excluded Hits.
-                _excl_passives = self._get_excluded_passives()
-                _excl_incl     = self._get_explicitly_included_passives()
-                _is_excl       = (self._is_passive_excluded(result, _excl_passives, _excl_incl)
-                                  or self._is_curse_blocked(result, self._get_blocked_curses()))
-                if r_g3 > 0:
-                    if _is_excl:
-                        self._log(
-                            f"  [EXCL] Batch {iteration} · Relic {step_i + 1} — 3/3 match"
-                            f" but has excluded passive — saved to Excluded Hits folder.")
-                    else:
-                        self._log(
-                            f"★★★ Match Found!  Batch {iteration} · Relic {step_i + 1} — 3/3")
-                        self._write_match_log(
-                            task.get("matches_log_path", ""),
-                            iteration, step_i + 1, "★★★ GOD ROLL (3/3)", result)
-                elif r_g2 > 0:
-                    if _is_excl:
-                        self._log(
-                            f"  [EXCL] Batch {iteration} · Relic {step_i + 1} — 2/3 match"
-                            f" but has excluded passive — saved to Excluded Hits folder.")
-                    else:
-                        self._log(
-                            f"★★ Match Found!  Batch {iteration} · Relic {step_i + 1} — 2/3")
-                        self._write_match_log(
-                            task.get("matches_log_path", ""),
-                            iteration, step_i + 1, "★★  HIT (2/3)", result)
+                _ov_kwargs = dict(
+                    at_33=at33, at_23=at23, at_duds=atd, stored=sto, analyzed=tot)
+                if _category == "SMART":
+                    _ov_kwargs["smart_hits"] = self._ov_smart_hits
+                if _category == "EXCLUDED":
+                    _ov_kwargs["excl_hits"] = self._ov_excl_hits
+                if _category == "NEAR_MISS":
+                    _ov_kwargs["near_miss_hits"] = self._ov_near_miss_hits
+                self.after(0, lambda _kw=_ov_kwargs:
+                           ov.update(**_kw) if ov._win else None)
+
+            # Category-based per-relic log message
+            if _category == "GOD_ROLL":
+                self._log(
+                    f"\u2605\u2605\u2605 GOD ROLL FOUND!  Batch {iteration} \u00b7 Relic {step_i + 1} \u2014 3/3")
+                self._write_match_log(
+                    task.get("matches_log_path", ""),
+                    iteration, step_i + 1, "\u2605\u2605\u2605 GOD ROLL (3/3)", result)
+            elif _category == "HIT":
+                self._log(
+                    f"\u2605\u2605 HIT FOUND!  Batch {iteration} \u00b7 Relic {step_i + 1} \u2014 {_n_mp}/3")
+                self._write_match_log(
+                    task.get("matches_log_path", ""),
+                    iteration, step_i + 1, f"\u2605\u2605  HIT ({_n_mp}/3)", result)
+            elif _category == "EXCLUDED":
+                self._log(
+                    f"  EXCLUDED HIT FOUND \u2014 Batch {iteration} \u00b7 Relic {step_i + 1}"
+                    f" \u2014 {_n_mp}/3 match but has excluded passive.")
 
         if task.get("_retry_pass"):
             # Retry pass: iteration already finalized during the main pass.
@@ -6427,6 +6698,7 @@ class RelicBotApp(tk.Tk):
             if _eligible else None
         )
         matched_relic    = matched_result.get("matched_relic") if matched_result else None
+        matched_relic_index = matched_result.get("_relic_index") if matched_result else None
         matched_passives = (matched_result.get("matched_passives", [])
                             if matched_result else [])
         matched_curses   = (matched_result.get("matched_relic_curses", [])
@@ -6437,13 +6709,8 @@ class RelicBotApp(tk.Tk):
                        if rr.get("_screenshot_file")]
 
         iter_g3, iter_g2, _ = self._count_relic_tiers(relic_results, hit_min)
+        # Tier from the best door the relic passed through — no near-miss promotion.
         num_matched = len(matched_passives)
-        if num_matched == 0 and all_near_misses:
-            num_matched = max(
-                nm.get("matching_passive_count",
-                        len(nm.get("matching_passives", [])))
-                for nm in all_near_misses
-            )
 
         # Best-batch scoreboard and overlay — only update for current batch
         if is_current_batch:
@@ -6467,6 +6734,10 @@ class RelicBotApp(tk.Tk):
                 q_sto = self._async_relic_q.qsize() if self._async_relic_q else 0
                 b33  = _fmt_best(self._best_33_iter,   "★★★")
                 bhit = _fmt_best(self._best_hits_iter, "hits")
+                # Async finalization intentionally omits "This Run" counters
+                # (hits_33/hits_23/duds) — async analysis can finish long after
+                # the iteration moves on, making live "This Run" display misleading.
+                # All-time counters are always accurate regardless of timing.
                 self.after(0, lambda: ov.update(
                     at_33=at33, at_23=at23, at_duds=atd,
                     stored=q_sto, analyzed=tot, best_33=b33, best_hits=bhit,
@@ -6518,10 +6789,20 @@ class RelicBotApp(tk.Tk):
             if is_current_batch:
                 self._log(f"WARNING: could not write info.txt: {e}")
 
+        # Rename folder: GOD ROLL > HIT > SMART > EXCLUDED
         folder_name = f"{iteration:03d}"
-        tier_name   = (f"GOD ROLL {iteration:03d}" if num_matched >= 3
-                       else f"HIT {iteration:03d}" if num_matched >= hit_min
-                       else None)
+        if num_matched >= 3:
+            tier_name = f"GOD ROLL {iteration:03d}"
+        elif num_matched >= 1:
+            tier_name = f"HIT {iteration:03d}"
+        elif iteration in self._nearmiss_iterations:
+            tier_name = f"NEAR MISS {iteration:03d}"
+        elif iteration in self._smart_iterations:
+            tier_name = f"SMART {iteration:03d}"
+        elif _excl_match_results:
+            tier_name = f"EXCLUDED {iteration:03d}"
+        else:
+            tier_name = None
         final_iter_dir = iter_dir
         if tier_name:
             tier_dir = os.path.join(run_dir, tier_name)
@@ -6535,15 +6816,20 @@ class RelicBotApp(tk.Tk):
                 if is_current_batch:
                     self._log(f"WARNING: could not rename folder: {e}")
 
-        # ── All Hits folder ───────────────────────────────────────────── #
-        if num_matched >= hit_min:
+        # ── All Hits + All God Rolls folders ─────────────────────────── #
+        # GOD ROLL screenshots → All God Rolls only
+        # HIT screenshots → All Hits only
+        # Excluded relics go to Excluded Hits only, NOT here.
+        if num_matched >= 1:
             try:
-                _all_hits_dir = os.path.join(run_dir, "All Hits")
-                os.makedirs(_all_hits_dir, exist_ok=True)
-                _hits_summary_path = os.path.join(_all_hits_dir, "hits_summary.txt")
                 for _ah_idx, _ah_rr in enumerate(relic_results):
                     _ah_fname = _ah_rr.get("_screenshot_file", "")
-                    if not (_ah_fname and ("HIT" in _ah_fname or "MATCH" in _ah_fname)):
+                    if not _ah_fname:
+                        continue
+                    # Skip excluded relics
+                    if (_ah_rr.get("match")
+                            and (self._is_passive_excluded(_ah_rr, excluded_passives, explicitly_included)
+                                 or self._is_curse_blocked(_ah_rr, blocked_curses))):
                         continue
                     _ah_src = os.path.join(final_iter_dir, _ah_fname)
                     if not os.path.exists(_ah_src):
@@ -6551,18 +6837,39 @@ class RelicBotApp(tk.Tk):
                     _ah_rf = (_ah_rr.get("relics_found") or [{}])[0]
                     _ah_passives = _ah_rf.get("passives", []) if isinstance(_ah_rf, dict) else []
                     _ah_curses   = _ah_rf.get("curses",   []) if isinstance(_ah_rf, dict) else []
+                    _ah_mp = _ah_rr.get("matched_passives", [])
+
+                    # Determine destination folder based on tag
+                    if "MATCH" in _ah_fname:
+                        # GOD ROLL (3/3)
+                        _dest_dir = os.path.join(run_dir, "All God Rolls")
+                        _summary_name = "god_rolls_summary.txt"
+                        _header = "God Rolls Found"
+                        _label = "GOD ROLL"
+                    elif "HIT" in _ah_fname:
+                        # HIT (1/3 or 2/3)
+                        _dest_dir = os.path.join(run_dir, "All Hits")
+                        _summary_name = "hits_summary.txt"
+                        _header = "Hits Found"
+                        _label = "HIT"
+                    else:
+                        continue  # not a match screenshot
+
+                    os.makedirs(_dest_dir, exist_ok=True)
+                    _summary_path = os.path.join(_dest_dir, _summary_name)
                     _ah_dst = os.path.join(
-                        _all_hits_dir, f"iter_{iteration:03d}_relic_{_ah_idx + 1:03d}.jpg")
+                        _dest_dir, f"iter_{iteration:03d}_relic_{_ah_idx + 1:03d}.jpg")
                     shutil.copy2(_ah_src, _ah_dst)
-                    _write_header = not os.path.exists(_hits_summary_path)
-                    with open(_hits_summary_path, "a", encoding="utf-8") as _hf:
+                    _write_header = not os.path.exists(_summary_path)
+                    with open(_summary_path, "a", encoding="utf-8") as _hf:
                         if _write_header:
-                            _hf.write("Matches Found\n")
+                            _hf.write(f"{_header}\n")
                             _hf.write("=" * 40 + "\n\n")
-                        _hf.write(f"Batch {iteration:03d}  Relic #{_ah_idx + 1:03d}\n")
+                        _hf.write(f"[{_label}]  Batch {iteration:03d}  Relic #{_ah_idx + 1:03d}\n")
                         _hf.write("  Passives:\n")
                         for _p in _ah_passives:
-                            _hf.write(f"    {_p}\n")
+                            _marker = "  * " if _p in set(_ah_mp) else "    "
+                            _hf.write(f"{_marker}{_p}\n")
                         if not _ah_passives:
                             _hf.write("    (none)\n")
                         _hf.write("  Curses:\n")
@@ -6623,6 +6930,83 @@ class RelicBotApp(tk.Tk):
             self._log(
                 f"  {len(_excl_match_results)} relic(s) matched criteria but had "
                 f"excluded passive(s) (opt-in folder disabled).")
+        # Update excluded hits overlay counter
+        if _excl_match_results and is_current_batch:
+            self._ov_excl_hits += len(_excl_match_results)
+            if self._overlay:
+                _eh = self._ov_excl_hits
+                self.after(0, lambda _eh=_eh:
+                           self._overlay.update(excl_hits=_eh)
+                           if self._overlay._win else None)
+
+        # ── Near Miss folder ───────────────────────────────────────────── #
+        # Near misses: relics that matched 2 of 3 passives from a 3/3 door
+        # but did not fully satisfy any door.  Only from non-matching relics.
+        _nm_results = [
+            (i + 1, r) for i, r in enumerate(relic_results)
+            if not r.get("match") and r.get("near_misses")
+        ]
+        if _nm_results:
+            try:
+                _nm_dir = os.path.join(run_dir, "Near Miss")
+                os.makedirs(_nm_dir, exist_ok=True)
+                _nm_info_path = os.path.join(_nm_dir, "Near Miss Info.txt")
+                _nm_sep = "─" * 40
+                for _nm_rnum, _nm_rr in _nm_results:
+                    _nm_fname = _nm_rr.get("_screenshot_file", "")
+                    _nm_rf = (_nm_rr.get("relics_found") or [{}])[0]
+                    _nm_rname    = _nm_rf.get("name", "Unknown") if isinstance(_nm_rf, dict) else "Unknown"
+                    _nm_passives = _nm_rf.get("passives", []) if isinstance(_nm_rf, dict) else []
+                    _nm_curses   = _nm_rf.get("curses",   []) if isinstance(_nm_rf, dict) else []
+                    _nm_matched  = set()
+                    for _nm_entry in _nm_rr.get("near_misses", []):
+                        _nm_matched.update(_nm_entry.get("matching_passives", []))
+                    _nm_dst_fname = f"Iter_{iteration}_Relic_{_nm_rnum}_NEARMISS.jpg"
+                    if _nm_fname:
+                        _nm_src = os.path.join(final_iter_dir, _nm_fname)
+                        if os.path.exists(_nm_src):
+                            _nm_dst = os.path.join(_nm_dir, _nm_dst_fname)
+                            try:
+                                shutil.copy2(_nm_src, _nm_dst)
+                            except Exception:
+                                pass
+                    with open(_nm_info_path, "a", encoding="utf-8") as _nf:
+                        _write_nm_header = _nf.tell() == 0
+                        if _write_nm_header:
+                            _nf.write("Near Misses — 2 of 3 requested passives found\n")
+                            _nf.write("=" * 50 + "\n\n")
+                        _nf.write(
+                            f"{_nm_sep}\n"
+                            f"  Iter #{iteration:03d}  ·  Relic {_nm_rnum}"
+                            f"  [{_nm_dst_fname}]\n"
+                            f"  Relic : {_nm_rname}\n"
+                            + "".join(
+                                f"  {'+ ' if p in _nm_matched else '  '}{p}"
+                                f"{'  [MATCHED]' if p in _nm_matched else ''}\n"
+                                for p in _nm_passives)
+                            + ("  (no passives)\n" if not _nm_passives else "")
+                            + "".join(f"  ✗ {c}  (curse)\n" for c in _nm_curses)
+                            + "\n"
+                        )
+                if is_current_batch and _nm_results:
+                    self._log(
+                        f"  {len(_nm_results)} near miss(es) — 2/3 passives matched"
+                        f" but not enough for a full hit.")
+            except Exception as _nme:
+                if is_current_batch:
+                    self._log(f"WARNING: could not write to Near Miss folder: {_nme}")
+        # Update near miss overlay counter — near misses are NOT duds
+        if _nm_results and is_current_batch:
+            self._ov_near_miss_hits += len(_nm_results)
+            self._nearmiss_iterations.add(iteration)
+            self._good_iterations.add(iteration)
+            self._ov_duds    = max(0, self._ov_duds - len(_nm_results))
+            self._ov_at_duds = max(0, self._ov_at_duds - len(_nm_results))
+            if self._overlay:
+                _nmh = self._ov_near_miss_hits
+                self.after(0, lambda _nmh=_nmh:
+                           self._overlay.update(near_miss_hits=_nmh)
+                           if self._overlay._win else None)
 
         with lock:
             dir_map[iteration] = final_iter_dir
@@ -6631,15 +7015,16 @@ class RelicBotApp(tk.Tk):
             "iteration":       iteration,
             "folder":          folder_name,
             "match":           any_match,
-            "matched_relic":   matched_relic,
-            "matched_passives": matched_passives,
-            "near_misses":     all_near_misses,
-            "reason":          reason,
-            "relics_found":    all_relics,
-            "screenshots":     screenshots,
-            "save_copy":       save_filename,
-            "hits_33":         iter_g3,
-            "hits_23":         iter_g2,
+            "matched_relic":       matched_relic,
+            "matched_relic_index": matched_relic_index,
+            "matched_passives":    matched_passives,
+            "near_misses":         all_near_misses,
+            "reason":              reason,
+            "relics_found":        all_relics,
+            "screenshots":         screenshots,
+            "save_copy":           save_filename,
+            "hits_33":             iter_g3,
+            "hits_23":             iter_g2,
         })
 
         try:
@@ -7140,6 +7525,7 @@ class RelicBotApp(tk.Tk):
                                 crop_left=relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
                                 crop_top=relic_analyzer._PREVIEW_CROP_TOP_FRAC,
                                 relic_type=self.relic_type_var.get(),
+                                doors=self._doors,
                             )
                             _toks = _settle_result.get("_ocr_tokens", [])
                             # Require at least one passive — a PASSIVE token, or
@@ -7211,6 +7597,7 @@ class RelicBotApp(tk.Tk):
                                     crop_left=relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
                                     crop_top=relic_analyzer._PREVIEW_CROP_TOP_FRAC,
                                     relic_type=self.relic_type_var.get(),
+                                    doors=self._doors,
                                 )
                             except Exception:
                                 pass   # fall back to the earlier capture
@@ -7494,6 +7881,7 @@ class RelicBotApp(tk.Tk):
                                         crop_left=relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
                                         crop_top=relic_analyzer._PREVIEW_CROP_TOP_FRAC,
                                         relic_type=self.relic_type_var.get(),
+                                        doors=self._doors,
                                     )
                                     break  # success
                                 except Exception as _ae:
@@ -7519,9 +7907,10 @@ class RelicBotApp(tk.Tk):
 
                             # Smart Analyze
                             if (self._smart_analyze_var.get()
+                                    and self._smart_doors
                                     and not result.get("match", False)):
                                 try:
-                                    from bot.smart_rules import evaluate_relic as _eval_relic
+                                    from bot.door_generator import check_doors as _check_smart
                                     _r0_sa = (result.get("relics_found", [{}]) or [{}])[0]
                                     _pass_sa = (_r0_sa.get("passives", [])
                                                 if isinstance(_r0_sa, dict) else [])
@@ -7529,7 +7918,15 @@ class RelicBotApp(tk.Tk):
                                                  if isinstance(_r0_sa, dict) else [])
                                     _name_sa  = (_r0_sa.get("name", "Unknown")
                                                  if isinstance(_r0_sa, dict) else "Unknown")
-                                    _smart_reasons = _eval_relic(_pass_sa)
+                                    _sm, _smp, _ = _check_smart(_pass_sa, self._smart_doors)
+                                    _smart_reasons = []
+                                    if _sm:
+                                        _relic_set = set(_pass_sa)
+                                        for _sd_p, _sd_l in self._smart_doors:
+                                            if _sd_p <= _relic_set:
+                                                _smart_reasons.append(
+                                                    f"{_sd_l}: {' + '.join(sorted(_sd_p))}")
+                                                break
                                     if _smart_reasons and iter_dir and img:
                                         _smart_dir = os.path.join(
                                             os.path.dirname(iter_dir), "Smart Analyze Hits")
@@ -7553,11 +7950,14 @@ class RelicBotApp(tk.Tk):
                                                     + "".join(f"    • {r}\n" for r in _smart_reasons)
                                                     + "\n")
                                             self._log(
-                                                f"  [Smart] Relic {_relic_num} — "
+                                                f"  SMART HIT FOUND — Relic {_relic_num} — "
                                                 f"{'; '.join(_smart_reasons)}", overlay=True)
                                         except Exception:
                                             pass
                                         self._ov_smart_hits += 1
+                                        # Smart hit is not a dud — correct the dud counter
+                                        self._ov_duds    = max(0, self._ov_duds - 1)
+                                        self._ov_at_duds = max(0, self._ov_at_duds - 1)
                                         if self._overlay:
                                             _sh = self._ov_smart_hits
                                             self.after(0, lambda _sh=_sh:
@@ -7575,7 +7975,13 @@ class RelicBotApp(tk.Tk):
                                             len(nm.get("matching_passives", [])))
                                      for nm in result.get("near_misses", [])),
                                     default=0)
-                                _tag = "MATCH" if _is_match else ("HIT" if _best_nm >= hit_min else "")
+                                if _is_match:
+                                    _n_mp = len(result.get("matched_passives", []))
+                                    _tag = "MATCH" if _n_mp >= 3 else "HIT"
+                                elif _best_nm >= 2:
+                                    _tag = "NEARMISS"
+                                else:
+                                    _tag = ""
                                 if _tag:
                                     _saved_fname = f"Iter_{iteration}_Relic_{_relic_num}_{_tag}.jpg"
                                     try:
@@ -7587,6 +7993,7 @@ class RelicBotApp(tk.Tk):
 
                             result["_image_bytes"]     = None
                             result["_screenshot_file"] = _saved_fname
+                            result["_relic_index"]     = _relic_num
 
                             if live_log_path:
                                 try:
@@ -7619,6 +8026,41 @@ class RelicBotApp(tk.Tk):
 
                             # Overlay tier counters
                             _r_g3, _r_g2, _r_dud = self._count_relic_tiers([result], hit_min)
+                            # Check exclusion — excluded relics don't inflate hit counters
+                            _is_excl = False
+                            if _r_g3 > 0 or _r_g2 > 0:
+                                _excl_p  = self._get_excluded_passives()
+                                _excl_i  = self._get_explicitly_included_passives()
+                                _is_excl = (
+                                    self._is_passive_excluded(result, _excl_p, _excl_i)
+                                    or self._is_curse_blocked(result, self._get_blocked_curses()))
+                            # Log using original tiers (before exclusion adjustment)
+                            if _r_g3 > 0:
+                                if _is_excl:
+                                    self._log(
+                                        f"  EXCLUDED HIT FOUND — Batch {iteration} · Relic {_relic_num}"
+                                        f" — 3/3 match but has excluded passive.")
+                                else:
+                                    self._log(
+                                        f"★★★ GOD ROLL FOUND!  Batch {iteration} · "
+                                        f"Relic {_relic_num} — 3/3")
+                                    _write_match_entry(iteration, _relic_num,
+                                                       "★★★ GOD ROLL (3/3)", result)
+                            elif _r_g2 > 0:
+                                if _is_excl:
+                                    self._log(
+                                        f"  EXCLUDED HIT FOUND — Batch {iteration} · Relic {_relic_num}"
+                                        f" — 2/3 match but has excluded passive.")
+                                else:
+                                    self._log(
+                                        f"★★ HIT FOUND!  Batch {iteration} · "
+                                        f"Relic {_relic_num} — 2/3")
+                                    _write_match_entry(iteration, _relic_num,
+                                                       "★★  HIT (2/3)", result)
+                            # Adjust counters: excluded relics count as duds
+                            if _is_excl:
+                                _r_dud += _r_g3 + _r_g2
+                                _r_g3 = _r_g2 = 0
                             self._ov_hits_33      += _r_g3
                             self._ov_at_33        += _r_g3
                             self._ov_hits_23      += _r_g2
@@ -7626,34 +8068,6 @@ class RelicBotApp(tk.Tk):
                             self._ov_duds         += _r_dud
                             self._ov_at_duds      += _r_dud
                             self._ov_total_relics += _r_g3 + _r_g2 + _r_dud
-                            if _r_g3 > 0 or _r_g2 > 0:
-                                _excl_p  = self._get_excluded_passives()
-                                _excl_i  = self._get_explicitly_included_passives()
-                                _is_excl = (
-                                    self._is_passive_excluded(result, _excl_p, _excl_i)
-                                    or self._is_curse_blocked(result, self._get_blocked_curses()))
-                                if _r_g3 > 0:
-                                    if _is_excl:
-                                        self._log(
-                                            f"  [EXCL] Batch {iteration} · Relic {_relic_num}"
-                                            f" — 3/3 match but has excluded passive.")
-                                    else:
-                                        self._log(
-                                            f"★★★ Match Found!  Batch {iteration} · "
-                                            f"Relic {_relic_num} — 3/3")
-                                        _write_match_entry(iteration, _relic_num,
-                                                           "★★★ GOD ROLL (3/3)", result)
-                                elif _r_g2 > 0:
-                                    if _is_excl:
-                                        self._log(
-                                            f"  [EXCL] Batch {iteration} · Relic {_relic_num}"
-                                            f" — 2/3 match but has excluded passive.")
-                                    else:
-                                        self._log(
-                                            f"★★ Match Found!  Batch {iteration} · "
-                                            f"Relic {_relic_num} — 2/3")
-                                        _write_match_entry(iteration, _relic_num,
-                                                           "★★  HIT (2/3)", result)
                             if iteration:
                                 with self._iter_contrib_lock:
                                     c = self._iter_contributions.setdefault(iteration, {})
@@ -7886,7 +8300,7 @@ class RelicBotApp(tk.Tk):
                             break
                         continue
                     try:
-                        _res = relic_analyzer.analyze(_img, criteria)
+                        _res = relic_analyzer.analyze(_img, criteria, doors=self._doors)
                         _done_q.put((_si, _img, _res, None))
                     except Exception as _exc:
                         _done_q.put((_si, _img, None, _exc))
@@ -7978,15 +8392,24 @@ class RelicBotApp(tk.Tk):
                 self._log_result(result)
                 time.sleep(0.05)   # let the main thread render the log line
 
-                # Smart Analyze: evaluate non-matching relics against curated rules
+                # Smart Analyze: check non-matching relics against smart synergy doors
                 if (self._smart_analyze_var.get()
+                        and self._smart_doors
                         and not result.get("match", False)):
                     try:
-                        from bot.smart_rules import evaluate_relic as _eval_relic
+                        from bot.door_generator import check_doors as _check_smart
                         _r0_sa = (result.get("relics_found", [{}]) or [{}])[0]
                         _passives_sa = (_r0_sa.get("passives", [])
                                         if isinstance(_r0_sa, dict) else [])
-                        _smart_reasons = _eval_relic(_passives_sa)
+                        _sm, _smp, _ = _check_smart(_passives_sa, self._smart_doors)
+                        _smart_reasons = []
+                        if _sm:
+                            _relic_set = set(_passives_sa)
+                            for _sd_p, _sd_l in self._smart_doors:
+                                if _sd_p <= _relic_set:
+                                    _smart_reasons.append(
+                                        f"{_sd_l}: {' + '.join(sorted(_sd_p))}")
+                                    break
                         if _smart_reasons and iter_dir and img:
                             _smart_dir = os.path.join(
                                 os.path.dirname(iter_dir), "Smart Analyze Hits")
@@ -8002,11 +8425,14 @@ class RelicBotApp(tk.Tk):
                                         + "".join(f"  • {r}\n" for r in _smart_reasons)
                                     )
                                 self._log(
-                                    f"  [Smart] Relic {step_i + 1} — {'; '.join(_smart_reasons)}",
+                                    f"  SMART HIT FOUND — Relic {step_i + 1} — {'; '.join(_smart_reasons)}",
                                     overlay=True)
                             except Exception:
                                 pass
                             self._ov_smart_hits += 1
+                            # Smart hit is not a dud — correct the dud counter
+                            self._ov_duds    = max(0, self._ov_duds - 1)
+                            self._ov_at_duds = max(0, self._ov_at_duds - 1)
                             if self._overlay:
                                 _sh = self._ov_smart_hits
                                 self.after(0, lambda _sh=_sh:
@@ -8025,7 +8451,13 @@ class RelicBotApp(tk.Tk):
                          for nm in result.get("near_misses", [])),
                         default=0,
                     )
-                    tag = "MATCH" if is_match else ("HIT" if best_nm >= hit_min else "")
+                    if is_match:
+                        _n_mp = len(result.get("matched_passives", []))
+                        tag = "MATCH" if _n_mp >= 3 else "HIT"
+                    elif best_nm >= 2:
+                        tag = "NEARMISS"
+                    else:
+                        tag = ""
                     if tag:
                         saved_fname = f"relic_{step_i + 1:02d}_{tag}.jpg"
                         try:
@@ -8038,6 +8470,7 @@ class RelicBotApp(tk.Tk):
 
                 result["_image_bytes"] = None   # free memory
                 result["_screenshot_file"] = saved_fname
+                result["_relic_index"] = step_i + 1  # 1-based relic number
 
                 if live_log_path:
                     try:
@@ -8059,6 +8492,17 @@ class RelicBotApp(tk.Tk):
 
                 # Live-update overlay tier counters after each relic
                 r_g3, r_g2, r_dud = self._count_relic_tiers([result], hit_min)
+                # Check exclusion BEFORE counting — excluded relics are duds
+                _is_excl = False
+                if (r_g3 or r_g2) and result.get("match"):
+                    _excl_p = self._get_excluded_passives()
+                    _excl_i = self._get_explicitly_included_passives()
+                    _is_excl = (
+                        self._is_passive_excluded(result, _excl_p, _excl_i)
+                        or self._is_curse_blocked(result, self._get_blocked_curses()))
+                    if _is_excl:
+                        r_dud += r_g3 + r_g2
+                        r_g3 = r_g2 = 0
                 self._ov_hits_33      += r_g3
                 self._ov_at_33        += r_g3
                 self._ov_hits_23      += r_g2
@@ -8068,11 +8512,11 @@ class RelicBotApp(tk.Tk):
                 self._ov_total_relics += r_g3 + r_g2 + r_dud
                 if r_g3 > 0:
                     self._log(
-                        f"★★★ Match Found!  Batch {iteration} · Relic {step_i + 1} — 3/3")
+                        f"★★★ GOD ROLL FOUND!  Batch {iteration} · Relic {step_i + 1} — 3/3")
                     _write_match_entry(iteration, step_i + 1, "★★★ GOD ROLL (3/3)", result)
                 elif r_g2 > 0:
                     self._log(
-                        f"★★ Match Found!  Batch {iteration} · Relic {step_i + 1} — 2/3")
+                        f"★★ HIT FOUND!  Batch {iteration} · Relic {step_i + 1} — 2/3")
                     _write_match_entry(iteration, step_i + 1, "★★  HIT (2/3)", result)
                 # Track per-iteration contributions for rollback on reset
                 if iteration:
@@ -8145,7 +8589,7 @@ class RelicBotApp(tk.Tk):
 
         self._set_status(f"{label}: analyzing…", "#0066cc")
         try:
-            result = relic_analyzer.analyze(img, criteria)
+            result = relic_analyzer.analyze(img, criteria, doors=self._doors)
         except Exception as e:
             self._log(f"ERROR during analysis: {e}")
             return None
@@ -8234,20 +8678,20 @@ class RelicBotApp(tk.Tk):
 
     @staticmethod
     def _count_relic_tiers(relic_results: list, hit_min: int) -> tuple[int, int, int]:
-        """Return (g3_count, g2_count, dud_count) for individual relics in this iteration."""
+        """Return (g3_count, g2_count, dud_count) for individual relics in this iteration.
+
+        A relic is only counted as a hit (g3 or g2) if match=True — meaning it
+        fully satisfied at least one door.  Near misses are NOT promoted to hits.
+        """
         g3 = g2 = dud = 0
         for r in relic_results:
-            _mp = r.get("matched_passives", [])
-            n = len(_mp)
-            if n == 0 and r.get("near_misses"):
-                n = max(
-                    nm.get("matching_passive_count",
-                           len(nm.get("matching_passives", [])))
-                    for nm in r["near_misses"]
-                )
+            if not r.get("match"):
+                dud += 1
+                continue
+            n = len(r.get("matched_passives", []))
             if n >= 3:
                 g3 += 1
-            elif n >= hit_min:
+            elif n >= 1:
                 g2 += 1
             else:
                 dud += 1
