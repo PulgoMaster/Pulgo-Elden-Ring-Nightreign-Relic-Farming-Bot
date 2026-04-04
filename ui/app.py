@@ -516,7 +516,7 @@ class RelicBotApp(tk.Tk):
         # under python.exe and iconbitmap has no effect on the taskbar icon.
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "PulgoMaster.RelicBot.v1.6.3"
+                "PulgoMaster.RelicBot.v1.6.4"
             )
         except Exception:
             pass
@@ -524,7 +524,7 @@ class RelicBotApp(tk.Tk):
         super().__init__()
         self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.6.3  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.6.4  |  Made by Pulgo")
         self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
@@ -3658,6 +3658,7 @@ class RelicBotApp(tk.Tk):
         self._smart_iterations = set()
         self._smart_gr_iterations = set()
         self._nearmiss_iterations = set()
+        self._live_log_iters_written: set[int] = set()  # iterations with header in live_log
         # Show/hide conditional overlay rows based on active settings
         if self._overlay:
             _ov = self._overlay
@@ -4324,11 +4325,17 @@ class RelicBotApp(tk.Tk):
             # Create the run folder on first use
             _ensure_run_dir()
 
-            try:
-                with open(live_log_path, "a", encoding="utf-8") as _f:
-                    _f.write(f"\n--- Batch {iteration} ---\n")
-            except Exception:
-                pass
+            # In backlog/BG-GPU mode, analysis results arrive asynchronously —
+            # writing the header now produces empty entries for early iterations
+            # whose results haven't been analysed yet.  Defer headers to the
+            # live-log write inside _analyze_relic_task where they appear just
+            # before the first relic line for each iteration.
+            if not _backlog_mode:
+                try:
+                    with open(live_log_path, "a", encoding="utf-8") as _f:
+                        _f.write(f"\n--- Batch {iteration} ---\n")
+                except Exception:
+                    pass
 
             # ── Diagnostic: iteration start ────────────────────────────
             self._diag_cur_iter = iteration
@@ -4364,6 +4371,17 @@ class RelicBotApp(tk.Tk):
                 # In async mode, the worker may have renamed the dir — use final path.
                 _copy_dir = (_async_dir_map.get(iteration - 1, _prev_save_dir)
                              if _async_mode else _prev_save_dir)
+                # Backlog/BG-GPU workers or intermittent drain may have renamed
+                # the folder (e.g. "010" → "HIT 010") since _prev_save_dir was
+                # set.  Fall back to scanning for the renamed folder.
+                if not os.path.isdir(_copy_dir):
+                    _prev_iter = iteration - 1
+                    for _pfx in ("GOD ROLL", "HIT", "NEAR MISS",
+                                 "SMART GOD ROLL", "SMART", "EXCLUDED"):
+                        _cand = os.path.join(run_dir, f"{_pfx} {_prev_iter:03d}")
+                        if os.path.isdir(_cand):
+                            _copy_dir = _cand
+                            break
                 try:
                     shutil.copy2(save_path, os.path.join(_copy_dir, save_filename))
                 except Exception as e:
@@ -5371,6 +5389,14 @@ class RelicBotApp(tk.Tk):
             self._close_game()
             _final_copy_dir = (_async_dir_map.get(iteration, _prev_save_dir)
                                if _async_mode else _prev_save_dir)
+            # Folder may have been renamed by workers — resolve if needed.
+            if not os.path.isdir(_final_copy_dir):
+                for _pfx in ("GOD ROLL", "HIT", "NEAR MISS",
+                             "SMART GOD ROLL", "SMART", "EXCLUDED"):
+                    _cand = os.path.join(run_dir, f"{_pfx} {iteration:03d}")
+                    if os.path.isdir(_cand):
+                        _final_copy_dir = _cand
+                        break
             try:
                 shutil.copy2(save_path, os.path.join(_final_copy_dir, save_filename))
             except Exception as e:
@@ -6155,6 +6181,18 @@ class RelicBotApp(tk.Tk):
                 pass
 
         # Route per-relic log output: current batch → UI panel; old batch → its own run_log
+        # Lazy header: write "--- Batch N ---" to the live_log just before
+        # the first relic entry for each iteration.  _log_result writes
+        # timestamp lines to the same file via _log_relic, so the header
+        # must appear here (before _log_result) to keep ordering correct.
+        if (live_log_path
+                and iteration not in self._live_log_iters_written):
+            self._live_log_iters_written.add(iteration)
+            try:
+                with open(live_log_path, "a", encoding="utf-8") as _f:
+                    _f.write(f"\n--- Batch {iteration} ---\n")
+            except Exception:
+                pass
         if is_current_batch:
             self._log_result(result)
             time.sleep(0.05)
@@ -6441,7 +6479,11 @@ class RelicBotApp(tk.Tk):
             elif _category == "EXCLUDED":
                 self._log(
                     f"  EXCLUDED HIT FOUND \u2014 Batch {iteration} \u00b7 Relic {step_i + 1}"
-                    f" \u2014 {_n_mp}/3 match but has excluded passive.")
+                    f" \u2014 {_n_mp}/3 match but has excluded passive/curse.")
+                self._write_match_log(
+                    task.get("matches_log_path", ""),
+                    iteration, step_i + 1,
+                    f"\u2716  EXCLUDED ({_n_mp}/3)", result)
 
         if task.get("_retry_pass"):
             # Retry pass: iteration already finalized during the main pass.
@@ -8132,7 +8174,9 @@ class RelicBotApp(tk.Tk):
                             elif _cat_s == "EXCLUDED":
                                 self._log(
                                     f"  EXCLUDED HIT FOUND — Batch {iteration} · Relic {_relic_num}"
-                                    f" — {_n_mp_s}/3 match but has excluded passive.")
+                                    f" — {_n_mp_s}/3 match but has excluded passive/curse.")
+                                _write_match_entry(iteration, _relic_num,
+                                                   f"\u2716  EXCLUDED ({_n_mp_s}/3)", result)
 
                             # Single counter increment
                             _c_g3 = _c_g2 = _c_dud = 0
@@ -8807,10 +8851,15 @@ class RelicBotApp(tk.Tk):
 
         A relic is only counted as a hit (g3 or g2) if match=True — meaning it
         fully satisfied at least one door.  Near misses are NOT promoted to hits.
+        EXCLUDED relics (category set to EXCLUDED during analysis) are counted
+        as duds, not hits.
         """
         g3 = g2 = dud = 0
         for r in relic_results:
             if not r.get("match"):
+                dud += 1
+                continue
+            if r.get("_category") == "EXCLUDED":
                 dud += 1
                 continue
             n = len(r.get("matched_passives", []))
@@ -10441,7 +10490,15 @@ class RelicBotApp(tk.Tk):
         """Return True if any curse on this relic matches a blocked entry (substring match)."""
         if not blocked:
             return False
-        curses = [c.lower() for c in relic_result.get("matched_relic_curses", [])]
+        # Per-relic results store curses in relics_found[0]["curses"];
+        # iteration-level summaries store them in "matched_relic_curses".
+        curses_raw = relic_result.get("matched_relic_curses", [])
+        if not curses_raw:
+            relics = relic_result.get("relics_found", [])
+            r0 = relics[0] if relics else {}
+            if isinstance(r0, dict):
+                curses_raw = r0.get("curses", [])
+        curses = [c.lower() for c in curses_raw]
         for curse in curses:
             for blocked_curse in blocked:
                 if blocked_curse in curse or curse in blocked_curse:

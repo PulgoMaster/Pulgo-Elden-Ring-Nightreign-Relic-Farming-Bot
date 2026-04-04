@@ -443,9 +443,10 @@ def analyze(
     _low_conf_tokens: list[tuple] = []
 
     # ── Phase 1: Collect all tokens with full bbox data ──────────────────── #
-    # Line clustering tolerance scales with image height so it works at any
-    # resolution.  At the reference 1000px-wide image (post-downscale), 15px
-    # is correct.  Scale proportionally for smaller or larger images.
+    # Line clustering tolerance scales with image width so it works at any
+    # resolution.  The OCR crop is downscaled to _MAX_OCR_WIDTH (1000 px) by
+    # width; at that reference size 15 px is the correct Y-centre tolerance.
+    # Scale proportionally for smaller or larger images.
     _img_h, _img_w = img.shape[:2]
     _LINE_CLUSTER_PX = max(8, int(15 * _img_w / 1000))
 

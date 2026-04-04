@@ -319,18 +319,14 @@ def generate_smart_doors(relic_type: str = "night") -> list[tuple[frozenset, str
     doors: list[tuple[frozenset, str]] = []
     seen: set[frozenset] = set()
 
-    from database.passive_groups import are_compatible as _compat
-
     def _add(passives: list[str], label: str):
         fs = frozenset(passives)
         if fs not in seen and all(p in pool for p in passives):
-            # Reject doors with incompatible passives (same compat group
-            # or tier variants of the same passive).
-            _plist = list(fs)
-            for _i in range(len(_plist)):
-                for _j in range(_i + 1, len(_plist)):
-                    if not _compat(_plist[_i], _plist[_j]):
-                        return
+            # Reject doors with incompatible passives — same compat group
+            # check + tier-variant collision as regular doors (single
+            # source of truth: COMPAT_GROUPS from passives.py).
+            if not _variants_compat(list(fs)):
+                return
             seen.add(fs)
             doors.append((fs, label))
 

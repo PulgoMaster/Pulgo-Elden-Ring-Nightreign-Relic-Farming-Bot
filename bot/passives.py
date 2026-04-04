@@ -762,7 +762,8 @@ ALL_CURSES: list = sorted(
 
 _COMPAT_EXCLUSIVE_GROUPS: list[list[str]] = [
 
-    # ── Group 0 – Attack Power (general attack boosts) ────────────────────
+    # ── Group 0 – Attack Power (compat 100 — all mutually exclusive) ──────
+    # Elemental / affinity attack power
     [
         "Physical Attack Up",
         "Physical Attack Up +1",
@@ -792,19 +793,84 @@ _COMPAT_EXCLUSIVE_GROUPS: list[list[str]] = [
         "Holy Attack Power Up +2",
         "Holy Attack Power Up +3",
         "Holy Attack Power Up +4",
+        # Broad spell type boosters (NOT school-specific — those are Group 7)
         "Improved Sorceries",
         "Improved Sorceries +1",
         "Improved Sorceries +2",
         "Improved Incantations",
         "Improved Incantations +1",
         "Improved Incantations +2",
+        # Melee / combat technique boosters
         "Improved Guard Counters",
         "Improved Guard Counters +1",
         "Improved Guard Counters +2",
+        "Improved Initial Standard Attack",
+        "Improved Critical Hits",
+        "Improved Roar & Breath Attacks",
+        "Guard counter is given a boost based on current HP",
+        "Improved Stance-Breaking when Two-Handing",
+        "Improved Stance-Breaking when Wielding Two Armaments",
+        # Conditional attack boosts
         "Madness in Vicinity Improves Attack Power",
         "Madness in Vicinity Improves Attack Power +1",
         "Sleep in Vicinity Improves Attack Power",
         "Sleep in Vicinity Improves Attack Power +1",
+        "Physical attack power increases after using grease items",
+        "Physical attack power increases after using grease items +1",
+        "Physical attack power increases after using grease items +2",
+        "Taking attacks improves attack power",
+        "Attack power increased for each evergaol prisoner defeated",
+        "Attack power increased for each Night Invader defeated",
+        # Weapon-class specific attack power (one per relic)
+        "Improved Dagger Attack Power",
+        "Improved Straight Sword Attack Power",
+        "Improved Greatsword Attack Power",
+        "Improved Colossal Sword Attack Power",
+        "Improved Curved Sword Attack Power",
+        "Improved Curved Greatsword Attack Power",
+        "Improved Katana Attack Power",
+        "Improved Twinblade Attack Power",
+        "Improved Thrusting Sword Attack Power",
+        "Improved Heavy Thrusting Sword Attack Power",
+        "Improved Axe Attack Power",
+        "Improved Greataxe Attack Power",
+        "Improved Hammer Attack Power",
+        "Improved Great Hammer Attack Power",
+        "Improved Flail Attack Power",
+        "Improved Spear Attack Power",
+        "Improved Great Spear Attack Power",
+        "Improved Halberd Attack Power",
+        "Improved Reaper Attack Power",
+        "Improved Fist Attack Power",
+        "Improved Claw Attack Power",
+        "Improved Whip Attack Power",
+        "Improved Colossal Weapon Attack Power",
+        "Improved Bow Attack Power",
+        # Weapon-class 3+ equipped attack power (one per relic)
+        "Improved Attack Power with 3+ Daggers Equipped",
+        "Improved Attack Power with 3+ Straight Swords Equipped",
+        "Improved Attack Power with 3+ Greatswords Equipped",
+        "Improved Attack Power with 3+ Colossal Swords Equipped",
+        "Improved Attack Power with 3+ Curved Swords Equipped",
+        "Improved Attack Power with 3+ Curved Greatswords Equipped",
+        "Improved Attack Power with 3+ Katana Equipped",
+        "Improved Attack Power with 3+ Twinblades Equipped",
+        "Improved Attack Power with 3+ Thrusting Swords Equipped",
+        "Improved Attack Power with 3+ Heavy Thrusting Swords Equipped",
+        "Improved Attack Power with 3+ Axes Equipped",
+        "Improved Attack Power with 3+ Greataxes Equipped",
+        "Improved Attack Power with 3+ Hammers Equipped",
+        "Improved Attack Power with 3+ Great Hammers Equipped",
+        "Improved Attack Power with 3+ Flails Equipped",
+        "Improved Attack Power with 3+ Spears Equipped",
+        "Improved Attack Power with 3+ Great Spears Equipped",
+        "Improved Attack Power with 3+ Halberds Equipped",
+        "Improved Attack Power with 3+ Reapers Equipped",
+        "Improved Attack Power with 3+ Fists Equipped",
+        "Improved Attack Power with 3+ Claws Equipped",
+        "Improved Attack Power with 3+ Whips Equipped",
+        "Improved Attack Power with 3+ Colossal Weapons Equipped",
+        "Improved Attack Power with 3+ Bows Equipped",
     ],
 
     # ── Group 1 – Character-Specific ─────────────────────────────────────
@@ -833,20 +899,154 @@ _COMPAT_EXCLUSIVE_GROUPS: list[list[str]] = [
      if cat.startswith("Weapon –") or cat.startswith("Shield –") or cat.startswith("Catalyst –")
      for p in entries if p.startswith("Dormant Power")],
 
-    # ── Group 5 – Starting Armament Skill Changes ─────────────────────────
-    list(CATEGORIES["Starting Armaments (Skill)"]),
-
-    # ── Group 6 – Starting Armament Imbue / Spell Changes ────────────────
+    # ── Group 5 – Starting Armament Skill + Spell Changes (compat 300) ───
+    # Skills and spell changes share compat 300 — one per relic.
     [
-        *CATEGORIES["Starting Armaments (Imbue)"],
+        *CATEGORIES["Starting Armaments (Skill)"],
         *CATEGORIES["Starting Armaments (Spell)"],
     ],
 
-    # ── Group 7 – School-Specific Spell Boosters (Cat 4 / compat 800) ────
+    # ── Group 6 – Starting Armament Imbue Changes (compat 200) ───────────
+    # Imbues (deals X damage / inflicts Y) are separate from skill/spell.
+    list(CATEGORIES["Starting Armaments (Imbue)"]),
+
+    # ── Group 7 – School-Specific Spell Boosters (compat 800) ────────────
     # One school booster per relic — sorcery and incantation schools compete.
     # CAN coexist with one Group 0 attack booster (different compat category).
     [p for p in CATEGORIES["Sorceries & Incantations"]
      if p != "Extended Spell Duration"],
+
+    # ── Group 8 – HP Restoration upon [Weapon] Attacks ───────────────────
+    [
+        "HP Restoration upon Dagger Attacks",
+        "HP Restoration upon Straight Sword Attacks",
+        "HP Restoration upon Greatsword Attacks",
+        "HP Restoration upon Colossal Sword Attacks",
+        "HP Restoration upon Curved Sword Attacks",
+        "HP Restoration upon Curved Greatsword Attacks",
+        "HP Restoration upon Katana Attacks",
+        "HP Restoration upon Twinblade Attacks",
+        "HP Restoration upon Thrusting Sword Attacks",
+        "HP Restoration upon Heavy Thrusting Sword Attacks",
+        "HP Restoration upon Axe Attacks",
+        "HP Restoration upon Greataxe Attacks",
+        "HP Restoration upon Hammer Attacks",
+        "HP Restoration upon Great Hammer Attacks",
+        "HP Restoration upon Flail Attacks",
+        "HP Restoration upon Spear Attacks",
+        "HP Restoration upon Great Spear Attacks",
+        "HP Restoration upon Halberd Attacks",
+        "HP Restoration upon Reaper Attacks",
+        "HP Restoration upon Fist Attacks",
+        "HP Restoration upon Claw Attacks",
+        "HP Restoration upon Whip Attacks",
+        "HP Restoration upon Colossal Weapon Attacks",
+        "HP Restoration upon Bow Attacks",
+    ],
+
+    # ── Group 9 – FP Restoration upon [Weapon] Attacks ───────────────────
+    [
+        "FP Restoration upon Dagger Attacks",
+        "FP Restoration upon Straight Sword Attacks",
+        "FP Restoration upon Greatsword Attacks",
+        "FP Restoration upon Colossal Sword Attacks",
+        "FP Restoration upon Curved Sword Attacks",
+        "FP Restoration upon Curved Greatsword Attacks",
+        "FP Restoration upon Katana Attacks",
+        "FP Restoration upon Twinblade Attacks",
+        "FP Restoration upon Thrusting Sword Attacks",
+        "FP Restoration upon Heavy Thrusting Sword Attacks",
+        "FP Restoration upon Axe Attacks",
+        "FP Restoration upon Greataxe Attacks",
+        "FP Restoration upon Hammer Attacks",
+        "FP Restoration upon Great Hammer Attacks",
+        "FP Restoration upon Flail Attacks",
+        "FP Restoration upon Spear Attacks",
+        "FP Restoration upon Great Spear Attacks",
+        "FP Restoration upon Halberd Attacks",
+        "FP Restoration upon Reaper Attacks",
+        "FP Restoration upon Fist Attacks",
+        "FP Restoration upon Claw Attacks",
+        "FP Restoration upon Whip Attacks",
+        "FP Restoration upon Colossal Weapon Attacks",
+        "FP Restoration upon Bow Attacks",
+    ],
+
+    # ── Group 10 – Vigor / Max HP ─────────────────────────────────────────
+    [
+        "Vigor +1",
+        "Vigor +2",
+        "Vigor +3",
+        "Increased Maximum HP",
+    ],
+
+    # ── Group 11 – Mind / Max FP ──────────────────────────────────────────
+    [
+        "Mind +1",
+        "Mind +2",
+        "Mind +3",
+        "Increased Maximum FP",
+    ],
+
+    # ── Group 12 – Endurance / Max Stamina ────────────────────────────────
+    [
+        "Endurance +1",
+        "Endurance +2",
+        "Endurance +3",
+        "Increased Maximum Stamina",
+    ],
+
+    # ── Group 13 – Strength ───────────────────────────────────────────────
+    ["Strength +1", "Strength +2", "Strength +3"],
+
+    # ── Group 14 – Dexterity ──────────────────────────────────────────────
+    ["Dexterity +1", "Dexterity +2", "Dexterity +3"],
+
+    # ── Group 15 – Intelligence ───────────────────────────────────────────
+    ["Intelligence +1", "Intelligence +2", "Intelligence +3"],
+
+    # ── Group 16 – Faith ──────────────────────────────────────────────────
+    ["Faith +1", "Faith +2", "Faith +3"],
+
+    # ── Group 17 – Arcane ─────────────────────────────────────────────────
+    ["Arcane +1", "Arcane +2", "Arcane +3"],
+
+    # ── Group 18 – Poise ──────────────────────────────────────────────────
+    ["Poise +1", "Poise +2", "Poise +3"],
+
+    # ── Group 19 – Max HP Up with 3+ Shields Equipped ─────────────────────
+    [
+        "Max HP Up with 3+ Greatshields Equipped",
+        "Max HP Up with 3+ Medium Shields Equipped",
+        "Max HP Up with 3+ Small Shields Equipped",
+    ],
+
+    # ── Group 20 – Max FP Up with 3+ Catalysts Equipped ──────────────────
+    [
+        "Max FP Up with 3+ Staves Equipped",
+        "Max FP Up with 3+ Sacred Seals Equipped",
+    ],
+
+    # ── Group 21 – Skill Cooldown Reduction ───────────────────────────────
+    [
+        "Character Skill Cooldown Reduction +1",
+        "Character Skill Cooldown Reduction +2",
+        "Character Skill Cooldown Reduction +3",
+    ],
+
+    # ── Group 22 – Ultimate Art Auto Charge ───────────────────────────────
+    [
+        "Ultimate Art Auto Charge +1",
+        "Ultimate Art Auto Charge +2",
+        "Ultimate Art Auto Charge +3",
+    ],
+
+    # ── Group 23 – Improved Affinity Damage Negation ──────────────────────
+    [
+        "Improved Affinity Damage Negation",
+        "Improved Affinity Damage Negation +1",
+        "Improved Affinity Damage Negation +2",
+    ],
 ]
 
 # Flat lookup: passive_name → group index
@@ -862,9 +1062,25 @@ COMPAT_GROUP_NAMES: dict[int, str] = {
     2: "Aromatics",
     3: "Tears",
     4: "Dormant Power",
-    5: "Starting Armament Skill",
-    6: "Starting Armament Imbue/Spell",
+    5: "Starting Armament Skill/Spell",
+    6: "Starting Armament Imbue",
     7: "School-Specific Spell Booster",
+    8: "HP on Weapon Attack",
+    9: "FP on Weapon Attack",
+    10: "Vigor / Max HP",
+    11: "Mind / Max FP",
+    12: "Endurance / Max Stamina",
+    13: "Strength",
+    14: "Dexterity",
+    15: "Intelligence",
+    16: "Faith",
+    17: "Arcane",
+    18: "Poise",
+    19: "Max HP (Shields)",
+    20: "Max FP (Catalysts)",
+    21: "Skill Cooldown",
+    22: "Art Auto Charge",
+    23: "Affinity Damage Negation",
 }
 
 
