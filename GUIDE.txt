@@ -1,0 +1,475 @@
+================================================================================
+  RELIC BOT v1.6.5
+  Elden Ring Nightreign Relic Farming Bot
+  Made by Pulgo
+================================================================================
+
+Automates relic farming in Elden Ring Nightreign using on-device OCR to
+analyze relics and match them against your criteria. Works fully offline
+after the first launch.
+
+Each iteration the bot:
+  1. Restores a clean save file and relaunches the game
+  2. Navigates to the Relic Rites merchant
+  3. Buys a relic and scans the preview screen
+  4. Navigates through each relic in the panel, capturing and analyzing each one
+  5. Resets back to the buy screen and repeats
+  6. Saves every iteration -- folders renamed to HIT or GOD ROLL when a match is found
+
+
+================================================================================
+  CRITICAL WARNINGS -- READ BEFORE ANYTHING ELSE
+================================================================================
+
+BACK UP YOUR SAVE FILE
+  The bot restores a save before every iteration. Always keep a personal
+  backup copy somewhere the bot cannot touch (Desktop, USB, etc.).
+  Your save is located at:
+    %AppData%\Nightreign\<YourSteamID>\NR0000.sl2
+  To find it: press Win+R, type %AppData%, press Enter, navigate to
+  Nightreign\<SteamID>\ -- the file is NR0000.sl2.
+
+ALWAYS USE A CURRENT SAVE
+  The save you give the bot must be from BEFORE any run you have played.
+  If you play a run after making your save, make a fresh one at Roundtable
+  Hold before running the bot. Running from an outdated save risks being
+  flagged by Nightreign's anti-cheat system.
+
+GAME SETTINGS
+  - Run the game in BORDERLESS WINDOWED mode (not Fullscreen)
+  - 16:9 aspect ratio required (any resolution: 1080p, 1440p, 4K)
+  - Ultrawide (21:9) is NOT supported
+
+
+================================================================================
+  1. FIRST-TIME SETUP
+================================================================================
+
+1. Extract the ZIP -- you will get a "RelicBot" folder
+2. Place the folder anywhere you like (Desktop, Documents, etc.)
+3. Run "RelicBot.exe" inside the folder
+4. On first launch, the bot downloads its OCR model (~100 MB)
+   This is a one-time download -- after that it works fully offline
+
+SETTING UP PATHS
+
+  Game EXE
+    Should auto-detect. If not, browse to your eldenring_nightreign.exe
+    (usually in Steam\steamapps\common\ELDEN RING NIGHTREIGN\Game\)
+
+  Save File
+    Browse to your NR0000.sl2 (see "Back up your save file" above)
+
+  Backup Folder
+    Where the bot stores its working backup of your save. The default
+    "save_backups" folder inside RelicBot works fine.
+
+  Output Folder
+    Where batch results go. The default "batch_output" folder inside
+    RelicBot works fine.
+
+
+================================================================================
+  2. CHOOSING YOUR RELIC TYPE
+================================================================================
+
+  Normal (600 murk each)
+    Standard Scenic Flatstone relics from the regular shop.
+    Fewer passives available, no curses.
+
+  Deep of Night (1800 murk each)
+    Deep Scenic Flatstone relics from the night shop.
+    More passives, higher tiers available, but relics can have curses.
+
+The passive lists, curse filter, and probability calculations all update
+automatically when you switch relic types.
+
+RELIC COLOR FILTER
+  Each relic has a color (Red/Burning, Blue/Drizzly, Green/Tranquil,
+  Yellow/Luminous). Click the gem images or checkboxes to deselect colors
+  you don't care about. Only matching colors will count as hits.
+
+
+================================================================================
+  3. SETTING UP RELIC CRITERIA
+================================================================================
+
+This is where you tell the bot what you're looking for. There are two
+methods, and you can combine them.
+
+--- BUILD EXACT RELIC TAB ---
+
+  Define specific target combinations. Each target has up to 3 passive
+  slots and a match threshold.
+
+  How to use:
+    1. Click "Add Target" to create a new target
+    2. In each slot, search for and select a passive from the list
+    3. Choose your threshold:
+       - "3 of 3" = ALL selected passives must be present (GOD ROLL)
+       - "2 of 3" = any 2 of the 3 passives is enough (HIT)
+    4. Add more targets for different combinations you'd accept
+
+  The bot matches when ANY target is satisfied.
+
+  Variant Selection:
+    When you select a passive with tiers (like "Physical Attack Up +3"),
+    a dialog appears letting you choose which tiers you accept. Only
+    check the ones you actually want.
+
+  Compatibility:
+    Some passives can never appear together on the same relic (same
+    exclusivity group). The bot automatically hides incompatible passives
+    from other slots when you make a selection.
+
+--- PASSIVE POOL TAB ---
+
+  Pick any number of passives from the list. The bot matches when a relic
+  has at least N of them appearing simultaneously.
+
+  How to use:
+    1. Search for passives in the left list
+    2. Click "Add" to add them to your pool
+    3. Set the threshold (e.g., "at least 3" means 3 of your pool
+       passives must appear on the same relic)
+
+  Pairings:
+    Require two (or three) specific passives to appear together. A
+    pairing counts as ONE match toward your pool threshold.
+
+    - Slot A: First passive (select variants if applicable)
+    - Slot B: Second passive (must be compatible with A)
+    - Pool C (optional): A pool of acceptable third passives.
+      ANY ONE from Pool C appearing alongside A+B counts as the pairing.
+
+    Click "Create Pairing" to set up a new pairing.
+    Click "Edit" to modify an existing pairing.
+
+--- COMBINE MODE ---
+
+  Tick "Combine both tabs" at the bottom to search for EITHER your Exact
+  targets OR your Pool criteria. The bot matches on whichever it finds first.
+
+  When Combine is on, both tabs show a unified odds view with all groups:
+    - Build Exact Relic targets with per-target odds
+    - My Pool entries with per-entry odds
+    - Pairings with per-pairing odds
+    - Combined odds at the bottom
+
+
+================================================================================
+  4. EXCLUSIONS
+================================================================================
+
+--- EXCLUDED PASSIVES ---
+
+  Passives you do NOT want on your relic. If a relic matches your criteria
+  but also has an excluded passive, it gets categorized as EXCLUDED instead
+  of HIT.
+
+  Use "Excl. All Dormants" to quickly exclude all dormant power passives
+  you don't care about.
+
+  IMPORTANT: If a passive is in BOTH your criteria AND your exclusion list,
+  the criteria takes priority (it won't be excluded).
+
+--- BLOCKED CURSES (Deep of Night only) ---
+
+  Curses you refuse to accept. Same logic -- matching relics with blocked
+  curses become EXCLUDED instead of HIT.
+
+  Curses only appear on Deep of Night relics. Normal relics never have curses.
+
+
+================================================================================
+  5. BATCH MODE SETTINGS
+================================================================================
+
+--- CORE SETTINGS ---
+
+  Loops
+    How many buy-scan-reset iterations to run (max 1000).
+
+  Async Analysis
+    Overlaps OCR analysis with the next iteration's game time. The bot
+    captures screenshots during gameplay, then analyzes them in the
+    background while already buying the next batch. Recommended for
+    systems with 8+ CPU cores.
+
+  Backlog Analysis
+    Defers ALL analysis until after the entire batch completes. Zero CPU
+    contention during gameplay -- the game runs at full speed. After all
+    iterations finish, the bot closes the game and analyzes everything.
+    Recommended for low-end systems. Cannot be used with Async.
+
+    Intermittent Backlog: Process screenshots every N iterations instead
+    of waiting until the very end. Lets you see results during the run.
+
+  Additional CPU Workers
+    Runs multiple CPU workers in parallel to speed up OCR. Each worker
+    loads its own OCR model (~200 MB RAM each).
+
+    Recommended workers by system RAM:
+       8 GB   ->  OFF
+      12 GB   ->  1-2 workers
+      16 GB   ->  2-3 workers
+      24 GB   ->  4-5 workers
+      32 GB+  ->  6-8 workers
+
+  Smart Throttle
+    Only throttles OCR workers during input phases when the system is
+    actually stressed (CPU > 70%). On healthy hardware, workers keep
+    running continuously. Async mode only.
+
+  Exclude Analysis While Operations Are Happening
+    Pauses all workers during the buy+scan window for maximum input
+    stability. Workers resume between iterations. Async mode only.
+    Best paired with GPU Always Analyze.
+
+  Conservative Timing
+    Raises timing floors for slower systems. Increases delays between
+    inputs to give the game more time to respond. Does NOT disable
+    workers or limit CPU cores -- those are separate settings.
+
+--- GPU SETTINGS ---
+
+  GPU Acceleration (opt-in)
+    Offloads OCR to your NVIDIA GPU. ~10x faster than CPU analysis.
+    Requires an NVIDIA GPU with CUDA support (GTX 10xx or newer).
+    Click "Install GPU Acceleration" to download PyTorch CUDA (~2.5 GB).
+
+  Hybrid GPU+CPU Analysis
+    Runs 1 GPU worker alongside CPU workers. Both pull from the same
+    queue -- throughput is GPU speed + CPU speed combined. Requires GPU
+    Acceleration. Defaults to 1 GPU + 1 CPU worker. Enable Additional
+    CPU Workers to add more (capped at 4 in Hybrid mode).
+
+  GPU: Always Analyze
+    Lets the GPU worker keep analyzing during input phases. GPU inference
+    runs on the graphics card and doesn't compete for CPU time. Best
+    paired with "Exclude Analysis While Operations Are Happening."
+    Recommended for RTX 3070+ / high-end GPUs.
+
+--- OPTIONAL MATCHING FEATURES ---
+
+  Smart Analyze
+    Evaluates non-matching relics against curated synergy rules (school
+    stacks, weapon combos, catalyst synergies, etc.). Catches valuable
+    combinations you didn't specifically search for. No performance cost.
+
+  Save "matched but excluded" relics
+    Saves relics that matched your criteria but were blocked by exclusions
+    to a separate "Excluded Hits" folder with screenshots and summaries.
+
+
+================================================================================
+  6. OVERLAY (HUD)
+================================================================================
+
+The bot displays a translucent overlay on your screen with live stats.
+
+  Show HUD overlay
+    Master toggle. When enabled, the overlay appears during bot operation.
+
+  Toggleable elements:
+    - Show Stats (murk, relics, iterations)
+    - Track Rolls (God Roll / Hit / Dud counters + best iterations)
+    - Overflow Worker Hits (hits from previous iteration analysis)
+    - Near Misses (2 of 3 passives from a 3-target door)
+    - Smart Hits / Smart God Rolls (Smart Analyze results)
+    - Excluded Hits (matched but excluded by filter)
+    - Process Log (bot phase events)
+    - Relic Log (per-relic OCR results)
+
+  The overlay stays visible for the entire bot session. Use the hotkey
+  (default F7) to toggle it on/off without leaving the game.
+
+
+================================================================================
+  7. HOTKEYS
+================================================================================
+
+  F7  -- Show/hide the overlay HUD (configurable)
+  F8  -- Toggle overlay between log view and Matched Relics panel
+  F9  -- Stop the bot after the current iteration completes
+
+  All hotkeys work while the game window has focus. Configurable in the
+  Overlay Elements section.
+
+
+================================================================================
+  8. PROFILES
+================================================================================
+
+Save your criteria setup as a profile so you don't have to reconfigure
+every time.
+
+  Create Profile  -- make a new blank profile
+  Save            -- overwrite the current profile
+  Save As         -- save as a new named profile
+  Delete          -- remove the selected profile
+  Restore Defaults -- reset all settings to factory defaults
+
+Profiles store: relic type, criteria (exact + pool + pairings), exclusions,
+blocked curses, color filter, and all per-mode settings. The dropdown
+auto-loads when you select a profile.
+
+
+================================================================================
+  9. ODDS VIEWER
+================================================================================
+
+The Odds Viewer at the bottom shows your probability of finding a match.
+
+  Relics per iteration
+    Set how many relics the bot scans per iteration (depends on your
+    murk balance). Use the slider or arrow buttons.
+
+  The display shows:
+    - Odds per relic (e.g., "~1 in 3,000 relics")
+    - Expected iterations to find a match
+    - Total murk cost
+    - Estimated time per iteration and total batch time
+    - Exclusion impact (how much your exclusions reduce effective odds)
+
+  The probability engine accounts for:
+    - Compat group elimination (drawing one passive removes its group
+      from subsequent slots)
+    - Passive exclusion probability (jointly computed with match odds)
+    - Curse blocking (without-replacement from 24 curses)
+    - Both Normal and Deep of Night table structures
+
+
+================================================================================
+  10. UNDERSTANDING RESULTS
+================================================================================
+
+After a run, your output folder contains:
+
+  batch_run_YYYY-MM-DD_HHMMSS/
+    live_log.txt        Per-relic analysis log
+    matches_log.txt     All matched relics in one place
+    README.txt          Full breakdown of every iteration
+
+    001/                Numbered folders = no match (duds)
+    HIT 004/            Relic matched criteria (2/3 passives)
+      NR0000.sl2        Game save at that moment
+      info.txt          Full relic breakdown
+      Iter_4_Relic_XX_HIT.jpg
+
+    GOD ROLL 007/       All 3 passives matched
+    NEAR MISS 012/      2 of 3 from a 3-passive target
+    SMART 015/          Smart Analyze flagged a synergy
+    SMART GOD ROLL 018/ Smart Analyze found all 3 synergy passives
+    EXCLUDED 020/       Matched but had excluded passive/curse
+
+    All Hits/           Copies of all HIT/GOD ROLL screenshots
+    Near Miss/          Copies of all near-miss screenshots
+    Smart Analyze Hits/ Copies of all smart-flagged screenshots
+    Excluded Hits/      Copies of all excluded matches (if enabled)
+
+  FOLDER PRIORITY (highest category wins):
+    GOD ROLL > HIT > NEAR MISS > SMART GOD ROLL > SMART > EXCLUDED
+
+  TO USE A RESULT:
+    Copy the NR0000.sl2 from the folder into your game save location:
+      %AppData%\Nightreign\<SteamID>\
+    Launch the game -- you'll load with that relic available to buy.
+
+
+================================================================================
+  11. HARDWARE RECOMMENDATIONS
+================================================================================
+
+The bot auto-detects your hardware and shows recommended settings in the
+"Recommended Settings for Your System" panel. Click "Enable Recommended
+Settings" to apply them all at once.
+
+  Low-end (4 cores, 8 GB RAM, no GPU):
+    Backlog Analysis ON, Conservative Timing ON, workers OFF
+
+  Mid-range (8 cores, 16 GB RAM, no GPU):
+    Async Analysis ON, 2-3 workers, Smart Throttle ON
+
+  High-end (8+ cores, 16+ GB RAM, NVIDIA GPU):
+    GPU Acceleration ON, Hybrid GPU+CPU ON, Async Analysis ON
+
+  GPU + high-end CPU (16+ cores, 32 GB RAM, RTX 3070+):
+    GPU Acceleration ON, Hybrid ON, GPU Always Analyze ON,
+    Exclude Analysis ON, 2 additional CPU workers
+
+
+================================================================================
+  12. UPDATING
+================================================================================
+
+  1. Download the new RelicBot ZIP from GitHub
+  2. Drag the ZIP file onto Update.bat (inside your RelicBot folder)
+     OR place the ZIP next to Update.bat and double-click it
+
+  The updater preserves:
+    - Your profiles and settings
+    - GPU acceleration (if installed)
+    - Save backups and batch output
+    - Input sequences
+    - Calibration data
+
+
+================================================================================
+  13. TIPS FOR BEST RESULTS
+================================================================================
+
+  - Start with as much Murk as possible. More murk = more relics per
+    iteration = fewer iterations needed.
+
+  - The bot automatically sets the game's process priority to HIGH.
+
+  - For long overnight runs, use Backlog Analysis with Intermittent
+    processing. Most reliable configuration.
+
+  - Enable Smart Analyze to catch valuable combos you didn't search for.
+
+  - Check the Odds Viewer before starting -- if your odds are very low,
+    consider loosening criteria (2/3 instead of 3/3).
+
+  - If the bot seems sluggish or misses inputs, try Conservative Timing.
+
+  - With GPU acceleration, a typical iteration takes ~3 minutes for
+    ~140 relics. Without GPU, ~8-10 minutes per iteration.
+
+
+================================================================================
+  14. TROUBLESHOOTING
+================================================================================
+
+  BOT DOESN'T START
+    - Make sure the game is fully closed before clicking Start
+    - Check that all paths (Game EXE, Save File, Backup, Output) are set
+
+  GAME DOESN'T LAUNCH
+    - Verify the Game EXE path points to eldenring_nightreign.exe
+    - Make sure Steam is running
+
+  BOT GETS STUCK / WRONG SCREEN
+    - Press F9 to stop gracefully
+    - The bot has built-in recovery (ESC + retry) for most situations
+    - If repeated, try Conservative Timing or increase settle times
+
+  NO MATCHES FOUND
+    - Check your criteria -- are you being too specific?
+    - Use the Odds Viewer to see the probability
+    - Consider 2/3 threshold instead of 3/3
+
+  CRASH ON STARTUP
+    - Delete relicbot_config.json and restart (settings will reset)
+    - If a profile causes the crash, rename the profiles/ folder
+
+  EXPORT DIAGNOSTICS
+    Use File > Export Diagnostics to create a .diag file with detailed
+    logs for bug reporting.
+
+
+================================================================================
+  Questions? Issues?
+  https://github.com/PulgoMaster/Pulgo-Elden-Ring-Nightreign-Relic-Farming-Bot
+================================================================================
