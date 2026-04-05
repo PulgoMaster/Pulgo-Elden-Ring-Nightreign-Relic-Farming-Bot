@@ -591,34 +591,45 @@ class _ExactRelicTab(ttk.Frame):
             else:
                 lines.append(f"  {p}  →  not in {pool_name} pool")
 
-        # ── This target probability (color-filtered, size-weighted) ─────────
+        # ── Access enhanced engine via parent ─────────────────────────────────
+        try:
+            nb = self.nametowidget(self.winfo_parent())
+            rb = self.nametowidget(nb.winfo_parent())
+            _compute = getattr(rb, "compute_enhanced_p", None)
+        except Exception:
+            _compute = None
+
+        # ── This target probability ──────────────────────────────────────────
         lines.append("")
         n_filled = len(filled)
         p_this: float | None = None
 
-        if thresh >= n_filled:
-            p_this = prob_combo_on_relic(targets, rtype, colors)
-            if p_this and p_this > 0:
-                n = int(round(1.0 / p_this))
-                pct = p_this * 100
-                lines.append(f"  This target (all {n_filled}): {_fmt_pct(pct)}%  (~1 in {n:,} per relic)")
-            elif p_this == 0.0:
-                lines.append(f"  Impossible Combo — can't be rolled on {pool_name} Relics")
-            else:
-                lines.append(f"  This target: odds unknown (passive may not be in pool)")
+        # Generate doors for this target and use enhanced engine
+        from bot.door_generator import _doors_from_exact
+        _target_pool = DEEP_POOL_PASSIVES if rtype == "night" else NORMAL_POOL_PASSIVES
+        _this_target_doors = _doors_from_exact(
+            {"targets": [{"passives": targets, "threshold": thresh}]},
+            _target_pool)
+
+        if _compute and _this_target_doors:
+            p_m, p_c = _compute(_this_target_doors)
+            p_this = p_c if p_c > 1e-15 else p_m
         else:
-            per_p    = [prob_passive_on_relic(t, rtype, colors) or 0.0 for t in targets]
-            p_thresh = prob_at_least_k_of_pool(per_p, thresh)
-            p_all    = prob_combo_on_relic(targets, rtype, colors)
-            p_this   = p_thresh if p_thresh > 0 else p_all
-            if p_thresh > 0:
-                n_thresh = int(round(1.0 / max(p_thresh, 1e-12)))
-                pct_thresh = p_thresh * 100
-                lines.append(f"  This target (≥{thresh} of {n_filled}): {_fmt_pct(pct_thresh)}%  (~1 in {n_thresh:,} per relic)")
-            if p_all and p_all > 0:
-                n_all = int(round(1.0 / max(p_all, 1e-12)))
-                pct_all = p_all * 100
-                lines.append(f"  This target (all {n_filled}): {_fmt_pct(pct_all)}%  (~1 in {n_all:,} per relic)")
+            if thresh >= n_filled:
+                p_this = prob_combo_on_relic(targets, rtype, colors)
+            else:
+                per_p = [prob_passive_on_relic(t, rtype, colors) or 0.0 for t in targets]
+                p_this = prob_at_least_k_of_pool(per_p, thresh)
+
+        if p_this and p_this > 0:
+            n = int(round(1.0 / p_this))
+            pct = p_this * 100
+            label = f"all {n_filled}" if thresh >= n_filled else f"\u2265{thresh} of {n_filled}"
+            lines.append(f"  This target ({label}): {_fmt_pct(pct)}%  (~1 in {n:,} per relic)")
+        elif p_this == 0.0:
+            lines.append(f"  Impossible Combo \u2014 can't be rolled on {pool_name} Relics")
+        else:
+            lines.append(f"  This target: odds unknown (passive may not be in pool)")
 
         # ── All defined targets combined (any target matches) ────────────────
         self._save_current()
@@ -630,25 +641,31 @@ class _ExactRelicTab(ttk.Frame):
         p_combined: float | None = None
 
         if len(all_valid) > 1:
-            complement = 1.0
-            found_any  = False
-            for t in all_valid:
-                t_slots  = t["slots"]
-                t_thresh = t["threshold"]
-                if t_thresh >= len(t_slots):
-                    p = prob_combo_on_relic(t_slots, rtype, colors)
-                else:
-                    pp_list = [prob_passive_on_relic(s, rtype, colors) or 0.0 for s in t_slots]
-                    p = prob_at_least_k_of_pool(pp_list, t_thresh)
-                if p and p > 0:
-                    complement *= max(0.0, 1.0 - p)
-                    found_any   = True
-            if found_any:
+            # Generate doors for ALL targets and compute combined probability
+            all_target_doors = _doors_from_exact(
+                {"targets": [{"passives": t["slots"], "threshold": t["threshold"]}
+                             for t in all_valid]},
+                _target_pool)
+            if _compute and all_target_doors:
+                p_m, p_c = _compute(all_target_doors)
+                p_combined = p_c if p_c > 1e-15 else p_m
+            else:
+                complement = 1.0
+                for t in all_valid:
+                    if t["threshold"] >= len(t["slots"]):
+                        p = prob_combo_on_relic(t["slots"], rtype, colors)
+                    else:
+                        pp_list = [prob_passive_on_relic(s, rtype, colors) or 0.0
+                                   for s in t["slots"]]
+                        p = prob_at_least_k_of_pool(pp_list, t["threshold"])
+                    if p and p > 0:
+                        complement *= max(0.0, 1.0 - p)
                 p_combined = max(0.0, 1.0 - complement)
-                if p_combined > 0:
-                    n_any = int(round(1.0 / max(p_combined, 1e-12)))
-                    pct_any = p_combined * 100
-                    lines.append(f"  Odds of meeting any of {len(all_valid)} targets: {_fmt_pct(pct_any)}%  (~1 in {n_any:,} per relic)")
+
+            if p_combined and p_combined > 0:
+                n_any = int(round(1.0 / max(p_combined, 1e-12)))
+                pct_any = p_combined * 100
+                lines.append(f"  Odds of meeting any of {len(all_valid)} targets: {_fmt_pct(pct_any)}%  (~1 in {n_any:,} per relic)")
 
         self._propagate_p(p_combined if p_combined is not None else p_this)
         self._set_odds_text("\n".join(lines))
@@ -1329,7 +1346,6 @@ class _PassivePoolTab(ttk.Frame):
     def _update_odds(self):
         """Recompute and display odds for the current pool + threshold."""
         rtype  = self._relic_type
-        colors = self._allowed_colors
         n_pool = len(self._entries) + len(self._pairings)
         thresh = self._threshold.get()
 
@@ -1343,24 +1359,37 @@ class _PassivePoolTab(ttk.Frame):
 
         pool_name = "Deep of Night" if rtype == "night" else "Normal"
 
+        # Access the enhanced engine via the parent RelicBuilderFrame
+        try:
+            nb = self.nametowidget(self.winfo_parent())
+            rb = self.nametowidget(nb.winfo_parent())
+            _compute = getattr(rb, "compute_enhanced_p", None)
+        except Exception:
+            _compute = None
+
         # ── Single-entry odds ────────────────────────────────────────────────
         if self._entries:
             lines.append("  My Pool:")
         for entry in self._entries:
             accepted = entry["accepted"]
             label = _entry_label(entry)
-            # P(any of the accepted variants appears) — use complement product
-            # so multi-variant entries (e.g. Physical +3 OR +4) are handled correctly.
-            p_relic = prob_any_combo_on_relic([[p] for p in accepted], rtype, colors)
+            # Generate doors for this single entry (each accepted variant = 1-passive door)
+            entry_doors = [(frozenset([p]), "entry") for p in accepted
+                           if p in (DEEP_POOL_PASSIVES if rtype == "night" else NORMAL_POOL_PASSIVES)]
+            if _compute and entry_doors:
+                p_m, p_c = _compute(entry_doors)
+                p_relic = p_c if p_c > 1e-15 else p_m
+            else:
+                p_relic = prob_any_combo_on_relic([[p] for p in accepted], rtype)
             if p_relic and p_relic > 0:
                 n_r = int(round(1.0 / p_relic))
                 pct = p_relic * 100
-                lines.append(f"    {label}  →  {_fmt_pct(pct)}%  (~1 in {n_r:,} per relic)")
+                lines.append(f"    {label}  \u2192  {_fmt_pct(pct)}%  (~1 in {n_r:,} per relic)")
                 per_relic_probs.append(p_relic)
             elif p_relic == 0.0:
-                lines.append(f"    {label}  →  Impossible Combo — passives are from the same exclusive group")
+                lines.append(f"    {label}  \u2192  Impossible Combo \u2014 passives are from the same exclusive group")
             else:
-                lines.append(f"    {label}  →  not in {pool_name} pool")
+                lines.append(f"    {label}  \u2192  not in {pool_name} pool")
 
         # ── Pairing odds ─────────────────────────────────────────────────────
         if self._pairings:
@@ -1381,76 +1410,36 @@ class _PassivePoolTab(ttk.Frame):
                 parts.append(f"{len(pool)} pool C options")
             pair_label = " + ".join(parts)
 
-            # Compute base A+B probability (if both present)
+            # Check basic compat
             if has_a and has_b:
-                ab_p = 0.0
-                any_compat = False
-                for lp in left:
-                    for rp in right:
-                        if compat_ok([lp, rp]):
-                            any_compat = True
-                            p_lr = prob_combo_on_relic([lp, rp], rtype, colors)
-                            if p_lr:
-                                ab_p += p_lr
+                any_compat = any(compat_ok([lp, rp]) for lp in left for rp in right)
                 if not any_compat:
-                    lines.append(f"    {pair_label}  →  Impossible Combo — A and B are from the same exclusive group")
+                    lines.append(f"    {pair_label}  \u2192  Impossible Combo \u2014 A and B are from the same exclusive group")
                     continue
-            else:
-                ab_p = None  # no A+B base
 
-            if has_c and (has_a or has_b):
-                # Compute P(mandatory passives AND at least one from pool C)
-                # For each c_i in pool: P([A, B, c_i]) or P([A, c_i]) or P([B, c_i])
-                # Sum across all c_i (approximately exact for small probs / disjoint categories)
-                pool_agg_p = 0.0
-                mandatory = []
-                if has_a:
-                    mandatory.extend(left)
-                if has_b:
-                    mandatory.extend(right)
-                for cp in pool:
-                    # Try each combination of mandatory variants + this pool passive
-                    if has_a and has_b:
-                        for lp in left:
-                            for rp in right:
-                                combo = [lp, rp, cp]
-                                if compat_ok(combo):
-                                    p_c = prob_combo_on_relic(combo, rtype, colors)
-                                    if p_c:
-                                        pool_agg_p += p_c
-                    elif has_a:
-                        for lp in left:
-                            combo = [lp, cp]
-                            if compat_ok(combo):
-                                p_c = prob_combo_on_relic(combo, rtype, colors)
-                                if p_c:
-                                    pool_agg_p += p_c
-                    else:  # has_b only
-                        for rp in right:
-                            combo = [rp, cp]
-                            if compat_ok(combo):
-                                p_c = prob_combo_on_relic(combo, rtype, colors)
-                                if p_c:
-                                    pool_agg_p += p_c
+            # Generate doors for this pairing using the door generator
+            pair_pool = DEEP_POOL_PASSIVES if rtype == "night" else NORMAL_POOL_PASSIVES
+            pair_doors = _doors_from_pairings(
+                {"pairings": [pair], "threshold": 1}, pair_pool)
 
-                if pool_agg_p > 0:
-                    n = int(round(1.0 / pool_agg_p))
-                    pct = pool_agg_p * 100
-                    lines.append(f"    {pair_label}  →  {_fmt_pct(pct)}%  (~1 in {n:,} per relic)")
-                    per_relic_probs.append(pool_agg_p)
-                else:
-                    lines.append(f"    {pair_label}  →  not available in {pool_name} pool")
-            elif has_a and has_b:
-                # A+B only, no pool C
-                if ab_p and ab_p > 0:
-                    n = int(round(1.0 / ab_p))
-                    pct = ab_p * 100
-                    lines.append(f"    {pair_label}  →  {_fmt_pct(pct)}%  (~1 in {n:,} per relic)")
-                    per_relic_probs.append(ab_p)
-                else:
-                    lines.append(f"    {pair_label}  →  not available in {pool_name} pool")
+            if _compute and pair_doors:
+                p_m, p_c = _compute(pair_doors)
+                pair_p = p_c if p_c > 1e-15 else p_m
             else:
-                lines.append(f"    {pair_label}  →  insufficient data")
+                # Fallback to old engine
+                pair_p = 0.0
+                for d, _ in pair_doors:
+                    p = prob_combo_on_relic(list(d), rtype)
+                    if p and p > 0:
+                        pair_p = 1.0 - (1.0 - pair_p) * (1.0 - p)
+
+            if pair_p and pair_p > 0:
+                n = int(round(1.0 / pair_p))
+                pct = pair_p * 100
+                lines.append(f"    {pair_label}  \u2192  {_fmt_pct(pct)}%  (~1 in {n:,} per relic)")
+                per_relic_probs.append(pair_p)
+            else:
+                lines.append(f"    {pair_label}  \u2192  not available in {pool_name} pool")
 
         # ── Combined P(≥ thresh of all criteria) ─────────────────────────────
         p_combined: float | None = None
@@ -1920,6 +1909,7 @@ class RelicBuilderFrame(ttk.LabelFrame):
         super().__init__(parent, text="Relic Criteria", **kwargs)
         self._p_per_relic: float | None = None
         self._on_odds_changed = None  # optional callback(float | None)
+        self._get_exclusion_data = None  # callback → (excluded_passives: set, n_blocked_curses: int)
         self._relic_type: str = "night"
         self._build()
 
@@ -2008,21 +1998,251 @@ class RelicBuilderFrame(ttk.LabelFrame):
     def _set_p_per_relic(self, p: float | None) -> None:
         """Called by child tabs when they recompute per-relic probability.
 
-        In Combine mode, computes P(exact OR pool) from both tabs.
+        In Combine mode, builds a unified odds view across both tabs and
+        pushes it to both odds text widgets.
         In single-tab mode, uses the value from the active tab directly.
         """
         if self._combine_var.get():
-            # P(A or B) = 1 - (1-A)(1-B)
-            pe = self._exact._last_p if hasattr(self._exact, "_last_p") else None
-            pp = self._pool._last_p if hasattr(self._pool, "_last_p") else None
-            if pe and pp:
-                self._p_per_relic = 1.0 - (1.0 - pe) * (1.0 - pp)
-            else:
-                self._p_per_relic = pe or pp
+            self._build_combined_odds_view()
         else:
             self._p_per_relic = p
         if self._on_odds_changed is not None:
             self._on_odds_changed(self._p_per_relic)
+
+    def _build_combined_odds_view(self):
+        """Build unified odds text showing all groups with headers and subtotals.
+
+        Groups: Build Exact Relic, My Pool, Pairings.
+        Each shows its entries + subtotal.  Aggregate at the bottom.
+        Pushes the same text to both tabs' odds widgets.
+        """
+        rtype = self._relic_type
+        pool = DEEP_POOL_PASSIVES if rtype == "night" else NORMAL_POOL_PASSIVES
+        pool_name = "Deep of Night" if rtype == "night" else "Normal"
+        lines: list[str] = []
+        group_probs: list[float] = []  # per-group combined P for aggregate
+
+        # ── Build Exact Relic group ──────────────────────────────────────
+        self._exact._save_current()
+        exact_targets = [
+            {"slots": [p for p in t["slots"] if p], "threshold": t["threshold"]}
+            for t in self._exact._targets
+            if any(t["slots"])
+        ]
+        if exact_targets:
+            lines.append("  Build Exact Relic:")
+            from bot.door_generator import _doors_from_exact
+            all_exact_doors = []
+            for idx, t in enumerate(exact_targets):
+                t_doors = _doors_from_exact(
+                    {"targets": [{"passives": t["slots"], "threshold": t["threshold"]}]},
+                    pool)
+                all_exact_doors.extend(t_doors)
+                if t_doors:
+                    p_m, p_c = self.compute_enhanced_p(t_doors)
+                    p_t = p_c if p_c > 1e-15 else p_m
+                else:
+                    p_t = 0.0
+                label = f"\u2265{t['threshold']}" if t["threshold"] < len(t["slots"]) else "all"
+                slot_str = " + ".join(t["slots"])
+                if p_t and p_t > 0:
+                    lines.append(
+                        f"    Target {idx+1} ({label}): {slot_str}"
+                        f"  \u2192  {_fmt_pct(p_t*100)}%  (~1 in {int(round(1/p_t)):,})")
+                else:
+                    lines.append(f"    Target {idx+1} ({label}): {slot_str}  \u2192  N/A")
+
+            # Exact group subtotal
+            if all_exact_doors:
+                p_m, p_c = self.compute_enhanced_p(all_exact_doors)
+                p_exact = p_c if p_c > 1e-15 else p_m
+                if p_exact and p_exact > 0:
+                    lines.append(
+                        f"    Odds from Build Exact Relic: {_fmt_pct(p_exact*100)}%"
+                        f"  (~1 in {int(round(1/p_exact)):,} per relic)")
+                    group_probs.append(p_exact)
+            lines.append("")
+
+        # ── My Pool group ────────────────────────────────────────────────
+        pool_entries = self._pool._entries
+        if pool_entries:
+            lines.append("  My Pool:")
+            for entry in pool_entries:
+                accepted = entry["accepted"]
+                label = _entry_label(entry)
+                entry_doors = [(frozenset([p]), "entry") for p in accepted
+                               if p in pool]
+                if entry_doors:
+                    p_m, p_c = self.compute_enhanced_p(entry_doors)
+                    p_e = p_c if p_c > 1e-15 else p_m
+                else:
+                    p_e = 0.0
+                if p_e and p_e > 0:
+                    lines.append(
+                        f"    {label}  \u2192  {_fmt_pct(p_e*100)}%  (~1 in {int(round(1/p_e)):,} per relic)")
+                else:
+                    lines.append(f"    {label}  \u2192  not in {pool_name} pool")
+
+            # Pool-only subtotal (entries only, threshold applied)
+            thresh = self._pool._threshold.get()
+            entry_probs = []
+            for entry in pool_entries:
+                ed = [(frozenset([p]), "entry") for p in entry["accepted"] if p in pool]
+                if ed:
+                    _, p_c = self.compute_enhanced_p(ed)
+                    if p_c and p_c > 0:
+                        entry_probs.append(p_c)
+            if entry_probs and len(entry_probs) >= thresh:
+                p_pool_only = prob_at_least_k_of_pool(entry_probs, thresh)
+                if p_pool_only and p_pool_only > 0:
+                    lines.append(
+                        f"    Odds from My Pool (\u2265{thresh}): {_fmt_pct(p_pool_only*100)}%"
+                        f"  (~1 in {int(round(1/p_pool_only)):,} per relic)")
+            lines.append("")
+
+        # ── Pairings group ───────────────────────────────────────────────
+        pairings = self._pool._pairings
+        if pairings:
+            lines.append("  Pairings:")
+            from bot.door_generator import _doors_from_pairings
+            all_pair_doors = []
+            for pair in pairings:
+                left = pair.get("left", [])
+                right = pair.get("right", [])
+                pool_c = pair.get("pool", [])
+                parts = []
+                if left:
+                    parts.append(_entry_label({"accepted": left}))
+                if right:
+                    parts.append(_entry_label({"accepted": right}))
+                if pool_c:
+                    parts.append(f"{len(pool_c)} pool C options")
+                pair_label = " + ".join(parts)
+
+                pair_doors = _doors_from_pairings(
+                    {"pairings": [pair], "threshold": 1}, pool)
+                all_pair_doors.extend(pair_doors)
+                if pair_doors:
+                    p_m, p_c = self.compute_enhanced_p(pair_doors)
+                    p_p = p_c if p_c > 1e-15 else p_m
+                else:
+                    p_p = 0.0
+                if p_p and p_p > 0:
+                    lines.append(
+                        f"    {pair_label}  \u2192  {_fmt_pct(p_p*100)}%"
+                        f"  (~1 in {int(round(1/p_p)):,} per relic)")
+                else:
+                    lines.append(f"    {pair_label}  \u2192  not available in {pool_name} pool")
+
+            # Pairings subtotal
+            if all_pair_doors:
+                p_m, p_c = self.compute_enhanced_p(all_pair_doors)
+                p_pairs = p_c if p_c > 1e-15 else p_m
+                if p_pairs and p_pairs > 0:
+                    lines.append(
+                        f"    Odds from Pairings: {_fmt_pct(p_pairs*100)}%"
+                        f"  (~1 in {int(round(1/p_pairs)):,} per relic)")
+                    group_probs.append(p_pairs)
+            lines.append("")
+
+        # ── Pool + Pairings combined (for threshold) ─────────────────────
+        # The pool threshold applies across entries AND pairings together
+        thresh = self._pool._threshold.get() if pool_entries or pairings else 1
+        all_pool_probs = []
+        for entry in pool_entries:
+            ed = [(frozenset([p]), "entry") for p in entry["accepted"] if p in pool]
+            if ed:
+                _, p_c = self.compute_enhanced_p(ed)
+                if p_c and p_c > 0:
+                    all_pool_probs.append(p_c)
+        for pair in pairings:
+            pd = _doors_from_pairings({"pairings": [pair], "threshold": 1}, pool)
+            if pd:
+                _, p_c = self.compute_enhanced_p(pd)
+                if p_c and p_c > 0:
+                    all_pool_probs.append(p_c)
+        if all_pool_probs and len(all_pool_probs) >= thresh:
+            p_pool_combined = prob_at_least_k_of_pool(all_pool_probs, thresh)
+            if p_pool_combined and p_pool_combined > 0:
+                group_probs = [g for g in group_probs]  # keep exact separate
+                # Replace pool+pairing entries in group_probs with combined
+                # Remove individual pool/pairing entries, add combined
+                group_probs_final = []
+                if exact_targets:
+                    # Re-get exact prob
+                    all_ed = []
+                    for t in exact_targets:
+                        all_ed.extend(_doors_from_exact(
+                            {"targets": [{"passives": t["slots"], "threshold": t["threshold"]}]},
+                            pool))
+                    if all_ed:
+                        _, p_c = self.compute_enhanced_p(all_ed)
+                        if p_c and p_c > 0:
+                            group_probs_final.append(p_c)
+                group_probs_final.append(p_pool_combined)
+                # Aggregate: P(any group matches)
+                agg = 1.0
+                for gp in group_probs_final:
+                    agg *= (1.0 - gp)
+                p_agg = 1.0 - agg
+                if p_agg > 0:
+                    lines.append(
+                        f"  Combined odds (any match): {_fmt_pct(p_agg*100)}%"
+                        f"  (~1 in {int(round(1/p_agg)):,} per relic)")
+                    self._p_per_relic = p_agg
+                else:
+                    self._p_per_relic = None
+        elif group_probs:
+            agg = 1.0
+            for gp in group_probs:
+                agg *= (1.0 - gp)
+            p_agg = 1.0 - agg
+            if p_agg > 0:
+                lines.append(
+                    f"  Combined odds (any match): {_fmt_pct(p_agg*100)}%"
+                    f"  (~1 in {int(round(1/p_agg)):,} per relic)")
+                self._p_per_relic = p_agg
+            else:
+                self._p_per_relic = None
+        else:
+            self._p_per_relic = None
+
+        # Push unified text to both tabs
+        text = "\n".join(lines)
+        self._exact._set_odds_text(text)
+        self._pool._set_odds_text(text)
+
+    def compute_enhanced_p(self, doors: list) -> tuple[float, float]:
+        """Compute P(match) and P(clean) for a list of doors using the enhanced engine.
+
+        Returns (p_match, p_clean).  Falls back to old engine if enhanced
+        engine is not available or exclusion data callback is not set.
+        """
+        if not doors:
+            return (0.0, 0.0)
+        rtype = self._relic_type
+        excluded: set = set()
+        n_blocked = 0
+        if self._get_exclusion_data:
+            try:
+                excluded, n_blocked = self._get_exclusion_data()
+            except Exception:
+                pass
+        try:
+            from bot.probability_engine import prob_effective_deep, prob_effective_normal
+            _prob_fn = prob_effective_deep if rtype == "night" else prob_effective_normal
+            complement = 1.0
+            complement_match = 1.0
+            for door_set, _label in doors:
+                if rtype == "night":
+                    r = _prob_fn(list(door_set), len(door_set), excluded, n_blocked)
+                else:
+                    r = _prob_fn(list(door_set), len(door_set), excluded)
+                complement *= 1.0 - (r.get("p_clean") or 0.0)
+                complement_match *= 1.0 - (r.get("p_match") or 0.0)
+            return (1.0 - complement_match, 1.0 - complement)
+        except Exception:
+            return (0.0, 0.0)
 
     def get_current_p_per_relic(self) -> float | None:
         """Return the most recently computed per-relic success probability."""

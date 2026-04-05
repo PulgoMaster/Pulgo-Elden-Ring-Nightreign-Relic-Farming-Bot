@@ -178,6 +178,9 @@ class BotOverlay:
             "stats":       True,
             "rolls":       True,
             "overflow":    True,
+            "near_miss":   True,
+            "smart":       True,
+            "excl":        True,
             "process_log": True,
             "relic_log":   True,
         }
@@ -223,7 +226,6 @@ class BotOverlay:
 
         self._win = win
         self._build_ui()
-        win.withdraw()
         win.update_idletasks()
         _apply_noactivate(win)
         _apply_capture_exclusion(win)
@@ -341,7 +343,6 @@ class BotOverlay:
 
         self._row_smart = tk.Frame(bb, bg=_BG)
         self._row_smart.pack(fill="x", pady=1)
-        self._row_smart.pack_forget()  # hidden by default — shown when Smart Analyze is on
         tk.Label(self._row_smart, text="Smart Hits:", bg=_BG, fg="#9966ff",
                  font=("Consolas", 8, "bold"), width=11, anchor="w").pack(side="left")
         tk.Label(self._row_smart, textvariable=sv("smart_hits", "0"), bg=_BG, fg=_FG,
@@ -349,7 +350,6 @@ class BotOverlay:
 
         self._row_excl = tk.Frame(bb, bg=_BG)
         self._row_excl.pack(fill="x", pady=1)
-        self._row_excl.pack_forget()  # hidden by default — shown when Excluded Hits is on
         tk.Label(self._row_excl, text="Excl. Hits:", bg=_BG, fg="#cc6600",
                  font=("Consolas", 8, "bold"), width=11, anchor="w").pack(side="left")
         tk.Label(self._row_excl, textvariable=sv("excl_hits", "0"), bg=_BG, fg=_FG,
@@ -514,6 +514,18 @@ class BotOverlay:
         for key, frame, kwargs in self._managed_sections:
             if key == "always" or self._section_visible.get(key, True):
                 frame.pack(**kwargs)
+
+        # Toggle inline counter rows within the rolls section
+        for attr, key in [("_row_nearmiss", "near_miss"),
+                          ("_row_smart",    "smart"),
+                          ("_row_excl",     "excl")]:
+            row = getattr(self, attr, None)
+            if row:
+                if self._section_visible.get(key, True):
+                    row.pack(fill="x", pady=1)
+                else:
+                    row.pack_forget()
+
         self._update_log_layout()
 
     def _update_log_layout(self) -> None:
@@ -596,12 +608,12 @@ class BotOverlay:
         self._suppressed = suppressed
 
     def show(self) -> None:
-        """Auto-show (game watch). Suppressed when the user has manually hidden the overlay."""
-        if self._win and not getattr(self, "_suppressed", False) and not self._user_hidden:
+        """Show overlay (respects user toggle)."""
+        if self._win and not self._user_hidden:
             self._win.deiconify()
 
     def hide(self) -> None:
-        """Auto-hide (game watch — game lost focus)."""
+        """Hide overlay (used by user toggle)."""
         if self._win:
             self._win.withdraw()
 
@@ -625,39 +637,22 @@ class BotOverlay:
     # ── Game window watching ───────────────────────────────────────── #
 
     def start_game_watch(self, fragment: str = "nightreign") -> None:
+        """Keep overlay visible for the entire bot session.
+
+        The overlay stays shown regardless of whether the game window is
+        focused or even running.  Users control visibility via the hotkey
+        toggle or the Overlay Elements settings.
+        """
         if self._watching:
             return
         self._watching = True
+        # Show immediately — no polling needed.  The overlay stays visible
+        # until the bot run ends and destroy() is called.
+        if self._win and not self._user_hidden:
+            self._root.after(0, self._win.deiconify)
 
-        def _poll():
-            while self._watching and self._win:
-                if game_running(fragment):
-                    self._root.after(0, self.show)
-                else:
-                    self._root.after(0, self.hide)
-                threading.Event().wait(2.0)
-
-        threading.Thread(target=_poll, daemon=True).start()
-
-    # ── Conditional row visibility ────────────────────────────────── #
-
-    def set_smart_visible(self, visible: bool) -> None:
-        """Show/hide the Smart Hits row based on whether Smart Analyze is enabled."""
-        if not self._win:
-            return
-        if visible:
-            self._row_smart.pack(fill="x", pady=1)
-        else:
-            self._row_smart.pack_forget()
-
-    def set_excl_visible(self, visible: bool) -> None:
-        """Show/hide the Excluded Hits row based on whether the feature is enabled."""
-        if not self._win:
-            return
-        if visible:
-            self._row_excl.pack(fill="x", pady=1)
-        else:
-            self._row_excl.pack_forget()
+    # Row visibility for near_miss/smart/excl now handled by _repack_sections()
+    # via _section_visible dict and overlay element settings.
 
     # ── Data updates ───────────────────────────────────────────────── #
 

@@ -516,7 +516,7 @@ class RelicBotApp(tk.Tk):
         # under python.exe and iconbitmap has no effect on the taskbar icon.
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "PulgoMaster.RelicBot.v1.6.4"
+                "PulgoMaster.RelicBot.v1.6.5"
             )
         except Exception:
             pass
@@ -524,7 +524,7 @@ class RelicBotApp(tk.Tk):
         super().__init__()
         self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.6.4  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.6.5  |  Made by Pulgo")
         self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
@@ -614,6 +614,9 @@ class RelicBotApp(tk.Tk):
         self._ov_show_overflow_var   = tk.BooleanVar(value=True)
         self._ov_show_proc_log_var   = tk.BooleanVar(value=True)
         self._ov_show_relic_log_var  = tk.BooleanVar(value=True)
+        self._ov_show_near_miss_var  = tk.BooleanVar(value=True)
+        self._ov_show_smart_var      = tk.BooleanVar(value=True)
+        self._ov_show_excl_var       = tk.BooleanVar(value=True)
         self._ov_elem_widgets: list  = []   # populated in _build_ui; toggled by overlay enable
         self._parallel_enabled_var  = tk.BooleanVar(value=False)
         self._parallel_workers_var  = tk.IntVar(value=2)
@@ -923,6 +926,10 @@ class RelicBotApp(tk.Tk):
         # ── Relic Criteria (builder with Free Text / Exact / Pool tabs) ─ #
         self.relic_builder = RelicBuilderFrame(inner)
         self.relic_builder.grid(row=3, column=0, sticky="ew", **pad)
+        self.relic_builder._get_exclusion_data = lambda: (
+            self._get_excluded_passives(),
+            len(getattr(self, "_blocked_curses_list", [])),
+        )
 
         # ── Curse Filter ─────────────────────────────────────────────── #
         self._curse_frame = ttk.LabelFrame(inner, text="Curse Filter  (relics with these curses are rejected)")
@@ -1094,12 +1101,7 @@ class RelicBotApp(tk.Tk):
         self._excluded_lb.bind("<MouseWheel>",
             lambda e: (self._excluded_lb.yview_scroll(int(-1*(e.delta/120)), "units"), "break")[1])
 
-        # Opt-in: save excluded matches
-        ttk.Checkbutton(
-            excl_frame,
-            text='Save "matched but excluded" relics to a separate folder (screenshot + summary)',
-            variable=self._save_exclusion_matches_var,
-        ).pack(anchor="w", padx=6, pady=(0, 6))
+        # Save excluded matches checkbox moved to "Optional Matching Features" in Batch Mode Settings
 
         # ── Batch Mode Settings ─────────────────────────────────────── #
         self.batch_frame = ttk.LabelFrame(inner, text="Batch Mode Settings")
@@ -1138,9 +1140,9 @@ class RelicBotApp(tk.Tk):
         ttk.Button(_arrow_col, text="▼", width=2, command=lambda: _batch_inc(-1)).pack(side="top")
 
 
-        # Brute Force Analysis toggle
+        # Additional CPU Workers toggle
         bf_chk = ttk.Checkbutton(
-            self.batch_frame, text="⚡ Brute Force Analysis",
+            self.batch_frame, text="⚡ Additional CPU Workers",
             variable=self._parallel_enabled_var,
             command=self._on_parallel_toggle,
         )
@@ -1150,7 +1152,7 @@ class RelicBotApp(tk.Tk):
                  "Each worker loads its own OCR model into RAM (~200 MB each).\n"
                  "CPU cores are shared evenly so workers don't fight each other.\n\n"
                  "── With GPU Acceleration ON ─────────────────────\n"
-                 "Brute Force is locked unless Hybrid GPU+CPU mode is also enabled.\n"
+                 "This setting is locked unless Hybrid GPU+CPU mode is also enabled.\n"
                  "GPU Acceleration already adds 1 fast GPU worker on its own.\n"
                  "Enable Hybrid to add CPU workers alongside it.\n\n"
                  "── Without GPU Acceleration (CPU mode) ──────────\n"
@@ -1164,9 +1166,9 @@ class RelicBotApp(tk.Tk):
                  "Workers automatically pause if RAM drops critically low.\n"
                  "Leave OFF if you notice crashes, freezes, or system slowdowns.")
         ttk.Label(self.batch_frame, text="Workers:").grid(row=4, column=2, **pad)
-        _worker_max = min(8, max(2, self._hw_cpu_cores or 8))
+        _worker_max = min(8, max(1, self._hw_cpu_cores or 8))
         self._parallel_spin = ttk.Spinbox(
-            self.batch_frame, from_=2, to=_worker_max, width=4,
+            self.batch_frame, from_=1, to=_worker_max, width=4,
             textvariable=self._parallel_workers_var, state="disabled",
         )
         self._parallel_spin.grid(row=4, column=3, sticky="w", **pad)
@@ -1206,7 +1208,7 @@ class RelicBotApp(tk.Tk):
                  "and are renamed/removed once analysis completes.\n\n"
                  "After all iterations are captured, the bot waits for analysis\n"
                  "to fully finish before stopping (grace period).\n\n"
-                 "Best paired with Brute Force Analysis for maximum throughput.")
+                 "Best paired with Additional CPU Workers for maximum throughput.")
 
         # Smart Throttle toggle
         st_chk = ttk.Checkbutton(
@@ -1223,12 +1225,16 @@ class RelicBotApp(tk.Tk):
                  "so inputs are never starved.\n\n"
                  "Leave OFF if you want inputs always protected (safe default).")
 
-        # Smart Analyze toggle
+        # ── Optional Matching Features sub-section ──────────────────── #
+        _opt_match_lf = ttk.LabelFrame(self.batch_frame, text="Optional Matching Features")
+        _opt_match_lf.grid(row=5, column=3, columnspan=5, rowspan=2,
+                           sticky="nsew", padx=(8, 4), pady=(0, 4))
+
         sa_chk = ttk.Checkbutton(
-            self.batch_frame, text="🔍 Smart Analyze",
+            _opt_match_lf, text="🔍 Smart Analyze",
             variable=self._smart_analyze_var,
         )
-        sa_chk.grid(row=5, column=3, columnspan=2, sticky="w", **pad)
+        sa_chk.pack(anchor="w", padx=6, pady=(4, 0))
         _Tooltip(sa_chk,
                  "After OCR, evaluates non-matching relics against a set of curated rules.\n"
                  "Catches valuable combinations not in your target criteria — school stacks,\n"
@@ -1237,6 +1243,17 @@ class RelicBotApp(tk.Tk):
                  "The overlay shows a live counter of smart hits found this session.\n\n"
                  "Runs in the same worker thread — no extra RAM needed.\n"
                  "Has no effect on matched relics (God Rolls and HITs are unaffected).")
+
+        _excl_save_chk = ttk.Checkbutton(
+            _opt_match_lf,
+            text='Save "matched but excluded" relics',
+            variable=self._save_exclusion_matches_var,
+        )
+        _excl_save_chk.pack(anchor="w", padx=6, pady=(0, 4))
+        _Tooltip(_excl_save_chk,
+                 "Saves relics that matched your criteria but were blocked by an excluded\n"
+                 "passive or blocked curse to a separate 'Excluded Hits' folder.\n"
+                 "Includes screenshot and summary info for review.")
 
         # Exclude Analysis While Operations Are Happening sub-option (Async Analysis only)
         _ebp_chk = ttk.Checkbutton(
@@ -1256,28 +1273,26 @@ class RelicBotApp(tk.Tk):
 
         # Unified Hybrid GPU+CPU — works with Async and Backlog modes
         _hyb_chk = ttk.Checkbutton(
-            self.batch_frame, text="⚡ Hybrid GPU+CPU Analysis",
+            _gpu_lf, text="⚡ Hybrid GPU+CPU Analysis",
             variable=self._hybrid_var,
         )
-        _hyb_chk.grid(row=6, column=3, columnspan=2, sticky="w",
-                      padx=(4, 4), pady=(0, 2))
+        _hyb_chk.grid(row=1, column=0, columnspan=3, sticky="w", **pad)
         _Tooltip(_hyb_chk,
-                 "Runs one dedicated GPU worker alongside the CPU worker pool.\n"
+                 "Runs one dedicated GPU worker alongside CPU workers.\n"
                  "Both pull from the same queue in parallel — throughput ≈ GPU + CPU speed.\n\n"
                  "Works with both Async Analysis and Backlog Analysis.\n\n"
                  "Requirements:\n"
-                 "  • GPU Acceleration must be installed\n"
-                 "  • Brute Force Analysis must be enabled (for CPU workers)\n\n"
-                 "GPU worker uses CUDA; CPU workers use the processor.\n"
-                 "CPU workers are capped at 4 in Hybrid mode.")
+                 "  • GPU Acceleration must be installed\n\n"
+                 "Defaults to 1 GPU worker + 1 CPU worker.\n"
+                 "Enable 'Additional CPU Workers' to add more CPU workers (capped at 4).\n\n"
+                 "GPU worker uses CUDA; CPU workers use the processor.")
 
         # GPU Always Analyze — sub-option of Hybrid mode only
         _gpu_aa_chk = ttk.Checkbutton(
-            self.batch_frame, text="🔓 GPU: Always Analyze",
+            _gpu_lf, text="🔓 GPU: Always Analyze",
             variable=self._gpu_always_analyze_var,
         )
-        _gpu_aa_chk.grid(row=6, column=5, columnspan=3, sticky="w",
-                         padx=(4, 4), pady=(0, 2))
+        _gpu_aa_chk.grid(row=1, column=3, columnspan=4, sticky="w", **pad)
         _Tooltip(_gpu_aa_chk,
                  "Allows the GPU worker to keep analyzing relics even while CPU workers are paused for game inputs.\n"
                  "GPU inference runs on the graphics card and does not compete for the CPU time inputs need.\n"
@@ -1297,15 +1312,16 @@ class RelicBotApp(tk.Tk):
                  wraplength=560)
 
         def _update_bf_gpu_lock(*_):
-            """Lock Brute Force + spinbox when GPU is on but Hybrid is not active.
+            """Manage Additional CPU Workers state relative to GPU/Hybrid settings.
 
-            GPU on alone = exactly 1 GPU worker, no CPU workers.
-            CPU workers only activate via Hybrid mode alongside the GPU worker.
-            In Hybrid mode CPU workers are capped at 4 to prevent over-saturation.
+            GPU on without Hybrid = exactly 1 GPU worker, no CPU workers.
+            Hybrid on without Additional CPU Workers = 1 GPU + 1 CPU.
+            Hybrid on WITH Additional CPU Workers = 1 GPU + N CPU (capped at 4).
             """
             _gpu = self._gpu_accel_var.get()
             _hyb = self._hybrid_var.get()
             if _gpu and not _hyb:
+                # GPU-only mode — no CPU workers
                 bf_chk.config(state="disabled")
                 self._parallel_spin.configure(state="disabled")
             else:
@@ -1332,9 +1348,8 @@ class RelicBotApp(tk.Tk):
                 # Excl.Ops is async-only
                 _ebp_chk.config(state="normal" if _on else "disabled")
 
-                # Unified Hybrid: requires GPU Accel + Brute Force — not mode-dependent
-                _hyb_ok = (self._gpu_accel_var.get()
-                           and self._parallel_enabled_var.get())
+                # Unified Hybrid: requires GPU Accel only — CPU workers default to 1 when toggle is off
+                _hyb_ok = self._gpu_accel_var.get()
                 _hyb_chk.config(state="normal" if _hyb_ok else "disabled")
                 if not _hyb_ok:
                     self._hybrid_var.set(False)
@@ -1405,25 +1420,36 @@ class RelicBotApp(tk.Tk):
                 self._ov_show_overflow_var, 1, 2,
                 "Lights up when a background overflow worker from a previous iteration\n"
                 "finds a 2/3 or 3/3 hit.  Hidden when count is zero regardless of this setting.")
-        # Row 2 of 2 — log panels (3 across, 3rd slot reserved)
+        # Row 2 — extra counter elements
+        _ov_chk_item(ov_elem_lf, "Near Misses",
+                self._ov_show_near_miss_var, 2, 0,
+                "Shows the count of near-miss relics (2 of 3 passives from a 3-passive target).")
+        _ov_chk_item(ov_elem_lf, "Smart Hits / Smart God Rolls",
+                self._ov_show_smart_var, 2, 1,
+                "Shows counts of relics flagged by Smart Analyze (school synergies, weapon combos, etc.).")
+        _ov_chk_item(ov_elem_lf, "Excluded Hits",
+                self._ov_show_excl_var, 2, 2,
+                "Shows the count of relics that matched criteria but were excluded by passive or curse filter.")
+
+        # Row 3 — log panels
         _ov_chk_item(ov_elem_lf, "Process Log",
-                self._ov_show_proc_log_var, 2, 0,
+                self._ov_show_proc_log_var, 3, 0,
                 "The left log panel — shows bot phase events and actions.")
         _ov_chk_item(ov_elem_lf, "Relic Log",
-                self._ov_show_relic_log_var, 2, 1,
+                self._ov_show_relic_log_var, 3, 1,
                 "The right log panel — shows per-relic OCR results.\n"
                 "If only one log is enabled it expands to fill the full overlay width.")
 
-        # Row 3 — Toggle Hotkey (sub-setting: disabled when overlay is off)
+        # Row 5 — Toggle Hotkey (sub-setting: disabled when overlay is off)
         _ov_hk_lbl1 = ttk.Label(ov_elem_lf, text="Toggle Hotkey:")
-        _ov_hk_lbl1.grid(row=3, column=0, sticky="e", padx=(28, 4), pady=4)
+        _ov_hk_lbl1.grid(row=5, column=0, sticky="e", padx=(28, 4), pady=4)
         self._ov_hotkey_btn = ttk.Button(
             ov_elem_lf,
             text=f"Rec: {self._ov_hotkey_display}",
             command=self._set_ov_hotkey_dialog,
             width=10,
         )
-        self._ov_hotkey_btn.grid(row=3, column=1, sticky="w", padx=(0, 8), pady=4)
+        self._ov_hotkey_btn.grid(row=5, column=1, sticky="w", padx=(0, 8), pady=4)
         _Tooltip(self._ov_hotkey_btn,
                  "Press this key (default: F7) to toggle the overlay on/off without\n"
                  "interrupting the game or the bot.\n"
@@ -1432,16 +1458,16 @@ class RelicBotApp(tk.Tk):
                  "Has no effect when Show HUD overlay is disabled.")
         self._ov_elem_widgets.extend([_ov_hk_lbl1, self._ov_hotkey_btn])
 
-        # Row 4 — Matches Hotkey (sub-setting: disabled when overlay is off)
+        # Row 6 — Matches Hotkey (sub-setting: disabled when overlay is off)
         _ov_hk_lbl2 = ttk.Label(ov_elem_lf, text="Matches Hotkey:")
-        _ov_hk_lbl2.grid(row=4, column=0, sticky="e", padx=(28, 4), pady=4)
+        _ov_hk_lbl2.grid(row=6, column=0, sticky="e", padx=(28, 4), pady=4)
         self._matches_hotkey_btn = ttk.Button(
             ov_elem_lf,
             text=f"Rec: {self._matches_hotkey_display}",
             command=self._set_matches_hotkey_dialog,
             width=10,
         )
-        self._matches_hotkey_btn.grid(row=4, column=1, sticky="w", padx=(0, 8), pady=4)
+        self._matches_hotkey_btn.grid(row=6, column=1, sticky="w", padx=(0, 8), pady=4)
         _Tooltip(self._matches_hotkey_btn,
                  "Press this key (default: F8) to toggle the overlay between the\n"
                  "normal log view and the full-width Matched Relics panel.\n\n"
@@ -1455,22 +1481,23 @@ class RelicBotApp(tk.Tk):
         self._overlay_enabled_var.trace_add("write", self._on_overlay_enable_toggle)
         self._on_overlay_enable_toggle()
 
-        # Low Performance Mode
+        # Conservative Timing
         lpm_chk = ttk.Checkbutton(
             self.batch_frame,
-            text="🐢 Low Performance Mode",
+            text="🐢 Conservative Timing",
             variable=self._low_perf_mode_var,
             command=self._on_lpm_toggle,
         )
         lpm_chk.grid(row=9, column=2, columnspan=3, sticky="w", **pad)
         _Tooltip(lpm_chk,
-                 "Applies conservative timing for slower systems or after extended runs\n"
+                 "Raises timing floors for slower systems or after extended runs\n"
                  "where the system has destabilised under load.\n\n"
                  "When enabled:\n"
                  "  • Phase 1 buy gap raised to 0.50 s base (dialog has more time to open)\n"
                  "  • Phase 4 initial settle raised to 2.0 s (Sell screen fully stabilises)\n"
-                 "  • Brute Force Analysis disabled (reduces CPU / RAM pressure)\n"
-                 "  • OCR limited to half of available CPU cores\n\n"
+                 "  • Menu animation delays increased (ESC recovery, shop detection)\n\n"
+                 "Does NOT disable workers or limit CPU cores — use the Additional CPU\n"
+                 "Workers toggle and worker count independently.\n\n"
                  "Input gaps already scale automatically with observed game load time\n"
                  "(see [Adaptive] log entries). This mode raises the baseline floor\n"
                  "so the adaptive scaling starts from a safer starting point.")
@@ -1493,7 +1520,7 @@ class RelicBotApp(tk.Tk):
                  "  • Full analysis: hits, near-misses, Smart Analyze, All Hits folder\n"
                  "  • Game is not running during this phase — OCR gets all available CPU\n\n"
                  "Recommended for low-end systems where OCR causes input starvation.\n"
-                 "Works alongside Low Performance Mode for maximum stability.")
+                 "Works alongside Conservative Timing for maximum stability.")
 
         # ── Async ↔ Backlog mutual exclusion ─────────────────────────── #
         # These two modes are fundamentally incompatible.  Trying to enable
@@ -1575,8 +1602,10 @@ class RelicBotApp(tk.Tk):
         self._backlog_mode_var.trace_add("write", _update_ibl_state)
         _update_ibl_state()   # initialise to current state
 
-        # Hybrid GPU+CPU Backlog — sub-setting of Backlog Mode
-        # GPU Acceleration toggle
+        # ── GPU Settings sub-section ────────────────────────────────── #
+        _gpu_lf = ttk.LabelFrame(self.batch_frame, text="GPU Settings")
+        _gpu_lf.grid(row=10, column=0, columnspan=8, sticky="ew", **pad)
+
         def _on_gpu_toggle(*_):
             from bot import relic_analyzer
             relic_analyzer.set_gpu_mode(self._gpu_accel_var.get())
@@ -1589,18 +1618,18 @@ class RelicBotApp(tk.Tk):
                 self._gpu_worker_lbl.grid_remove()
 
         gpu_chk = ttk.Checkbutton(
-            self.batch_frame, text="🖥 GPU Acceleration (opt-in)",
+            _gpu_lf, text="🖥 GPU Acceleration (opt-in)",
             variable=self._gpu_accel_var,
             command=_on_gpu_toggle,
         )
-        gpu_chk.grid(row=10, column=0, columnspan=2, sticky="w", **pad)
+        gpu_chk.grid(row=0, column=0, columnspan=2, sticky="w", **pad)
         _Tooltip(gpu_chk,
                  "Offloads OCR inference to your NVIDIA GPU (CUDA) instead of the CPU.\n"
                  "Adds exactly 1 dedicated GPU worker — CUDA inference does not benefit\n"
                  "from multiple workers competing for the same GPU context.\n\n"
                  "Speed: ~0.3 s/relic (GPU) vs ~3 s/relic (CPU) — ~10× faster.\n\n"
                  "When GPU Acceleration is on without Hybrid mode:\n"
-                 "  • Only the GPU worker runs — Brute Force workers are ignored\n"
+                 "  • Only the GPU worker runs — additional CPU workers are ignored\n"
                  "  • Enable Hybrid GPU+CPU to run CPU workers alongside the GPU worker\n\n"
                  "Requirements:\n"
                  "  • NVIDIA GPU with CUDA support (GTX 10xx or newer)\n"
@@ -1611,10 +1640,10 @@ class RelicBotApp(tk.Tk):
 
         # "+1 GPU Worker" badge — shown only when GPU Accel is enabled
         self._gpu_worker_lbl = ttk.Label(
-            self.batch_frame, text="+1 GPU Worker",
+            _gpu_lf, text="+1 GPU Worker",
             foreground="#7ec8f0",
         )
-        self._gpu_worker_lbl.grid(row=10, column=2, columnspan=2, sticky="w", **pad)
+        self._gpu_worker_lbl.grid(row=0, column=2, columnspan=2, sticky="w", **pad)
         _Tooltip(self._gpu_worker_lbl,
                  "GPU Acceleration adds exactly 1 dedicated GPU worker to the pool.\n\n"
                  "EasyOCR CUDA inference serializes within one GPU context — extra\n"
@@ -1624,11 +1653,11 @@ class RelicBotApp(tk.Tk):
         if not self._gpu_accel_var.get():
             self._gpu_worker_lbl.grid_remove()
         self._gpu_rec_lbl = ttk.Label(
-            self.batch_frame,
+            _gpu_lf,
             text="",
             foreground=theme.TEXT_MUTED,
         )
-        self._gpu_rec_lbl.grid(row=10, column=4, columnspan=3, sticky="w", **pad)
+        self._gpu_rec_lbl.grid(row=0, column=4, columnspan=3, sticky="w", **pad)
         # Set recommendation label based on CUDA detection
         if self._hw_cuda_available:
             self._gpu_rec_lbl.configure(
@@ -1699,12 +1728,12 @@ class RelicBotApp(tk.Tk):
                 _ibtn_tip   = self._gpu_eligible_reason or "No compatible NVIDIA GPU detected."
 
         self._gpu_install_btn = ttk.Button(
-            self.batch_frame,
+            _gpu_lf,
             text=_ibtn_text,
             state=_ibtn_state,
             command=self._install_gpu_acceleration,
         )
-        self._gpu_install_btn.grid(row=9, column=7, sticky="w", **pad)
+        self._gpu_install_btn.grid(row=2, column=0, columnspan=3, sticky="w", **pad)
         self._gpu_install_btn_tip = _Tooltip(self._gpu_install_btn, _ibtn_tip)
 
         # ── Hardware Recommendations ──────────────────────────────────── #
@@ -1737,40 +1766,46 @@ class RelicBotApp(tk.Tk):
                     row=grid_row, column=col * 3 + 2, sticky="w", padx=(0, 16), pady=2)
             return rec_lbl  # returns last one (used for GPU label reference)
 
-        # Row 1: Brute Force | Workers | Async Analysis
+        # Row 1: GPU | Hybrid | GPU Always Analyze
         _rr = _recs
-        _rec_row(hw_frame, 1, [
-            ("⚡ Brute Force:",  _rr["brute"][0],   _rr["brute"][1]),
-            ("Workers:",         _rr["workers_display"], "per RAM estimate"),
-            ("⚑ Async Analysis:", _rr["async_"][0], _rr["async_"][1]),
-        ])
-        # Row 2: Smart Throttle | Excl. Analysis | GPU
         _last_gpu_lbl = None
         for col, (lbl_text, rec, reason) in enumerate([
-            ("⚡ Smart Throttle:", _rr["smart_throttle"][0],    _rr["smart_throttle"][1]),
-            ("⏸ Excl. Analysis:",  _rr["exclude_buy_phase"][0], _rr["exclude_buy_phase"][1]),
-            ("🖥 GPU Accel:",       _rr["gpu"][0],               _rr["gpu"][1]),
+            ("🖥 GPU Accel:",       _rr["gpu"][0],     _rr["gpu"][1]),
+            ("⚡ Hybrid GPU+CPU:", _rr["hybrid"][0],  _rr["hybrid"][1]),
+            ("🔓 GPU Always:",     _rr["gpu_aa"][0],  _rr["gpu_aa"][1]),
         ]):
             ttk.Label(hw_frame, text=lbl_text,
                       foreground=theme.TEXT_MUTED).grid(
-                row=2, column=col * 3, sticky="e", padx=(8, 2), pady=2)
+                row=1, column=col * 3, sticky="e", padx=(8, 2), pady=2)
             color = "#7ec8f0" if rec not in ("OFF", "N/A", "?") else theme.TEXT_MUTED
             _rl = ttk.Label(hw_frame, text=rec, foreground=color)
-            _rl.grid(row=2, column=col * 3 + 1, sticky="w", padx=(0, 4), pady=2)
+            _rl.grid(row=1, column=col * 3 + 1, sticky="w", padx=(0, 4), pady=2)
             ttk.Label(hw_frame, text=f"({reason})",
                       foreground=theme.TEXT_MUTED).grid(
-                row=2, column=col * 3 + 2, sticky="w", padx=(0, 16), pady=2)
+                row=1, column=col * 3 + 2, sticky="w", padx=(0, 16), pady=2)
             if lbl_text.startswith("🖥"):
                 self._hw_gpu_rec_lbl = _rl
-        # Row 3: LPM | Backlog Analysis | Intermittent Backlog
-        _rec_row(hw_frame, 3, [
-            ("🐢 Low Perf Mode:",     _rr["lpm"][0],         _rr["lpm"][1]),
-            ("📦 Backlog Analysis:",  _rr["backlog"][0],     _rr["backlog"][1]),
-            ("⏸ Intermittent:",       _rr["intermittent"][0], _rr["intermittent"][1]),
+        # Row 2: CPU Workers | Workers count | Async Analysis
+        _rec_row(hw_frame, 2, [
+            ("⚡ CPU Workers:",    _rr["brute"][0],         _rr["brute"][1]),
+            ("Workers:",           _rr["workers_display"],  "per RAM estimate"),
+            ("⚑ Async Analysis:",  _rr["async_"][0],        _rr["async_"][1]),
         ])
-        # Row 4: Use Together | Exclude These Modes
+        # Row 3: Smart Throttle | Excl. Analysis | Backlog
+        _rec_row(hw_frame, 3, [
+            ("⚡ Smart Throttle:", _rr["smart_throttle"][0],    _rr["smart_throttle"][1]),
+            ("⏸ Excl. Analysis:",  _rr["exclude_buy_phase"][0], _rr["exclude_buy_phase"][1]),
+            ("📦 Backlog:",        _rr["backlog"][0],            _rr["backlog"][1]),
+        ])
+        # Row 4: Conservative | Intermittent | Smart Analyze
+        _rec_row(hw_frame, 4, [
+            ("🐢 Conservative:",     _rr["lpm"][0],            _rr["lpm"][1]),
+            ("⏸ Intermittent:",      _rr["intermittent"][0],   _rr["intermittent"][1]),
+            ("🔍 Smart Analyze:",    _rr["smart_analyze"][0],  _rr["smart_analyze"][1]),
+        ])
+        # Row 5: Use Together | Exclude These Modes
         _compat_frame = ttk.Frame(hw_frame)
-        _compat_frame.grid(row=4, column=0, columnspan=9, sticky="ew", padx=8, pady=(4, 2))
+        _compat_frame.grid(row=5, column=0, columnspan=9, sticky="ew", padx=8, pady=(4, 2))
         ttk.Label(_compat_frame, text="Use Together:",
                   foreground=theme.TEXT_MUTED).pack(side="left", padx=(0, 4))
         ttk.Label(_compat_frame, text=_recs["use_together"],
@@ -1780,9 +1815,9 @@ class RelicBotApp(tk.Tk):
         ttk.Label(_compat_frame, text=_recs["exclude_modes"],
                   foreground="#e09050").pack(side="left")
 
-        # Row 5: Enable Recommended Settings button + calibration status
+        # Row 6: Enable Recommended Settings button + calibration status
         _btn_frame = ttk.Frame(hw_frame)
-        _btn_frame.grid(row=5, column=0, columnspan=9, sticky="ew", padx=8, pady=(4, 2))
+        _btn_frame.grid(row=6, column=0, columnspan=9, sticky="ew", padx=8, pady=(4, 2))
         _apply_btn = ttk.Button(
             _btn_frame, text="✔ Enable Recommended Settings",
             command=self._apply_recommended_settings,
@@ -1879,7 +1914,7 @@ class RelicBotApp(tk.Tk):
         _ov_footer = ttk.Label(
             odds_viewer,
             text="Ideal conditions (no lag, no crashes).  "
-                 "Rolling: ~2.0 s/relic buy+settle + ~0.30 s/relic nav (LPM: 2.5 s + 0.45 s).  "
+                 "Rolling: ~2.0 s/relic buy+settle + ~0.30 s/relic nav (Conservative: 2.5 s + 0.45 s).  "
                  "OCR: ~3.0 s/relic CPU · ~0.3 s GPU · Hybrid combines GPU+CPU throughput · GPU Always Analyze suppresses CPU workers (GPU only).  "
                  "Async overlaps OCR with game.  Backlog defers OCR until after the run.  Intermittent drains every N iterations.",
             foreground=theme.TEXT_MUTED, wraplength=100,
@@ -2445,6 +2480,9 @@ class RelicBotApp(tk.Tk):
             "show_overflow":    self._ov_show_overflow_var.get(),
             "show_process_log": self._ov_show_proc_log_var.get(),
             "show_relic_log":   self._ov_show_relic_log_var.get(),
+            "show_near_miss":   self._ov_show_near_miss_var.get(),
+            "show_smart":       self._ov_show_smart_var.get(),
+            "show_excl":        self._ov_show_excl_var.get(),
         }
 
     def _on_ov_settings_change(self) -> None:
@@ -2453,33 +2491,17 @@ class RelicBotApp(tk.Tk):
             self._overlay.apply_settings(self._get_ov_settings())
 
     def _on_lpm_toggle(self) -> None:
-        """Apply or remove Low Performance Mode preset."""
+        """Apply or remove Conservative Timing preset."""
         if self._low_perf_mode_var.get():
-            self._parallel_enabled_var.set(False)
-            self._on_parallel_toggle()
             self._log(
-                "[Low Performance Mode] ON — Phase 1 gap base 0.50 s, "
-                "Phase 4 initial settle 2.0 s, Brute Force disabled, "
-                "OCR limited to half CPU cores."
+                "[Conservative Timing] ON — Phase 1 gap floor raised, "
+                "Phase 4 settle doubled, menu animation delays increased."
             )
-            # Recommend GPU Acceleration if the system has an eligible GPU
-            # but hasn't installed CUDA torch yet — GPU offloads OCR entirely,
-            # making LPM unnecessary on systems with a capable GPU.
-            if (self._gpu_eligible
-                    and not self._hw_cuda_available
-                    and not self._hw_cuda_torch_installed):
-                self._log(
-                    f"[GPU Recommendation] Compatible GPU detected "
-                    f"({self._gpu_eligible_name}) — consider installing "
-                    f"GPU Acceleration in Settings to offload OCR from the "
-                    f"CPU entirely. This will eliminate input starvation on "
-                    f"this system."
-                )
         else:
-            self._log("[Low Performance Mode] OFF — standard timing.")
+            self._log("[Conservative Timing] OFF — standard timing.")
 
     def _on_parallel_toggle(self):
-        """Enable/disable the workers spinbox based on the Brute Force checkbox.
+        """Enable/disable the workers spinbox based on the Additional CPU Workers checkbox.
 
         Spinbox is always disabled when GPU is on without Hybrid — in that mode
         the GPU worker runs alone and CPU worker count is ignored.
@@ -2805,6 +2827,9 @@ class RelicBotApp(tk.Tk):
         self._ov_show_overflow_var.set(data.get("ov_show_overflow", True))
         self._ov_show_proc_log_var.set(data.get("ov_show_process_log", True))
         self._ov_show_relic_log_var.set(data.get("ov_show_relic_log", True))
+        self._ov_show_near_miss_var.set(data.get("ov_show_near_miss", True))
+        self._ov_show_smart_var.set(data.get("ov_show_smart", True))
+        self._ov_show_excl_var.set(data.get("ov_show_excl", True))
         self._on_overlay_enable_toggle()
 
     def _save_app_config(self):
@@ -2845,6 +2870,9 @@ class RelicBotApp(tk.Tk):
             "ov_show_overflow":     self._ov_show_overflow_var.get(),
             "ov_show_process_log":  self._ov_show_proc_log_var.get(),
             "ov_show_relic_log":    self._ov_show_relic_log_var.get(),
+            "ov_show_near_miss":   self._ov_show_near_miss_var.get(),
+            "ov_show_smart":       self._ov_show_smart_var.get(),
+            "ov_show_excl":        self._ov_show_excl_var.get(),
         }
         try:
             with open(_APP_CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -3238,7 +3266,7 @@ class RelicBotApp(tk.Tk):
                         self._log("[Phase -0.5] Game process boosted to HIGH priority.")
                     time.sleep(0.2)
                     self.player.tap("Key.esc")
-                    # LPM needs more time for the menu-close animation.
+                    # Conservative Timing needs more time for the menu-close animation.
                     _p05_esc_settle = (2.5 if self._low_perf_mode_var.get() else 1.5) * max(1.0, self._perf_gap_mult)
                     time.sleep(_p05_esc_settle)   # wait for menu to fully close before Phase 0
                     return True, _elapsed
@@ -3660,12 +3688,8 @@ class RelicBotApp(tk.Tk):
         self._nearmiss_iterations = set()
         self._live_log_iters_written: set[int] = set()  # iterations with header in live_log
         # Show/hide conditional overlay rows based on active settings
-        if self._overlay:
-            _ov = self._overlay
-            self.after(0, lambda: _ov.set_smart_visible(self._smart_analyze_var.get())
-                       if _ov._win else None)
-            self.after(0, lambda: _ov.set_excl_visible(self._save_exclusion_matches_var.get())
-                       if _ov._win else None)
+        # Overlay row visibility now controlled via overlay element settings
+        # (near_miss, smart, excl toggles in _section_visible)
         self._best_33_iter          = None
         self._best_hits_iter        = None
         self._ov_total_relics       = 0
@@ -3954,8 +3978,8 @@ class RelicBotApp(tk.Tk):
                 target=_make_bg_worker(True), daemon=True, name="bg-gpu-worker")
             _bg_worker.start()
 
-            _bg_w_max = min(8, max(2, self._hw_cpu_cores or 8))
-            _bg_n_cpu = (max(2, min(_bg_w_max, self._parallel_workers_var.get()))
+            _bg_w_max = min(8, max(1, self._hw_cpu_cores or 8))
+            _bg_n_cpu = (max(1, min(_bg_w_max, self._parallel_workers_var.get()))
                          if self._parallel_enabled_var.get() else 1)
             _bg_cpu_threads = [
                 threading.Thread(target=_make_bg_worker(False, _bg_cpu_go_ev),
@@ -3992,9 +4016,8 @@ class RelicBotApp(tk.Tk):
             self._async_results_list = results
             _gpu_on          = self._gpu_accel_var.get()
             _async_hybrid    = (_gpu_on
-                                and self._hybrid_var.get()
-                                and self._parallel_enabled_var.get())
-            _worker_max      = min(8, max(2, self._hw_cpu_cores or 8))
+                                and self._hybrid_var.get())
+            _worker_max      = min(8, max(1, self._hw_cpu_cores or 8))
             # CPU worker count — only used when Hybrid is on or GPU is off.
             # When GPU is on without Hybrid, the GPU worker runs alone.
             _async_workers   = (max(1, min(_worker_max, self._parallel_workers_var.get()))
@@ -4004,11 +4027,9 @@ class RelicBotApp(tk.Tk):
             #   Core 0 is reserved as the "input core" — the bot thread runs
             #   at ABOVE_NORMAL priority and OCR workers are pinned to all
             #   other cores so inputs are never starved during inference.
-            #   LPM further limits OCR to half the total cores to keep the
-            #   system responsive on low-end hardware.
             _cpu_cores   = os.cpu_count() or 4
             _lpm_active  = self._low_perf_mode_var.get()
-            _ocr_cores   = max(1, (_cpu_cores // 2) if _lpm_active else (_cpu_cores - 1))
+            _ocr_cores   = max(1, _cpu_cores - 1)
             # GPU-only: 1 GPU worker uses CUDA, CPU thread count is less relevant
             _effective_cpu_workers = _async_workers if (not _gpu_on or _async_hybrid) else 1
             _torch_t     = max(1, _ocr_cores // _effective_cpu_workers)
@@ -4021,7 +4042,7 @@ class RelicBotApp(tk.Tk):
             if _cpu_cores > 1 and _ocr_mask:
                 relic_analyzer.configure_ocr_affinity(_ocr_mask)
 
-            _mode_tag = "LPM" if _lpm_active else "normal"
+            _mode_tag = "Conservative" if _lpm_active else "normal"
             if _async_hybrid:
                 _worker_desc  = f"1 GPU + {_async_workers} CPU worker(s) [Hybrid]"
                 _total_workers = _async_workers + 1
@@ -4143,7 +4164,7 @@ class RelicBotApp(tk.Tk):
                 threading.Thread(target=_make_relic_worker(True), daemon=True,
                                  name="async-relic-worker-gpu").start()
             else:
-                # CPU only — N workers from the Brute Force spinbox (or 1 if off).
+                # CPU only — N workers from the Additional CPU Workers spinbox (or 1 if off).
                 for _wn in range(_async_workers):
                     threading.Thread(target=_make_relic_worker(None), daemon=True,
                                      name=f"async-relic-worker-{_wn}").start()
@@ -4288,7 +4309,7 @@ class RelicBotApp(tk.Tk):
                 if self._gpu_always_analyze_var.get():
                     _mode_parts.append("GPU.Always")
             else:
-                _mode_parts.append("Brute Force")
+                _mode_parts.append("Additional CPU Workers")
             if self._smart_throttle_var.get():
                 _mode_parts.append("SmartThrottle")
             if self._smart_analyze_var.get():
@@ -5728,12 +5749,11 @@ class RelicBotApp(tk.Tk):
 
         # ── Worker pool: process images from disk ───────────────────── #
         _bl_gpu_on  = self._gpu_accel_var.get()
-        _worker_max = min(8, max(2, self._hw_cpu_cores or 8))
-        _workers    = (max(2, min(_worker_max, self._parallel_workers_var.get()))
+        _worker_max = min(8, max(1, self._hw_cpu_cores or 8))
+        _workers    = (max(1, min(_worker_max, self._parallel_workers_var.get()))
                        if self._parallel_enabled_var.get() else 1)
         _hybrid     = (_bl_gpu_on
-                       and self._hybrid_var.get()
-                       and self._parallel_enabled_var.get())
+                       and self._hybrid_var.get())
         # Sync global GPU mode with the backlog run's intended device so
         # the retry-pass (which runs on the bot thread without a thread-local
         # override) falls back to the correct device rather than whatever the
@@ -5804,7 +5824,7 @@ class RelicBotApp(tk.Tk):
                                  name="backlog-worker-gpu"),
             ]
         else:
-            # CPU only — N workers from the Brute Force spinbox (or 1 if off).
+            # CPU only — N workers from the Additional CPU Workers spinbox (or 1 if off).
             _bl_threads = [
                 threading.Thread(target=_make_bl_worker(None), daemon=True,
                                  name=f"backlog-worker-{_n}")
@@ -8448,10 +8468,10 @@ class RelicBotApp(tk.Tk):
             # Each worker thread gets its own EasyOCR reader (thread-local) so
             # multiple workers can safely run OCR in parallel.
             _gpu_worker_cap = 4 if self._gpu_accel_var.get() else 8
-            _workers = (max(2, min(_gpu_worker_cap, self._parallel_workers_var.get()))
+            _workers = (max(1, min(_gpu_worker_cap, self._parallel_workers_var.get()))
                         if self._parallel_enabled_var.get() else 1)
             if _workers > 1:
-                self._log(f"  Brute Force Analysis: {_workers} parallel OCR workers.")
+                self._log(f"  Additional CPU Workers: {_workers} parallel OCR workers.")
 
             # Priority queue: workers atomically claim the lowest-numbered
             # available relic — get() is atomic so only one worker ever owns
@@ -8991,12 +9011,64 @@ class RelicBotApp(tk.Tk):
 
         from bot.probability_engine import prob_success_in_n, format_duration, prob_curse_pass
 
-        # ── Curse filter adjustment (Deep mode only) ───────────────────────── #
+        # ── Enhanced exclusion-aware probability ──────────────────────────── #
+        # Replaces the old simple p*p_curse approximation with an exact model
+        # that accounts for compat-group elimination across slots, passive
+        # exclusions, and (for Deep mode) curse blocking — all jointly computed.
         rtype = self.relic_type_var.get()
         n_blocked_curses = len(getattr(self, "_blocked_curses_list", []))
-        if rtype == "night" and n_blocked_curses > 0:
-            p_curse = prob_curse_pass(n_blocked_curses, rtype)
-            p = p * p_curse  # adjust base probability for curse exclusions
+        _excl_info: str = ""  # extra text for the odds viewer
+
+        try:
+            from bot.probability_engine import prob_effective_deep, prob_effective_normal
+            from bot.door_generator import generate_doors
+            criteria = self.relic_builder.get_criteria_dict()
+            doors = generate_doors(criteria, relic_type=rtype)
+            excluded = self._get_excluded_passives()
+
+            if doors:
+                complement = 1.0
+                complement_match = 1.0
+                _prob_fn = (prob_effective_deep if rtype == "night"
+                            else prob_effective_normal)
+                for door_set, _label in doors:
+                    if rtype == "night":
+                        r = _prob_fn(
+                            desired=list(door_set),
+                            threshold=len(door_set),
+                            excluded_passives=excluded,
+                            n_blocked_curses=n_blocked_curses,
+                        )
+                    else:
+                        r = _prob_fn(
+                            desired=list(door_set),
+                            threshold=len(door_set),
+                            excluded_passives=excluded,
+                        )
+                    p_c = r.get("p_clean") or 0.0
+                    p_m = r.get("p_match") or 0.0
+                    complement *= (1.0 - p_c)
+                    complement_match *= (1.0 - p_m)
+
+                p_clean = 1.0 - complement
+                p_match = 1.0 - complement_match
+
+                if p_clean > 1e-15:
+                    if excluded or n_blocked_curses > 0:
+                        if p_match > 1e-15:
+                            pct_lost = (1.0 - p_clean / p_match) * 100
+                            _excl_info = (
+                                f"  Exclusion impact: ~{pct_lost:.1f}% of matching "
+                                f"relics would be excluded")
+                    p = p_clean
+                elif p_match > 1e-15:
+                    p = p_match  # fallback: show match odds without exclusion
+                    _excl_info = "  (exclusions make clean matches extremely rare)"
+        except Exception:
+            # Fall back to old method if enhanced engine fails
+            if rtype == "night" and n_blocked_curses > 0:
+                p_curse = prob_curse_pass(n_blocked_curses, rtype)
+                p = p * p_curse
 
         if p <= 0:
             _txt = self._ov_result_txt
@@ -9019,7 +9091,7 @@ class RelicBotApp(tk.Tk):
         #   Phase 0: shop nav once per iteration (~20 s flat)
         #   Phase 1: buy + settle per relic (~2.0 s avg, ~2.5 s LPM)
         #   Phase 2: RIGHT + gap + capture per relic (0.30 s normal, 0.45 s LPM)
-        #   OCR: 3.0 s/relic CPU; 0.3 s/relic GPU; divided by worker count (Brute Force)
+        #   OCR: 3.0 s/relic CPU; 0.3 s/relic GPU; divided by worker count (Additional CPU Workers)
         #   Hybrid: 1 GPU + N CPU workers sharing queue; GPU AA suppresses CPU workers
         #   Async: overlaps OCR with next iteration's game time
         #   Backlog: zero OCR during game; all analysis runs after run ends
@@ -9071,7 +9143,7 @@ class RelicBotApp(tk.Tk):
             sec_analyze_raw, _n_ocr = _calibrated(_ocr_entry, _ocr_fallback)
             sec_analyze = sec_analyze_raw
         else:
-            # CPU only — Brute Force workers reduce wall-clock time proportionally
+            # CPU only — Additional CPU workers reduce wall-clock time proportionally
             _ocr_fallback = {1: 3.0, 2: 1.5, 3: 1.0, 4: 0.8}.get(min(workers, 4), 0.6)
             sec_analyze_raw, _n_ocr = _calibrated(_ocr_entry, _ocr_fallback)
             sec_analyze = sec_analyze_raw / max(1, workers)
@@ -9145,6 +9217,8 @@ class RelicBotApp(tk.Tk):
             f"{format_duration(sec_per_iter_ideal)}{_cal_note}",
             f"  Expected time for {loops:,} loops:  {format_duration(total_batch_sec)}",
         ]
+        if _excl_info:
+            result_lines.append(_excl_info)
         if is_backlog:
             result_lines.append(
                 f"  Backlog OCR tail:  ~{format_duration(loops * n * sec_analyze)}"
@@ -9169,8 +9243,7 @@ class RelicBotApp(tk.Tk):
         conflicts = []
         if _async_active and _backlog_active:
             conflicts.append("Async Analysis and Backlog Analysis are both ON — disable one.")
-        if _lpm_active and _bf_active:
-            conflicts.append("Low Performance Mode disables Brute Force — disable one.")
+        # Conservative Timing no longer conflicts with workers — it only adjusts timing
 
         ss_lines = []   # list of (text, tag)
         ss_lines.append(("Active modes:\n", "heading"))
@@ -9194,9 +9267,9 @@ class RelicBotApp(tk.Tk):
             else:
                 active_parts.append("Backlog Analysis (OCR deferred until after run)")
         if _bf_active and not hybrid_on:
-            active_parts.append(f"Brute Force Analysis ({workers} workers)")
+            active_parts.append(f"Additional CPU Workers ({workers} workers)")
         if _lpm_active:
-            active_parts.append("Low Performance Mode (+0.5 s/relic buy, +0.15 s/relic nav)")
+            active_parts.append("Conservative Timing (+0.5 s/relic buy, +0.15 s/relic nav)")
         if n_blocked_curses > 0 and rtype == "night":
             active_parts.append(f"{n_blocked_curses} curse filter(s) active (probability adjusted)")
 
@@ -9978,8 +10051,8 @@ class RelicBotApp(tk.Tk):
         """Return a dict of per-setting recommendations based on detected hardware.
 
         Keys: brute, workers_val, workers_display, async_, smart_throttle,
-              exclude_buy_phase, gpu, lpm, backlog, intermittent,
-              use_together, exclude_modes.
+              exclude_buy_phase, gpu, hybrid, gpu_aa, lpm, backlog,
+              intermittent, smart_analyze, use_together, exclude_modes.
         Each setting value is a (rec_str, reason_str) tuple except workers_val (int).
         """
         ram      = self._hw_ram_gb
@@ -9990,24 +10063,57 @@ class RelicBotApp(tk.Tk):
         if not ram or not cpus:
             return {k: _unknown for k in (
                 "brute", "async_", "smart_throttle", "exclude_buy_phase",
-                "gpu", "lpm", "backlog", "intermittent",
-            )} | {"workers_val": 2, "workers_display": "?",
+                "gpu", "hybrid", "gpu_aa", "lpm", "backlog", "intermittent",
+                "smart_analyze",
+            )} | {"workers_val": 1, "workers_display": "?",
                   "use_together": "—", "exclude_modes": "—"}
 
-        # ── Brute Force + Workers ──────────────────────────────────────── #
+        # ── GPU Acceleration ──────────────────────────────────────────── #
+        if has_cuda:
+            gpu = ("ON", f"CUDA detected — {self._hw_gpu_name}")
+        elif getattr(self, "_gpu_eligible", False):
+            gpu = ("Install", f"compatible GPU found — use Install button ({self._gpu_eligible_name})")
+        elif getattr(self, "_gpu_eligible_name", ""):
+            gpu = ("OFF", self._gpu_eligible_reason or "see GPU status above")
+        else:
+            gpu = ("OFF", "no compatible NVIDIA GPU detected")
+
+        # ── Hybrid GPU+CPU ────────────────────────────────────────────── #
+        if has_cuda and cpus >= 4:
+            hybrid = ("ON", "GPU + CPU workers in parallel — best throughput")
+        elif has_cuda:
+            hybrid = ("OFF", "low core count — GPU-only is sufficient")
+        else:
+            hybrid = ("OFF", "N/A — requires GPU Acceleration")
+
+        # ── GPU Always Analyze ────────────────────────────────────────── #
+        if has_cuda and hybrid[0] == "ON" and cpus >= 8:
+            gpu_aa = ("ON", "GPU keeps analyzing during input phases — high-end GPU recommended")
+        elif has_cuda and hybrid[0] == "ON":
+            gpu_aa = ("OFF", "mid-range system — let GPU pause during inputs to avoid frame drops")
+        else:
+            gpu_aa = ("OFF", "N/A — requires Hybrid GPU+CPU")
+
+        # ── Additional CPU Workers ────────────────────────────────────── #
         if ram <= 8:
             brute        = ("OFF", "insufficient RAM for multiple OCR models")
             workers_val  = 1
             workers_disp = "N/A"
-        elif has_cuda:
-            # GPU mode: CUDA serializes above 4 workers — cap there, sweet spot is 2–3
-            brute = ("ON", "2–3 workers recommended (GPU mode caps at 4)")
+        elif has_cuda and hybrid[0] == "ON":
+            # Hybrid mode: GPU does most work, CPU workers assist — 1-2 is plenty
             if ram <= 12:
+                brute        = ("ON", "1 CPU worker alongside GPU")
+                workers_val  = 1
+                workers_disp = "1"
+            else:
+                brute        = ("ON", "2 CPU workers alongside GPU (capped at 4)")
                 workers_val  = 2
                 workers_disp = "2"
-            else:
-                workers_val  = 3
-                workers_disp = "2–3"
+        elif has_cuda:
+            # GPU-only (no Hybrid) — CPU workers don't run
+            brute        = ("OFF", "GPU handles all OCR — CPU workers not needed")
+            workers_val  = 1
+            workers_disp = "N/A"
         elif ram <= 12:
             brute        = ("ON", "2 workers recommended")
             workers_val  = 2
@@ -10026,52 +10132,46 @@ class RelicBotApp(tk.Tk):
             workers_disp = "6–8"
 
         # ── Async Analysis ─────────────────────────────────────────────── #
-        if cpus >= 8:
+        if cpus >= 8 or has_cuda:
             async_ = ("ON", "enough cores to overlap analysis with game inputs")
+        elif cpus >= 4:
+            async_ = ("ON", "moderate cores — Async with conservative timing recommended")
         else:
-            async_ = ("OFF", "low core count — use Backlog Analysis instead")
+            async_ = ("OFF", "very low core count — use Backlog Analysis instead")
 
         # ── Smart Throttle ──────────────────────────────────────────────── #
-        # Useful on any system where workers can starve inputs during buy phases
-        if not has_cuda and cpus < 16:
+        if not has_cuda and cpus < 16 and async_[0] == "ON":
             smart_throttle = ("ON", "adaptive throttle helps on mid-range CPU-only systems")
         else:
-            smart_throttle = ("OFF", "high-end hardware — workers won't starve inputs")
+            smart_throttle = ("OFF", "not needed — GPU handles OCR or hardware is sufficient")
 
-        # ── Exclude Analysis While Operations Are Happening (Async sub) ── #
+        # ── Exclude Analysis While Operations Are Happening ─────────── #
         if async_[0] == "ON" and not has_cuda:
             exclude_buy_phase = ("ON", "protects buy inputs on CPU-only systems")
-        elif async_[0] == "ON" and has_cuda:
-            exclude_buy_phase = ("OFF", "GPU fast enough — less benefit, more idle workers")
+        elif async_[0] == "ON" and has_cuda and gpu_aa[0] == "ON":
+            exclude_buy_phase = ("ON", "pair with GPU Always Analyze for GPU-only OCR during inputs")
+        elif async_[0] == "ON":
+            exclude_buy_phase = ("OFF", "GPU fast enough — less benefit from pausing")
         else:
             exclude_buy_phase = ("OFF", "N/A — Async Analysis not recommended")
 
-        # ── GPU Acceleration ──────────────────────────────────────────── #
-        if has_cuda:
-            gpu = ("ON", f"CUDA detected — {self._hw_gpu_name}")
-        elif getattr(self, "_gpu_eligible", False):
-            gpu = ("Install", f"compatible GPU found — use Install button ({self._gpu_eligible_name})")
-        elif getattr(self, "_gpu_eligible_name", ""):
-            gpu = ("OFF", self._gpu_eligible_reason or "see GPU status above")
-        else:
-            gpu = ("OFF", "no compatible NVIDIA GPU detected")
-
-        # ── Low Performance Mode ───────────────────────────────────────── #
-        if ram < 12 or cpus < 8:
-            lpm = ("ON", "limited hardware — conservative timing prevents missed inputs")
-        elif has_cuda:
-            lpm = ("OFF", "GPU + adequate CPU/RAM — normal timing is fine")
+        # ── Conservative Timing ───────────────────────────────────────── #
+        if cpus < 4:
+            lpm = ("ON", "very low core count — wider timing gaps prevent missed inputs")
+        elif ram < 8:
+            lpm = ("ON", "limited RAM — conservative timing prevents missed inputs")
         else:
             lpm = ("OFF", "adequate hardware — normal timing is fine")
 
         # ── Backlog Analysis ──────────────────────────────────────────── #
-        # Recommended only when Async is not viable (low core count)
         if async_[0] == "OFF":
             backlog = ("ON", "zero CPU contention during game — analyze after run")
+        elif not has_cuda and cpus < 8:
+            backlog = ("ON", "alternative to Async on limited hardware")
         else:
-            backlog = ("OFF", "Async Analysis covers this — use that instead")
+            backlog = ("OFF", "Async Analysis is better for this system")
 
-        # ── Intermittent Backlog (Backlog sub) ──────────────────────────── #
+        # ── Intermittent Backlog ──────────────────────────────────────── #
         if backlog[0] == "ON" and ram >= 12:
             intermittent = ("ON", "process every 5 iterations — incremental results")
         elif backlog[0] == "ON":
@@ -10079,16 +10179,22 @@ class RelicBotApp(tk.Tk):
         else:
             intermittent = ("OFF", "N/A — Backlog Analysis not recommended")
 
+        # ── Smart Analyze ─────────────────────────────────────────────── #
+        smart_analyze = ("ON", "catches valuable combos not in your criteria — no performance cost")
+
         # ── Mode groupings ─────────────────────────────────────────────── #
-        if has_cuda:
-            use_together  = "Brute Force + Async Analysis + GPU Acceleration"
-            exclude_modes = "Async ↔ Backlog Analysis  |  LPM ↔ Brute Force"
+        if has_cuda and hybrid[0] == "ON":
+            use_together  = "GPU Acceleration + Hybrid GPU+CPU + Async Analysis"
+            exclude_modes = "Async ↔ Backlog Analysis (mutually exclusive)"
+        elif has_cuda:
+            use_together  = "GPU Acceleration + Async Analysis"
+            exclude_modes = "Async ↔ Backlog Analysis (mutually exclusive)"
         elif async_[0] == "ON":
-            use_together  = "Brute Force + Async Analysis (+ Smart Throttle on mid-range CPU)"
-            exclude_modes = "Async ↔ Backlog Analysis  |  LPM ↔ Brute Force"
+            use_together  = "Additional CPU Workers + Async Analysis (+ Smart Throttle on mid-range CPU)"
+            exclude_modes = "Async ↔ Backlog Analysis (mutually exclusive)"
         else:
-            use_together  = "Backlog Analysis + Low Performance Mode"
-            exclude_modes = "Async ↔ Backlog Analysis (mutually exclusive)  |  LPM disables Brute Force"
+            use_together  = "Backlog Analysis (+ Conservative Timing if system is slow)"
+            exclude_modes = "Async ↔ Backlog Analysis (mutually exclusive)"
 
         return {
             "brute":             brute,
@@ -10098,9 +10204,12 @@ class RelicBotApp(tk.Tk):
             "smart_throttle":    smart_throttle,
             "exclude_buy_phase": exclude_buy_phase,
             "gpu":               gpu,
+            "hybrid":            hybrid,
+            "gpu_aa":            gpu_aa,
             "lpm":               lpm,
             "backlog":           backlog,
             "intermittent":      intermittent,
+            "smart_analyze":     smart_analyze,
             "use_together":      use_together,
             "exclude_modes":     exclude_modes,
         }
@@ -10109,25 +10218,34 @@ class RelicBotApp(tk.Tk):
         """Apply all hardware-recommended settings in one click."""
         recs = self._get_hw_recommendations()
 
+        # GPU settings first (other settings depend on GPU state)
+        gpu_on = recs["gpu"][0] == "ON" and self._hw_cuda_available
+        self._gpu_accel_var.set(gpu_on)
+        self._hybrid_var.set(gpu_on and recs["hybrid"][0] == "ON")
+        self._gpu_always_analyze_var.set(
+            gpu_on and recs["gpu_aa"][0] == "ON")
+
+        # CPU workers
         brute_on = recs["brute"][0] == "ON"
         self._parallel_enabled_var.set(brute_on)
         if brute_on:
             self._parallel_workers_var.set(recs["workers_val"])
 
+        # Analysis mode
         async_on = recs["async_"][0] == "ON"
         self._async_enabled_var.set(async_on)
         self._smart_throttle_var.set(recs["smart_throttle"][0] == "ON")
-        self._exclude_buy_phase_var.set(async_on and recs["exclude_buy_phase"][0] == "ON")
+        self._exclude_buy_phase_var.set(
+            async_on and recs["exclude_buy_phase"][0] == "ON")
 
         backlog_on = recs["backlog"][0] == "ON"
         self._backlog_mode_var.set(backlog_on)
-        self._intermittent_backlog_var.set(backlog_on and recs["intermittent"][0] == "ON")
+        self._intermittent_backlog_var.set(
+            backlog_on and recs["intermittent"][0] == "ON")
 
+        # Timing and optional features
         self._low_perf_mode_var.set(recs["lpm"][0] == "ON")
-
-        # GPU: only enable if CUDA is actually working on this machine
-        gpu_on = recs["gpu"][0] == "ON" and self._hw_cuda_available
-        self._gpu_accel_var.set(gpu_on)
+        self._smart_analyze_var.set(recs["smart_analyze"][0] == "ON")
 
         # Trigger all cascading callbacks
         self._on_parallel_toggle()

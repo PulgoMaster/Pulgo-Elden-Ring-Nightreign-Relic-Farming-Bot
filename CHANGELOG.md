@@ -4,6 +4,47 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.6.5] — 2026-04-04 — ENHANCED PROBABILITY ENGINE + UI OVERHAUL
+
+### Probability Engine
+- **Enhanced probability model** with exact compat-group elimination across slots — odds now account for how each passive draw removes a category from subsequent slots.
+- **Passive exclusion probability** — odds viewer shows P(match AND no excluded passive), not just P(match). "Exclusion impact: ~X%" line shows how much exclusions reduce effective odds.
+- **Curse without-replacement** — curses draw without replacement (can't repeat on same relic). Formula changed from independent `((24-N)/24)^k` to exact `C(24-N,k)/C(24,k)`.
+- **Both modes supported** — `prob_effective_deep()` (9 variants, TABLE_2000000/2100000) and `prob_effective_normal()` (3 sizes, TABLE_310/210/110).
+- All three odds displays (Build Exact Relic tab, Passive Pool tab, Odds Viewer panel) use the enhanced engine.
+- Combined odds view when Combine mode is on — shows all groups with per-group subtotals.
+
+### Bug Fixes (from v1.6.4)
+- **Curse blocking was completely broken** — `_is_curse_blocked()` read from a key that doesn't exist on per-relic results. Relics with blocked curses were never categorized as EXCLUDED.
+- **Missing save files (NR0000.sl2)** on HIT and SMART folders when backlog workers renamed folders before the save copy.
+- **Empty batch markers** in live_log for backlog mode — headers now written lazily before first relic result.
+- **EXCLUDED matches missing from matches_log.txt** — now logged in both async and sync paths.
+- **`_count_relic_tiers` counted EXCLUDED as hits** — iteration summary no longer inflates hit counts.
+
+### Compatibility Groups
+- Expanded from 8 to 24 groups (147 to 376 entries). Synced with datamine compatibilityId values.
+- Added: weapon-class attack power, stat tiers, HP/FP on weapon attacks, poise, shields, catalysts, skill cooldown, art charge, affinity damage negation.
+- Starting Armament Imbue (compat 200) split from Skill/Spell (compat 300).
+- Smart Analyze unified to single source of truth (`_variants_compat` from passives.py). Same 311/298 door counts.
+
+### UI Overhaul
+- **"Brute Force Analysis" renamed to "Additional CPU Workers"** — clearer, less intimidating.
+- **"Low Performance Mode" renamed to "Conservative Timing"** — now only adjusts timing floors. No longer forces workers off or halves OCR cores.
+- **"GPU Settings" sub-window** — GPU Acceleration, Hybrid GPU+CPU, GPU Always Analyze, Install button, and status text grouped together.
+- **"Optional Matching Features" sub-window** — Smart Analyze and Save Excluded Hits grouped together.
+- **Hybrid GPU+CPU without workers toggle** — defaults to 1 GPU + 1 CPU when Additional CPU Workers is off. Workers minimum changed from 2 to 1.
+- **Overlay counter toggles** — Near Misses, Smart Hits, Excluded Hits now have toggle checkboxes in Overlay Elements.
+- **Overlay always visible** during bot operation — no more hide/show polling based on game focus.
+- **Hardware recommendations updated** — now includes Hybrid GPU+CPU, GPU Always Analyze, Smart Analyze. Apply button sets all settings.
+
+---
+
+## [1.6.4] — 2026-04-04 — CURSE BLOCKING FIX + COMPAT GROUP OVERHAUL
+
+See v1.6.5 notes above — v1.6.4 was a partial release that included the bug fixes and compat group overhaul. v1.6.5 adds the enhanced probability engine and UI overhaul.
+
+---
+
 ## [1.6.0] — 2026-03-30 — SESSION 2 FIXES + RELIC CRITERIA POLISH
 
 ### 2026-03-30 Session 2 Changes

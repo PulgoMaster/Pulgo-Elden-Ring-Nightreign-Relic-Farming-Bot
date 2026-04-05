@@ -66,7 +66,9 @@ _NORMAL_SLOTS: dict[str, list[tuple]] = {
 #
 # TABLE_2000000 = exclusive pool (49 entries, high-tier: PA+3/+4, Affinity+2, Max HP…)
 # TABLE_2100000 = broad pool    (277 entries, mid-tier: PA+2, Poise+3…)
-# TABLE_2200000 does NOT appear in any bazaar relic — it was a datamine error.
+# TABLE_2200000 is a clone of TABLE_2100000 (identical passives + weights).
+# Referenced by EQA 201xxxx entries but unreachable from the item selection
+# chain (49100 → 49110-49112 → 49120-49143 → only 200xxxx / 2003xxx EQAs).
 #
 # Format: (combined_probability, [(table, total, prefix), …])
 _T2M = (TABLE_2000000, TABLE_2000000_TOTAL, "<Table> ")  # exclusive slot
@@ -459,21 +461,26 @@ def prob_curse_pass_on_size(excluded_count: int, size: str) -> float:
     """
     P(a Deep relic of given size has none of its drawn curses in the excluded set).
 
-    Each curse slot draws independently from NUM_CURSES options.  If excluded_count
-    curses are blocked, each slot has (NUM_CURSES - excluded_count) / NUM_CURSES
-    chance of being acceptable.  The overall probability is the weighted average
-    across possible curse counts for this size.
+    Curses draw WITHOUT replacement from NUM_CURSES (24) entries — a curse
+    that appears on one slot cannot appear again.  P(none of k draws hit
+    any of N blocked) = C(24-N, k) / C(24, k).
 
     excluded_count: number of curses the user has blocked (0 → always 1.0).
     """
     if excluded_count <= 0:
         return 1.0
     dist = DEEP_CURSE_COUNT_DIST.get(size, {})
-    p_ok_per_slot = (NUM_CURSES - excluded_count) / NUM_CURSES
     total = 0.0
     for k, pk in dist.items():
         # k==0: relic has no curses → always passes
-        total += pk * (p_ok_per_slot ** k)
+        if k == 0:
+            total += pk
+        else:
+            # C(24-N, k) / C(24, k) = product((24-N-i)/(24-i) for i in 0..k-1)
+            p_pass = 1.0
+            for i in range(k):
+                p_pass *= (NUM_CURSES - excluded_count - i) / (NUM_CURSES - i)
+            total += pk * p_pass
     return total
 
 
@@ -495,3 +502,288 @@ def prob_curse_pass(excluded_count: int, relic_type: str) -> float:
     for size, p_size in DEEP_SIZE_PROBS.items():
         total += p_size * prob_curse_pass_on_size(excluded_count, size)
     return total
+
+
+# ── Enhanced probability with exclusions (Deep of Night only) ──────────── #
+# Computes P(desired passives appear AND no excluded passive AND no blocked
+# curse) using exact enumeration with compat-group elimination across slots.
+# Normal relics have no curses and no exclusive/broad table split, so this
+# model only applies to Deep of Night.
+
+def _build_group_index(table: dict, prefix: str) -> dict:
+    """Precompute {group_id: [(passive_name, weight), ...]} for a table.
+
+    Group None collects passives with no compat group assignment.
+    Also returns total_weight and group_weight_totals.
+    """
+    groups: dict[int | None, list[tuple[str, int]]] = {}
+    for key, weight in table.items():
+        name = key[len(prefix):] if key.startswith(prefix) else key
+        g = COMPAT_GROUPS.get(name)
+        groups.setdefault(g, []).append((name, weight))
+    group_totals = {g: sum(w for _, w in entries)
+                    for g, entries in groups.items()}
+    total = sum(table.values())
+    return {"groups": groups, "group_totals": group_totals, "total": total}
+
+
+# Precompute once at import time
+_GI_EXCLUSIVE = _build_group_index(TABLE_2000000, "<Table> ")
+_GI_BROAD     = _build_group_index(TABLE_2100000, "<Table> ")
+
+
+# Precompute Normal mode group indices per slot table + prefix
+_GI_NORMAL: dict[str, list[dict]] = {}
+for _sz, _slot_defs in _NORMAL_SLOTS.items():
+    _GI_NORMAL[_sz] = [_build_group_index(t, pfx)
+                       for t, _tot, pfx in _slot_defs]
+
+
+def _passive_weight_in_group(names: set[str], group_entries: list[tuple[str, int]]) -> int:
+    """Sum of weights for passives in `names` that appear in `group_entries`."""
+    return sum(w for n, w in group_entries if n in names)
+
+
+def prob_effective_deep(
+    desired: list[str],
+    threshold: int,
+    excluded_passives: set[str],
+    n_blocked_curses: int,
+    allowed_colors: list[str] | None = None,
+) -> dict[str, float | None]:
+    """Exact P(match AND clean) for Deep of Night relics with exclusions.
+
+    Uses recursive slot-by-slot enumeration, branching by compat group at each
+    slot.  At each slot the possible outcomes are:
+      - Drew a desired passive (from a specific group)
+      - Drew an excluded passive (relic is EXCLUDED — prune)
+      - Drew a neutral passive (from a specific group or ungrouped)
+    Compat-group elimination is applied after each slot draw.
+
+    For cursed slots (TABLE_2000000): each curse draws independently from 24.
+    P(curse not blocked) = (24 - n_blocked) / 24 per cursed slot.
+
+    Returns:
+      p_match:       P(criteria satisfied, ignoring exclusions)
+      p_clean:       P(criteria satisfied AND no exclusion)
+      p_excluded:    P(criteria satisfied BUT excluded by passive or curse)
+      n_effective:   1 / p_clean  (expected relics to find a usable match)
+    """
+    desired_set = set(desired)
+    if not desired_set:
+        return {"p_match": None, "p_clean": None, "p_excluded": None,
+                "n_effective": None}
+
+    if not compat_ok(list(desired_set)):
+        return {"p_match": 0.0, "p_clean": 0.0, "p_excluded": 0.0,
+                "n_effective": None}
+
+    p_color = 1.0
+    if allowed_colors is not None:
+        p_color = color_probability("night", allowed_colors)
+        if p_color <= 0:
+            return {"p_match": 0.0, "p_clean": 0.0, "p_excluded": 0.0,
+                    "n_effective": None}
+
+    n_blocked = min(n_blocked_curses, NUM_CURSES - MIN_UNBLOCKED_CURSES)
+
+    total_match = 0.0
+    total_clean = 0.0
+
+    for p_var, slot_list in _DEEP_VARIANTS:
+        # Determine which slots are cursed (TABLE_2000000)
+        is_cursed = [s is _T2M for s in slot_list]
+        n_cursed = sum(is_cursed)
+
+        # P(all curses on this variant pass the filter).
+        # Curses draw WITHOUT replacement from 24 entries — a curse that
+        # appears on one slot is eliminated from the pool for subsequent
+        # slots.  P(none of k draws hit any of N blocked) = C(24-N,k)/C(24,k).
+        if n_blocked <= 0 or n_cursed == 0:
+            p_curses_pass = 1.0
+        else:
+            # C(24-N, k) / C(24, k) = product((24-N-i)/(24-i) for i in 0..k-1)
+            p_curses_pass = 1.0
+            for _ci in range(n_cursed):
+                p_curses_pass *= (NUM_CURSES - n_blocked - _ci) / (NUM_CURSES - _ci)
+
+        # Identify which group index each slot uses
+        slot_gis = [_GI_EXCLUSIVE if s is _T2M else _GI_BROAD
+                    for s in slot_list]
+
+        # Recursive enumeration over slots
+        p_m, p_c = _enumerate_slots(
+            slot_gis, 0, frozenset(), 0,
+            desired_set, threshold, excluded_passives,
+            p_curses_pass,
+        )
+        total_match += p_var * p_m
+        total_clean += p_var * p_c
+
+    total_match *= p_color
+    total_clean *= p_color
+    p_excluded = max(0.0, total_match - total_clean)
+
+    return {
+        "p_match":     total_match if total_match > 1e-15 else None,
+        "p_clean":     total_clean if total_clean > 1e-15 else None,
+        "p_excluded":  p_excluded  if p_excluded  > 1e-15 else None,
+        "n_effective": (1.0 / total_clean) if total_clean > 1e-15 else None,
+    }
+
+
+def _enumerate_slots(
+    slot_gis: list[dict],
+    slot_idx: int,
+    elim_groups: frozenset,
+    n_desired_found: int,
+    desired: set[str],
+    threshold: int,
+    excluded: set[str],
+    p_curses_pass: float,
+) -> tuple[float, float]:
+    """Recursive slot enumeration.  Returns (p_match, p_clean).
+
+    p_match: P(at least `threshold` desired passives found across all slots)
+    p_clean: P(match AND no excluded passive in any slot) * p_curses_pass
+    """
+    n_slots = len(slot_gis)
+
+    # Base case: all slots processed
+    if slot_idx >= n_slots:
+        if n_desired_found >= threshold:
+            return (1.0, p_curses_pass)
+        return (0.0, 0.0)
+
+    # Pruning: even if all remaining slots hit desired, can we reach threshold?
+    remaining = n_slots - slot_idx
+    if n_desired_found + remaining < threshold:
+        return (0.0, 0.0)
+
+    gi = slot_gis[slot_idx]
+    groups       = gi["groups"]
+    group_totals = gi["group_totals"]
+    table_total  = gi["total"]
+
+    # Compute available weight after eliminating groups
+    avail_weight = table_total - sum(
+        group_totals.get(g, 0) for g in elim_groups if g is not None)
+    if avail_weight <= 0:
+        # All passives eliminated (shouldn't happen in practice)
+        return (0.0, 0.0)
+
+    p_match_accum = 0.0
+    p_clean_accum = 0.0
+
+    # Iterate over each group (including None for ungrouped)
+    for g, entries in groups.items():
+        if g is not None and g in elim_groups:
+            continue  # this group was eliminated by a prior slot
+
+        g_weight = group_totals[g]
+        p_draw_from_g = g_weight / avail_weight
+
+        # Split this group's weight into: desired, excluded, neutral
+        w_desired  = _passive_weight_in_group(desired, entries)
+        w_excluded = _passive_weight_in_group(excluded, entries)
+        # Remove overlap (a passive in both desired AND excluded is treated
+        # as desired — explicit inclusion overrides exclusion)
+        w_excl_only = w_excluded - _passive_weight_in_group(
+            desired & excluded, entries)
+        w_neutral = g_weight - w_desired - w_excl_only
+
+        new_elim = elim_groups | frozenset([g]) if g is not None else elim_groups
+
+        # Branch 1: drew a desired passive from this group
+        if w_desired > 0:
+            p_desired_in_g = w_desired / g_weight
+            p_branch = p_draw_from_g * p_desired_in_g
+            sub_m, sub_c = _enumerate_slots(
+                slot_gis, slot_idx + 1, new_elim,
+                n_desired_found + 1,
+                desired, threshold, excluded, p_curses_pass)
+            p_match_accum += p_branch * sub_m
+            p_clean_accum += p_branch * sub_c
+
+        # Branch 2: drew an excluded (non-desired) passive — relic is EXCLUDED
+        # Match can still happen (for p_match), but p_clean = 0
+        if w_excl_only > 0:
+            p_excl_in_g = w_excl_only / g_weight
+            p_branch = p_draw_from_g * p_excl_in_g
+            sub_m, _ = _enumerate_slots(
+                slot_gis, slot_idx + 1, new_elim,
+                n_desired_found,
+                desired, threshold, excluded, p_curses_pass)
+            p_match_accum += p_branch * sub_m
+            # p_clean stays 0 for this branch (excluded passive found)
+
+        # Branch 3: drew a neutral passive (neither desired nor excluded)
+        if w_neutral > 0:
+            p_neutral_in_g = w_neutral / g_weight
+            p_branch = p_draw_from_g * p_neutral_in_g
+            sub_m, sub_c = _enumerate_slots(
+                slot_gis, slot_idx + 1, new_elim,
+                n_desired_found,
+                desired, threshold, excluded, p_curses_pass)
+            p_match_accum += p_branch * sub_m
+            p_clean_accum += p_branch * sub_c
+
+    return (p_match_accum, p_clean_accum)
+
+
+def prob_effective_normal(
+    desired: list[str],
+    threshold: int,
+    excluded_passives: set[str],
+    allowed_colors: list[str] | None = None,
+) -> dict[str, float | None]:
+    """Exact P(match AND clean) for Normal relics with passive exclusions.
+
+    Normal relics have no curses.  Each size has 1-3 slots drawing from
+    different tables (TABLE_310/210/110) with different prefixes.  Compat-group
+    elimination across slots is modelled identically to Deep mode.
+
+    Returns same dict shape as prob_effective_deep.
+    """
+    desired_set = set(desired)
+    if not desired_set:
+        return {"p_match": None, "p_clean": None, "p_excluded": None,
+                "n_effective": None}
+
+    if not compat_ok(list(desired_set)):
+        return {"p_match": 0.0, "p_clean": 0.0, "p_excluded": 0.0,
+                "n_effective": None}
+
+    p_color = 1.0
+    if allowed_colors is not None:
+        p_color = color_probability("normal", allowed_colors)
+        if p_color <= 0:
+            return {"p_match": 0.0, "p_clean": 0.0, "p_excluded": 0.0,
+                    "n_effective": None}
+
+    total_match = 0.0
+    total_clean = 0.0
+
+    for size, p_size in NORMAL_SIZE_PROBS.items():
+        slot_gis = _GI_NORMAL.get(size, [])
+        if not slot_gis:
+            continue
+
+        p_m, p_c = _enumerate_slots(
+            slot_gis, 0, frozenset(), 0,
+            desired_set, threshold, excluded_passives,
+            1.0,  # no curses in Normal mode
+        )
+        total_match += p_size * p_m
+        total_clean += p_size * p_c
+
+    total_match *= p_color
+    total_clean *= p_color
+    p_excluded = max(0.0, total_match - total_clean)
+
+    return {
+        "p_match":     total_match if total_match > 1e-15 else None,
+        "p_clean":     total_clean if total_clean > 1e-15 else None,
+        "p_excluded":  p_excluded  if p_excluded  > 1e-15 else None,
+        "n_effective": (1.0 / total_clean) if total_clean > 1e-15 else None,
+    }

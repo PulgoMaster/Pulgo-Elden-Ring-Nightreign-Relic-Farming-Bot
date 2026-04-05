@@ -819,6 +819,7 @@ _COMPAT_EXCLUSIVE_GROUPS: list[list[str]] = [
         "Physical attack power increases after using grease items +1",
         "Physical attack power increases after using grease items +2",
         "Taking attacks improves attack power",
+        "Switching Weapons Boosts Attack Power",
         "Attack power increased for each evergaol prisoner defeated",
         "Attack power increased for each Night Invader defeated",
         # Weapon-class specific attack power (one per relic)
@@ -1029,6 +1030,7 @@ _COMPAT_EXCLUSIVE_GROUPS: list[list[str]] = [
 
     # ── Group 21 – Skill Cooldown Reduction ───────────────────────────────
     [
+        "Character Skill Cooldown Reduction",
         "Character Skill Cooldown Reduction +1",
         "Character Skill Cooldown Reduction +2",
         "Character Skill Cooldown Reduction +3",
@@ -1036,6 +1038,7 @@ _COMPAT_EXCLUSIVE_GROUPS: list[list[str]] = [
 
     # ── Group 22 – Ultimate Art Auto Charge ───────────────────────────────
     [
+        "Ultimate Art Auto Charge",
         "Ultimate Art Auto Charge +1",
         "Ultimate Art Auto Charge +2",
         "Ultimate Art Auto Charge +3",
