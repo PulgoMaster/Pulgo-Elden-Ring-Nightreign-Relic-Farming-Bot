@@ -23,6 +23,18 @@ Write-Host ""
 Write-Host "=== RelicBot Updater ===" -ForegroundColor Cyan
 Write-Host ""
 
+# --- Check if RelicBot is running ---
+$running = Get-Process -Name "RelicBot" -ErrorAction SilentlyContinue
+if ($running) {
+    Write-Host "ERROR: RelicBot.exe is currently running!" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "The updater cannot replace files while RelicBot is open." -ForegroundColor Yellow
+    Write-Host "Please close RelicBot completely, then run the updater again." -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "Press Enter to close"
+    exit 1
+}
+
 # --- Find the ZIP ---
 $zipFile = $null
 
