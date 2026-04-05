@@ -1418,6 +1418,7 @@ class _PassivePoolTab(ttk.Frame):
                     continue
 
             # Generate doors for this pairing using the door generator
+            from bot.door_generator import _doors_from_pairings
             pair_pool = DEEP_POOL_PASSIVES if rtype == "night" else NORMAL_POOL_PASSIVES
             pair_doors = _doors_from_pairings(
                 {"pairings": [pair], "threshold": 1}, pair_pool)
