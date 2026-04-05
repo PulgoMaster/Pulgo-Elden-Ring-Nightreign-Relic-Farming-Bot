@@ -1271,6 +1271,10 @@ class RelicBotApp(tk.Tk):
                  "while still using Async Analysis for background processing.\n\n"
                  "Only has effect with Async Analysis enabled.")
 
+        # ── GPU Settings sub-section (created early so Hybrid/GPU AA can use it) ─
+        _gpu_lf = ttk.LabelFrame(self.batch_frame, text="GPU Settings")
+        _gpu_lf.grid(row=10, column=0, columnspan=8, sticky="ew", **pad)
+
         # Unified Hybrid GPU+CPU — works with Async and Backlog modes
         _hyb_chk = ttk.Checkbutton(
             _gpu_lf, text="⚡ Hybrid GPU+CPU Analysis",
@@ -1602,9 +1606,7 @@ class RelicBotApp(tk.Tk):
         self._backlog_mode_var.trace_add("write", _update_ibl_state)
         _update_ibl_state()   # initialise to current state
 
-        # ── GPU Settings sub-section ────────────────────────────────── #
-        _gpu_lf = ttk.LabelFrame(self.batch_frame, text="GPU Settings")
-        _gpu_lf.grid(row=10, column=0, columnspan=8, sticky="ew", **pad)
+        # ── GPU Settings widgets (LabelFrame created earlier near Hybrid checkbox) ─
 
         def _on_gpu_toggle(*_):
             from bot import relic_analyzer
