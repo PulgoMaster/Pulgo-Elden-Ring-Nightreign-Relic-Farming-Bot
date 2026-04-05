@@ -560,8 +560,8 @@ def prob_effective_deep(
       - Drew a neutral passive (from a specific group or ungrouped)
     Compat-group elimination is applied after each slot draw.
 
-    For cursed slots (TABLE_2000000): each curse draws independently from 24.
-    P(curse not blocked) = (24 - n_blocked) / 24 per cursed slot.
+    For cursed slots (TABLE_2000000): curses draw WITHOUT replacement from 24.
+    P(none of k draws hit any of N blocked) = C(24-N, k) / C(24, k).
 
     Returns:
       p_match:       P(criteria satisfied, ignoring exclusions)
@@ -681,6 +681,8 @@ def _enumerate_slots(
             continue  # this group was eliminated by a prior slot
 
         g_weight = group_totals[g]
+        if g_weight <= 0:
+            continue
         p_draw_from_g = g_weight / avail_weight
 
         # Split this group's weight into: desired, excluded, neutral

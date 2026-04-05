@@ -1442,20 +1442,39 @@ class _PassivePoolTab(ttk.Frame):
             else:
                 lines.append(f"    {pair_label}  \u2192  not available in {pool_name} pool")
 
-        # ── Combined P(≥ thresh of all criteria) ─────────────────────────────
+        # ── Combined odds: P(any door matches) via complement product ─────
+        # Generates ALL doors from pool entries + pairings combined, then
+        # computes P(at least one door satisfied) using the enhanced engine.
         p_combined: float | None = None
-        _has_pairs = bool(self._pairings)
-        _criteria_label = "pool + pairs" if _has_pairs else "expected criteria"
-        if per_relic_probs:
-            p_combined = prob_at_least_k_of_pool(per_relic_probs, thresh)
-            if p_combined and p_combined > 0:
-                n_combined = int(round(1.0 / max(p_combined, 1e-12)))
-                pct_combined = p_combined * 100
-                lines.append(
-                    f"\n  Odds of finding a relic that fulfills at least {thresh} of the {_criteria_label}:"
-                    f"  {_fmt_pct(pct_combined)}%  (~1 in {n_combined:,} per relic)")
-            elif p_combined == 0.0:
-                lines.append(f"\n  Odds of finding a relic that fulfills at least {thresh} of the {_criteria_label}: Impossible")
+        try:
+            from bot.door_generator import generate_doors
+            _pool_crit = self.get_criteria_dict()
+            _all_doors = generate_doors(_pool_crit, relic_type=rtype)
+            if _all_doors and _compute:
+                p_m, p_c = _compute(_all_doors)
+                p_combined = p_c if p_c > 1e-15 else p_m
+            elif _all_doors:
+                # Fallback: complement product from per-entry probs
+                comp = 1.0
+                for d, _ in _all_doors:
+                    p = prob_combo_on_relic(list(d), rtype)
+                    if p and p > 0:
+                        comp *= (1.0 - p)
+                p_combined = 1.0 - comp if comp < 1.0 else None
+        except Exception:
+            # Last resort: use per-relic probs
+            if per_relic_probs:
+                comp = 1.0
+                for pp in per_relic_probs:
+                    comp *= (1.0 - pp)
+                p_combined = 1.0 - comp if comp < 1.0 else None
+
+        if p_combined and p_combined > 0:
+            n_combined = int(round(1.0 / max(p_combined, 1e-12)))
+            pct_combined = p_combined * 100
+            lines.append(
+                f"\n  Odds of finding a matching relic (any criteria):"
+                f"  {_fmt_pct(pct_combined)}%  (~1 in {n_combined:,} per relic)")
 
         self._propagate_p(p_combined)
         self._set_odds_text("\n".join(lines))

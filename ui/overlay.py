@@ -170,8 +170,9 @@ class BotOverlay:
         self._drag_x = 0
         self._drag_y = 0
 
-        # User-initiated hide (hotkey toggle) — while True, game_watch auto-show is suppressed
+        # User-initiated hide (hotkey toggle) — while True, auto-show is suppressed
         self._user_hidden = False
+        self._suppressed  = False
 
         # Section visibility
         self._section_visible: dict[str, bool] = {
