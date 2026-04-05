@@ -93,6 +93,9 @@ New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop | Out-Null
 $preserveItems = @(
     "profiles",
     "sequences",
+    "save_backups",
+    "batch_output",
+    "overlay_stats.txt",
     "relicbot_config.json",
     "relicbot_calibration.json",
     "relicbot_timing.json",
