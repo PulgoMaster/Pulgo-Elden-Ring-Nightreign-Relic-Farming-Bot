@@ -10,10 +10,23 @@ games that read WM_INPUT / DirectInput directly.
 
 import ctypes
 import time
+import threading
 import json
 import os
 from pynput import keyboard, mouse
 from pynput.mouse import Controller as MouseController, Button
+
+# Nav-OCR input pause gate.  When cleared, _press() blocks until set().
+# relic_analyzer.nav_ocr() toggles this via the registered hook so the
+# main-thread navigation OCR can run without competing with key inputs.
+_input_pause_event = threading.Event()
+_input_pause_event.set()
+
+def set_input_paused(paused: bool) -> None:
+    if paused:
+        _input_pause_event.clear()
+    else:
+        _input_pause_event.set()
 
 # ─── ctypes SendInput structures ──────────────────────────────────────────── #
 
@@ -290,6 +303,8 @@ class InputPlayer:
     # ── low-level key helpers ──────────────────────────────────────────────── #
 
     def _press(self, key_str: str):
+        if not _input_pause_event.is_set():
+            _input_pause_event.wait(timeout=5.0)
         ok = _send_key(key_str, key_up=False)
         if ok:
             self._held_keys.add(key_str)

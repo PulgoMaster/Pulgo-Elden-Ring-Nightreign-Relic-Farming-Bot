@@ -150,6 +150,7 @@ def _doors_from_pairings(criteria: dict, pool: frozenset[str]) -> list[tuple[fro
             slots.append(c_pool)
 
         if len(slots) < 2:
+            print(f"[DoorGen] Pairing skipped — needs ≥2 populated slots (got {len(slots)})", flush=True)
             continue  # need at least 2 populated slots
 
         # Cartesian product of all populated slots

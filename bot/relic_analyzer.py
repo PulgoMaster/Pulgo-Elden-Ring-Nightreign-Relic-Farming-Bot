@@ -8,11 +8,192 @@ After that the bot works fully offline with no ongoing costs.
 
 import io
 import re
+import time
+import queue
 import difflib
 import threading
+import concurrent.futures
 
 import numpy as np
 from PIL import Image
+
+
+# ── Navigator OCR isolation ──────────────────────────────────────────── #
+# nav_ocr() is the single entry point for main-thread navigation OCR.
+# GPU mode: priority gate — analysis workers acquire _gpu_inflight_lock
+#   around their reader.readtext() calls and yield while _nav_wants_gpu
+#   is set, so nav jumps the queue without pre-emption.
+# CPU mode: dedicated nav thread with its own EasyOCR Reader, higher
+#   OS priority, and an affinity mask disjoint from the analysis mask.
+
+_nav_wants_gpu       = threading.Event()
+_gpu_inflight_lock   = threading.Lock()
+_pause_inputs_for_nav = None   # callable(bool); set by app.py at startup
+
+_nav_thread: "threading.Thread | None" = None
+_nav_queue: "queue.Queue | None"        = None
+_nav_thread_started = False
+_nav_started_lock   = threading.Lock()
+
+
+def register_input_pause_hook(fn) -> None:
+    """app.py calls this at startup to register an input-pause callback.
+
+    The callback takes one bool argument: True to pause inputs (before nav
+    OCR runs on the main-thread GPU reader), False to resume.
+    """
+    global _pause_inputs_for_nav
+    _pause_inputs_for_nav = fn
+
+
+def _wait_for_nav_yield() -> None:
+    """Analysis workers call this in a tight spin before each readtext
+    to yield GPU cycles to pending nav OCR calls."""
+    while _nav_wants_gpu.is_set():
+        time.sleep(0.005)
+
+
+def _nav_worker_loop() -> None:
+    import easyocr
+    try:
+        import ctypes
+        THREAD_PRIORITY_ABOVE_NORMAL = 1
+        h = ctypes.windll.kernel32.GetCurrentThread()
+        ctypes.windll.kernel32.SetThreadPriority(h, THREAD_PRIORITY_ABOVE_NORMAL)
+    except Exception:
+        pass
+    try:
+        import os as _os
+        cpu_n = _os.cpu_count() or 4
+        if _ocr_affinity_mask:
+            _full = (1 << cpu_n) - 1
+            _nav_mask = _full & ~_ocr_affinity_mask
+            if not _nav_mask:
+                _nav_mask = 0b11 & _full
+        else:
+            _nav_mask = 0b11 & ((1 << cpu_n) - 1)
+        if _nav_mask:
+            _apply_thread_affinity(_nav_mask)
+    except Exception:
+        pass
+    try:
+        _nav_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    except Exception:
+        _nav_reader = None
+    while True:
+        try:
+            item = _nav_queue.get()
+        except Exception:
+            break
+        if item is None:
+            break
+        crop, kwargs, fut = item
+        try:
+            if _nav_reader is None:
+                raise RuntimeError("nav reader not initialized")
+            res = _nav_reader.readtext(crop, **kwargs)
+            fut.set_result(res)
+        except Exception as e:
+            try:
+                fut.set_exception(e)
+            except Exception:
+                pass
+
+
+def start_nav_worker() -> None:
+    """Start the dedicated CPU nav thread if not yet running.  Safe to call
+    multiple times — if the existing thread is alive, this is a no-op; if
+    it died (or was never started), a fresh thread is spawned and the
+    queue is recreated.  No-op in GPU mode — the priority-gate path
+    handles nav routing without a dedicated thread."""
+    global _nav_thread, _nav_queue, _nav_thread_started
+    with _nav_started_lock:
+        if _nav_thread is not None and _nav_thread.is_alive():
+            _nav_thread_started = True
+            return
+        # Either never started, or the previous thread died — (re)spawn.
+        _nav_queue = queue.Queue()
+        _nav_thread = threading.Thread(
+            target=_nav_worker_loop, daemon=True, name="relic-nav-ocr")
+        _nav_thread.start()
+        _nav_thread_started = True
+
+
+def _nav_inline_fallback(crop_bgr, kw):
+    """Last-resort path: run nav OCR inline on the main-thread reader using
+    the same priority-gate pattern as GPU mode.  Used when the CPU nav
+    worker thread has died and cannot be revived."""
+    _nav_wants_gpu.set()
+    if _pause_inputs_for_nav is not None:
+        try:
+            _pause_inputs_for_nav(True)
+        except Exception:
+            pass
+    try:
+        with _gpu_inflight_lock:
+            reader = _get_reader()
+            return reader.readtext(crop_bgr, **kw)
+    finally:
+        _nav_wants_gpu.clear()
+        if _pause_inputs_for_nav is not None:
+            try:
+                _pause_inputs_for_nav(False)
+            except Exception:
+                pass
+
+
+def nav_ocr(crop_bgr, *, name_only=False, **kw):
+    """OCR call for the main thread / navigation.  Routes through the
+    priority gate (GPU) or the dedicated nav thread (CPU) so navigation
+    never contends with analysis workers.
+
+    name_only — reserved for future lightweight name-band OCR path.
+    """
+    global _nav_thread_started
+    if _gpu_mode_enabled:
+        _nav_wants_gpu.set()
+        if _pause_inputs_for_nav is not None:
+            try:
+                _pause_inputs_for_nav(True)
+            except Exception:
+                pass
+        try:
+            with _gpu_inflight_lock:
+                reader = _get_reader()
+                return reader.readtext(crop_bgr, **kw)
+        finally:
+            _nav_wants_gpu.clear()
+            if _pause_inputs_for_nav is not None:
+                try:
+                    _pause_inputs_for_nav(False)
+                except Exception:
+                    pass
+    else:
+        if not _nav_thread_started:
+            start_nav_worker()
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        _nav_queue.put((crop_bgr, kw, fut))
+        try:
+            return fut.result(timeout=30.0)
+        except concurrent.futures.TimeoutError:
+            pass
+        # Timeout — diagnose and recover.
+        _alive = _nav_thread is not None and _nav_thread.is_alive()
+        if not _alive:
+            print("[NavWorker] Worker thread died — restarting", flush=True)
+            with _nav_started_lock:
+                _nav_thread_started = False
+            start_nav_worker()
+        # Retry once on the (possibly new) queue.
+        try:
+            fut2: concurrent.futures.Future = concurrent.futures.Future()
+            _nav_queue.put((crop_bgr, kw, fut2))
+            return fut2.result(timeout=30.0)
+        except Exception:
+            pass
+        print("[NavWorker] CPU nav unavailable — falling back to inline OCR"
+              " on main thread", flush=True)
+        return _nav_inline_fallback(crop_bgr, kw)
 
 
 # ── EasyOCR reader — one instance per thread ─────────────────────────── #
@@ -25,6 +206,7 @@ from PIL import Image
 
 _thread_local        = threading.local()
 _thread_device_local = threading.local()   # per-thread GPU override (True/False/None)
+_thread_nav_mode     = threading.local()   # analyze() routes via nav_ocr when set
 _torch_threads       = 1      # set via configure_torch_threads() before workers start
 _gpu_mode_enabled    = False  # set via set_gpu_mode() from the UI
 _ocr_affinity_mask   = 0      # set via configure_ocr_affinity(); 0 = no restriction
@@ -165,6 +347,28 @@ _PREVIEW_CROP_TOP_FRAC  = 0.38   # fraction of height to skip (preview screen)
 # name and passive text remains well above the minimum legible size).
 _MAX_OCR_WIDTH = 1000
 
+# ── Slot-based OCR geometry ──────────────────────────────────────────── #
+# Fixed Y positions (fraction of full screen height, 16:9 any resolution).
+# Each relic has 3 passive slots. Each slot has a passive line and an
+# optional curse line below it.  Positions measured from 2560x1440 and
+# confirmed across Grand/Polished/Delicate, Normal and Deep.
+#
+# The X range covers the text area of the relic detail panel.
+_SLOT_X_START = 0.27     # fraction of screen width (left edge of text)
+_SLOT_X_END   = 0.73     # fraction of screen width (right edge of text)
+
+# Each slot: (passive_y_center, curse_y_center) as fraction of screen height.
+# The passive line is ~0.8% tall, curse line is ~0.8% tall.
+# We crop +/- 1.5% around each center to capture the full text line.
+# Each slot center covers the full passive (1-2 lines) + optional curse.
+# Slot height of +/- 3.2% captures both without overlapping adjacent slots.
+_SLOT_CENTERS = [0.600, 0.665, 0.730]   # Y center of each slot
+_SLOT_HALF_HEIGHT = 0.032               # +/- 3.2% of screen height
+
+# Relic name position (for extracting the name before passives)
+_NAME_Y_CENTER = 0.547     # ~54.7% of screen height
+_NAME_HALF_HEIGHT = 0.015  # +/- 1.5%
+
 
 def _to_array(image_bytes: bytes, max_width: int = 0) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -179,9 +383,110 @@ def _to_array(image_bytes: bytes, max_width: int = 0) -> np.ndarray:
 
 # ── Passive fuzzy matching ────────────────────────────────────────────── #
 
+# Template passives: long passives where only a short keyword in the middle
+# differs.  Generic fuzzy matching fails on these because the shared
+# prefix+suffix dominates the similarity ratio.  We extract the keyword
+# and match that independently.
+#
+# Two families:
+#   1. Spell-change: "Changes compatible armament's [type] to X at start..."
+#   2. Weapon-class: "Improved Attack Power with 3+ X Equipped"
+
+_SPELL_CHANGE_RE = re.compile(
+    r"[Cc]hang\w*\s+compatible\s+armament.?\s*s?\s+"
+    r"(skill|incantation|sorcery)\s+to\s+(.+?)\s+at\s+start",
+    re.IGNORECASE,
+)
+_WEAPON_CLASS_RE = re.compile(
+    r"[Ii]mproved\s+[Aa]ttack\s+[Pp]ower\s+with\s+3\+?\s+(.+?)\s+[Ee]quipped",
+    re.IGNORECASE,
+)
+
+# Lookups populated on first use
+_SPELL_CHANGE_PASSIVES: dict[str, dict[str, str]] = {}
+_SPELL_NAMES_BY_TYPE: dict[str, list[str]] = {}
+_WEAPON_CLASS_PASSIVES: dict[str, str] = {}  # {weapon_lower: full_passive}
+_WEAPON_CLASS_NAMES: list[str] = []
+_TEMPLATE_LOOKUP_INIT = False
+
+def _ensure_template_lookup():
+    """Populate template passive lookup tables on first use."""
+    global _TEMPLATE_LOOKUP_INIT
+    if _TEMPLATE_LOOKUP_INIT:
+        return
+    _TEMPLATE_LOOKUP_INIT = True
+    from bot.passives import ALL_PASSIVES_SORTED
+    _spell_re = re.compile(
+        r"Changes compatible armament's (skill|incantation|sorcery) "
+        r"to (.+) at start of expedition")
+    _weapon_re = re.compile(
+        r"Improved Attack Power with 3\+ (.+) Equipped")
+    for p in ALL_PASSIVES_SORTED:
+        m = _spell_re.match(p)
+        if m:
+            stype = m.group(1)
+            sname = m.group(2)
+            _SPELL_CHANGE_PASSIVES.setdefault(stype, {})[sname.lower()] = p
+            _SPELL_NAMES_BY_TYPE.setdefault(stype, []).append(sname)
+            continue
+        m = _weapon_re.match(p)
+        if m:
+            wname = m.group(1)
+            _WEAPON_CLASS_PASSIVES[wname.lower()] = p
+            _WEAPON_CLASS_NAMES.append(wname)
+
+
+def _match_template_passive(text: str) -> str | None:
+    """Try to match a template passive by extracting the keyword.
+
+    Handles spell-change passives ("Changes ... to X at start ...") and
+    weapon-class passives ("Improved Attack Power with 3+ X Equipped").
+
+    Returns the full passive string if matched, None otherwise.
+    """
+    # Try spell-change first
+    m = _SPELL_CHANGE_RE.search(text)
+    if m:
+        _ensure_template_lookup()
+        spell_type = m.group(1).lower()
+        ocr_name = m.group(2).strip()
+        if len(ocr_name) < 2:
+            return None
+        lookup = _SPELL_CHANGE_PASSIVES.get(spell_type)
+        names = _SPELL_NAMES_BY_TYPE.get(spell_type)
+        if not lookup or not names:
+            return None
+        if ocr_name.lower() in lookup:
+            return lookup[ocr_name.lower()]
+        hits = difflib.get_close_matches(ocr_name, names, n=1, cutoff=0.6)
+        if hits:
+            return lookup.get(hits[0].lower())
+        return None
+
+    # Try weapon-class
+    m = _WEAPON_CLASS_RE.search(text)
+    if m:
+        _ensure_template_lookup()
+        ocr_name = m.group(1).strip()
+        if len(ocr_name) < 2:
+            return None
+        if ocr_name.lower() in _WEAPON_CLASS_PASSIVES:
+            return _WEAPON_CLASS_PASSIVES[ocr_name.lower()]
+        hits = difflib.get_close_matches(
+            ocr_name, _WEAPON_CLASS_NAMES, n=1, cutoff=0.6)
+        if hits:
+            return _WEAPON_CLASS_PASSIVES.get(hits[0].lower())
+        return None
+
+    return None
+
+
 def _match_passive(text: str, known: list, cutoff: float = 0.82) -> str | None:
     """
     Return the closest known passive name, or None if below cutoff.
+
+    For spell-change passives ("Changes compatible armament's ... to X ..."),
+    extracts the spell name and matches it independently for higher accuracy.
 
     Strict +N suffix rule: if either the OCR text or the matched passive has a
     +N suffix, both must carry the exact same suffix.  This means:
@@ -193,14 +498,20 @@ def _match_passive(text: str, known: list, cutoff: float = 0.82) -> str | None:
     text = text.strip()
     if len(text) < 5:
         return None
+    # Try template matching first (spell-change + weapon-class passives)
+    spell_match = _match_template_passive(text)
+    if spell_match and spell_match in known:
+        return spell_match
+    # Generic fuzzy match
     hits = difflib.get_close_matches(text, known, n=1, cutoff=cutoff)
     if not hits:
         return None
     matched = hits[0]
-    ocr_suffix   = re.search(r' \+\d+$', text)
+    # OCR sometimes reads "+1" as "+ 1" (space before digit) — normalize
+    ocr_suffix   = re.search(r' \+\s*\d+$', text)
     match_suffix = re.search(r' \+\d+$', matched)
-    ocr_s   = ocr_suffix.group()   if ocr_suffix   else ""
-    match_s = match_suffix.group() if match_suffix else ""
+    ocr_s   = re.sub(r'\s', '', ocr_suffix.group())   if ocr_suffix   else ""
+    match_s = re.sub(r'\s', '', match_suffix.group()) if match_suffix else ""
     if ocr_s != match_s:
         return None
     return matched
@@ -358,13 +669,220 @@ def _detect_relic_color(relic_name: str) -> str | None:
     return None
 
 
+# ── Slot-based OCR pipeline ──────────────────────────────────────────── #
+
+def _slot_readtext(reader, crop: np.ndarray):
+    """Run reader.readtext() honoring the nav-isolation routing.
+
+    Uses nav_ocr() when the calling thread set _thread_nav_mode.on (i.e.
+    came in via analyze_for_nav), otherwise yields to pending nav OCR
+    and acquires the GPU inflight lock just like the legacy analyze path.
+    """
+    if getattr(_thread_nav_mode, "on", False):
+        return nav_ocr(crop)
+    _wait_for_nav_yield()
+    with _gpu_inflight_lock:
+        return reader.readtext(crop)
+
+
+def _crop_band(img: np.ndarray, y_center: float, half_height: float,
+               x_start: float = _SLOT_X_START,
+               x_end: float = _SLOT_X_END) -> np.ndarray:
+    """Crop a horizontal band from a full-screen image using fractions."""
+    h, w = img.shape[:2]
+    x1 = int(w * x_start)
+    x2 = int(w * x_end)
+    y1 = max(0, int(h * (y_center - half_height)))
+    y2 = min(h, int(h * (y_center + half_height)))
+    return img[y1:y2, x1:x2]
+
+
+def _enhance_curse_pixels(crop: np.ndarray) -> np.ndarray:
+    """Convert blue-dominant text pixels to white for better OCR on curses."""
+    b = crop[:, :, 2].astype(np.int16)
+    r = crop[:, :, 0].astype(np.int16)
+    mask = (b - r > 45) & (b > 110)
+    if mask.any():
+        out = crop.copy()
+        out[mask] = [255, 255, 255]
+        return out
+    return crop
+
+
+def _is_curse_text(crop: np.ndarray) -> bool:
+    """Check if the bright text in a crop is blue-tinted (curse) vs white (passive).
+
+    Returns True if the bright text pixels have B-R > 30 on average.
+    """
+    gray = np.mean(crop, axis=2)
+    bright = gray > 100
+    if bright.sum() < 10:
+        return False
+    b_bright = float(np.mean(crop[:, :, 2][bright]))
+    r_bright = float(np.mean(crop[:, :, 0][bright]))
+    return (b_bright - r_bright) > 30
+
+
+def _ocr_slot(reader, crop: np.ndarray,
+              all_passives: list, all_curses: list) -> tuple:
+    """OCR a single slot crop and return (passive, curse, dbg_tokens).
+
+    The crop contains one passive line (possibly 2 lines if wrapping) and
+    optionally one curse line below it.  Passive text is white, curse text
+    is light blue.
+
+    Returns:
+        (passive_name or None, curse_name or None, list_of_dbg_token_dicts)
+    """
+    h, w = crop.shape[:2]
+    dbg = []
+
+    # Split the crop into upper half (passive) and lower half (curse candidate)
+    # by finding where text color changes from white to blue.
+    # First, enhance curse pixels for OCR, then run OCR once on the full slot.
+    enhanced = _enhance_curse_pixels(crop)
+    results = _slot_readtext(reader, enhanced)
+
+    if not results:
+        return None, None, dbg
+
+    # Collect all tokens with their Y positions
+    tokens = []
+    for bbox, text, conf in results:
+        text = text.strip()
+        if not bbox or len(text) < 2:
+            continue
+        y_center = (min(pt[1] for pt in bbox) + max(pt[1] for pt in bbox)) / 2
+        x_center = (min(pt[0] for pt in bbox) + max(pt[0] for pt in bbox)) / 2
+        tokens.append({"text": text, "conf": conf, "y": y_center, "x": x_center, "y_frac": y_center / h})
+
+    if not tokens:
+        return None, None, dbg
+
+    # Split tokens into passive vs curse by checking the ORIGINAL (non-enhanced)
+    # crop color at each token's Y position.
+    passive_tokens = []
+    curse_tokens = []
+    for tok in tokens:
+        y = int(tok["y"])
+        # Sample a horizontal strip at this token's Y in the original crop
+        y1 = max(0, y - 3)
+        y2 = min(h, y + 3)
+        strip = crop[y1:y2, :]
+        if _is_curse_text(strip):
+            curse_tokens.append(tok)
+        else:
+            passive_tokens.append(tok)
+
+    # Build passive text from passive tokens (row-bucket then X-sort)
+    def _order_tokens(toks, row_gap=15):
+        if not toks:
+            return []
+        ts = sorted(toks, key=lambda t: t["y"])
+        rows = [[ts[0]]]
+        for t in ts[1:]:
+            if abs(t["y"] - rows[-1][-1]["y"]) <= row_gap:
+                rows[-1].append(t)
+            else:
+                rows.append([t])
+        out = []
+        for row in rows:
+            out.extend(sorted(row, key=lambda t: t["x"]))
+        return out
+
+    passive_name = None
+    if passive_tokens:
+        passive_text = " ".join(t["text"] for t in _order_tokens(passive_tokens))
+        passive_name = _match_passive(passive_text, all_passives, cutoff=0.75)
+        for t in passive_tokens:
+            dbg.append({
+                "text": t["text"], "conf": t["conf"], "y": int(t["y"]),
+                "status": "PASSIVE" if passive_name else "MISS",
+                "reason": "slot_ocr",
+                "matched": passive_name,
+            })
+
+    # Build curse text from curse tokens
+    curse_name = None
+    if curse_tokens:
+        curse_text = " ".join(t["text"] for t in _order_tokens(curse_tokens))
+        curse_name = _match_passive(curse_text, all_curses, cutoff=0.75)
+        for t in curse_tokens:
+            dbg.append({
+                "text": t["text"], "conf": t["conf"], "y": int(t["y"]),
+                "status": "CURSE" if curse_name else "MISS",
+                "reason": "slot_ocr",
+                "matched": curse_name,
+            })
+
+    return passive_name, curse_name, dbg
+
+
+def _ocr_by_slots(img_full: np.ndarray, reader,
+                   all_passives: list, all_curses: list,
+                   relic_type: str = "") -> tuple:
+    """Run slot-based OCR on a full screenshot.
+
+    Crops each slot independently and OCRs them separately.
+    No line reconstruction needed — each crop contains exactly one
+    passive and optionally one curse.
+
+    Args:
+        img_full: Full screenshot as numpy array (RGB).
+        reader: EasyOCR reader instance.
+        all_passives: Sorted list of all known passive names.
+        all_curses: List of all known curse names.
+        relic_type: "night" to prepend "Deep " to the relic name.
+
+    Returns:
+        (relic_name, passives_list, curses_list, dbg_tokens_list)
+    """
+    # OCR the relic name
+    name_crop = _crop_band(img_full, _NAME_Y_CENTER, _NAME_HALF_HEIGHT)
+    name_results = _slot_readtext(reader, name_crop)
+    # Sort name tokens left-to-right by X position for correct word order
+    _name_tokens = [(min(pt[0] for pt in bbox), t.strip())
+                    for bbox, t, c in name_results if c > 0.3 and t.strip()]
+    _name_tokens.sort(key=lambda x: x[0])
+    relic_name = " ".join(t for _, t in _name_tokens).strip() or None
+
+    # Prepend "Deep " for night mode relics (if not already in the OCR'd name)
+    if relic_name and relic_type == "night" and "deep" not in relic_name.lower():
+        relic_name = "Deep " + relic_name
+
+    passives = []
+    curses = []
+    all_dbg = []
+
+    # Name debug tokens
+    for _, text, conf in name_results:
+        all_dbg.append({
+            "text": text.strip(), "conf": conf, "y": 0,
+            "status": "NAME" if conf > 0.3 else "DROPPED",
+            "reason": "name_slot",
+            "matched": relic_name,
+        })
+
+    # OCR each passive slot
+    for slot_idx, slot_center in enumerate(_SLOT_CENTERS):
+        slot_crop = _crop_band(img_full, slot_center, _SLOT_HALF_HEIGHT)
+        passive, curse, slot_dbg = _ocr_slot(
+            reader, slot_crop, all_passives, all_curses)
+
+        if passive and passive not in passives:
+            passives.append(passive)
+        if curse and curse not in curses:
+            curses.append(curse)
+        all_dbg.extend(slot_dbg)
+
+    return relic_name, passives, curses, all_dbg
+
+
 # ── Public API ────────────────────────────────────────────────────────── #
 
 def analyze(
     image_bytes: bytes,
     criteria: dict,
-    crop_left: float = _CROP_LEFT_FRAC,
-    crop_top: float  = _CROP_TOP_FRAC,
     relic_type: str  = "",
     doors: "list[tuple] | None" = None,
 ) -> dict:
@@ -374,12 +892,6 @@ def analyze(
     Args:
         image_bytes:  JPEG screenshot as bytes.
         criteria:     Structured dict from relic_builder.get_criteria_dict().
-        crop_left:    Fraction of image width  to skip from the left (default:
-                      sell-screen crop).  Pass _PREVIEW_CROP_LEFT_FRAC for the
-                      bazaar post-buy preview screen.
-        crop_top:     Fraction of image height to skip from the top (default:
-                      sell-screen crop).  Pass _PREVIEW_CROP_TOP_FRAC for the
-                      bazaar post-buy preview screen.
         doors:        Pre-computed door list from door_generator.generate_doors().
                       If provided, uses fast door matching instead of runtime
                       criteria evaluation.
@@ -394,282 +906,14 @@ def analyze(
     reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)   # full resolution — we crop first, then scale
 
-    # Crop to the relic info panel. Fraction-based so it scales correctly for
-    # any resolution. Caller supplies the right fractions for the screen type.
-    h, w = img.shape[:2]
-    left = int(w * crop_left)
-    top  = int(h * crop_top)
-    img  = img[top:, left:]
+    # ── Slot-based OCR ────────────────────────────────────────────────── #
+    relic_name, passives, curses, _dbg_tokens = _ocr_by_slots(
+        img, reader, ALL_PASSIVES_SORTED, ALL_CURSES, relic_type)
 
-    # Downscale the cropped region to _MAX_OCR_WIDTH if wider.
-    # OCR time scales roughly with pixel count; capping at 1000 px gives a
-    # 2-3× speed improvement on 1440p/4K without affecting accuracy (relic
-    # name and passive text remain well above the minimum legible size).
-    _ch, _cw = img.shape[:2]
-    if _cw > _MAX_OCR_WIDTH:
-        _scale = _MAX_OCR_WIDTH / _cw
-        img = np.array(
-            Image.fromarray(img).resize(
-                (_MAX_OCR_WIDTH, max(1, int(_ch * _scale))),
-                Image.LANCZOS,
-            )
-        )
-
-    # ── Curse text enhancement ────────────────────────────────────────── #
-    # Curse text renders as light-blue in-game (B significantly dominates R).
-    # EasyOCR assigns lower confidence to blue-tinted text vs white text.
-    # Pre-processing: convert blue-dominant, non-dark pixels to white so the
-    # OCR engine treats curse lines the same as passive lines.
-    # White passive/name text is unaffected (R≈G≈B → B-R ≈ 0 ≤ threshold).
-    # Dark panel backgrounds are unaffected (B < 110).
-    _b_ch = img[:, :, 2].astype(np.int16)
-    _r_ch = img[:, :, 0].astype(np.int16)
-    _curse_px_mask = (_b_ch - _r_ch > 45) & (_b_ch > 110)
-    if _curse_px_mask.any():
-        _ocr_img = img.copy()
-        _ocr_img[_curse_px_mask] = [255, 255, 255]
-    else:
-        _ocr_img = img
-
-    results = reader.readtext(_ocr_img)
-
-    passives, curses = [], []
-    relic_name = None
-
-    # Always collect raw OCR tokens for diagnostic logging via DiagnosticLogger.
-    _dbg_tokens: list[dict] = []
-    # Tokens dropped for low confidence — retried against ALL_CURSES after the
-    # main pass since curse text can still be readable at conf < 0.35.
-    _low_conf_tokens: list[tuple] = []
-
-    # ── Phase 1: Collect all tokens with full bbox data ──────────────────── #
-    # Line clustering tolerance scales with image width so it works at any
-    # resolution.  The OCR crop is downscaled to _MAX_OCR_WIDTH (1000 px) by
-    # width; at that reference size 15 px is the correct Y-centre tolerance.
-    # Scale proportionally for smaller or larger images.
-    _img_h, _img_w = img.shape[:2]
-    _LINE_CLUSTER_PX = max(8, int(15 * _img_w / 1000))
-
-    _raw_tokens: list[dict] = []
-    for bbox, text, conf in results:
-        _text = text.strip()
-        if not bbox:
-            continue
-        # Compute spatial metrics from bbox corners
-        _y_top = int(min(pt[1] for pt in bbox))
-        _y_bot = int(max(pt[1] for pt in bbox))
-        _y_center = (_y_top + _y_bot) // 2
-        _x_left = int(min(pt[0] for pt in bbox))
-        _raw_tokens.append({
-            "text": _text, "conf": conf,
-            "y_top": _y_top, "y_bot": _y_bot, "y_center": _y_center,
-            "x_left": _x_left,
-        })
-
-    # ── Phase 2: Group tokens into lines by Y-center clustering ──────────── #
-    _raw_tokens.sort(key=lambda t: (t["y_center"], t["x_left"]))
-
-    _lines: list[list[dict]] = []
-    for tok in _raw_tokens:
-        placed = False
-        for line in _lines:
-            # Compare against the first token's Y-center (strict — no drift)
-            line_y = line[0]["y_center"]
-            if abs(tok["y_center"] - line_y) <= _LINE_CLUSTER_PX:
-                line.append(tok)
-                placed = True
-                break
-        if not placed:
-            _lines.append([tok])
-
-    # Sort each line left-to-right by X, then sort lines top-to-bottom
-    for line in _lines:
-        line.sort(key=lambda t: t["x_left"])
-    _lines.sort(key=lambda line: sum(t["y_center"] for t in line) // len(line))
-
-    # ── Phase 3: Reconstruct line text and match ─────────────────────────── #
-    for line in _lines:
-        # Build reconstructed line from all tokens on this line
-        line_text = " ".join(t["text"] for t in line).strip()
-        line_conf = min(t["conf"] for t in line) if line else 0
-        line_avg_conf = (sum(t["conf"] for t in line) / len(line)) if line else 0
-        line_y = sum(t["y_center"] for t in line) // len(line) if line else -1
-        _individual_texts = [t["text"] for t in line]
-
-        # Record individual tokens in diagnostics (will be updated with match results)
-        _line_dbg_indices = []
-        for t in line:
-            idx = len(_dbg_tokens)
-            _line_dbg_indices.append(idx)
-            _dbg_tokens.append({
-                "text": t["text"], "conf": t["conf"], "y": t["y_top"],
-                "status": "PENDING",
-                "reason": None,
-                "matched": None,
-            })
-
-        # Skip very short reconstructed lines
-        if len(line_text) < 3:
-            for idx in _line_dbg_indices:
-                _dbg_tokens[idx]["status"] = "DROPPED"
-                _dbg_tokens[idx]["reason"] = "too_short"
-            continue
-
-        # If the entire line is low confidence, defer to rescue pass
-        if line_avg_conf < 0.35:
-            for idx in _line_dbg_indices:
-                _dbg_tokens[idx]["status"] = "DROPPED"
-                _dbg_tokens[idx]["reason"] = "conf<0.35"
-            _low_conf_tokens.append((line_text, line_avg_conf, line_y))
-            continue
-
-        # Try matching the full reconstructed line first (best accuracy)
-        matched_passive = _match_passive(line_text, ALL_PASSIVES_SORTED)
-        if matched_passive:
-            if matched_passive not in passives:
-                passives.append(matched_passive)
-            for idx in _line_dbg_indices:
-                _dbg_tokens[idx]["status"] = "PASSIVE"
-                _dbg_tokens[idx]["reason"] = "line_reconstruct" if len(line) > 1 else None
-                _dbg_tokens[idx]["matched"] = matched_passive
-            continue
-
-        # Try matching as a curse
-        matched_curse = _match_passive(line_text, ALL_CURSES)
-        if matched_curse:
-            if matched_curse not in curses:
-                curses.append(matched_curse)
-            for idx in _line_dbg_indices:
-                _dbg_tokens[idx]["status"] = "CURSE"
-                _dbg_tokens[idx]["reason"] = "line_reconstruct" if len(line) > 1 else None
-                _dbg_tokens[idx]["matched"] = matched_curse
-            continue
-
-        # Try matching individual tokens if line didn't match as a whole
-        # (handles cases where a line contains unrelated fragments)
-        _any_individual = False
-        for ti, t in enumerate(line):
-            idx = _line_dbg_indices[ti]
-            if len(t["text"]) < 3:
-                _dbg_tokens[idx]["status"] = "DROPPED"
-                _dbg_tokens[idx]["reason"] = "too_short"
-                continue
-            if t["conf"] < 0.35:
-                _low_conf_tokens.append((t["text"], t["conf"], t["y_top"]))
-                _dbg_tokens[idx]["status"] = "DROPPED"
-                _dbg_tokens[idx]["reason"] = "conf<0.35"
-                continue
-            mp = _match_passive(t["text"], ALL_PASSIVES_SORTED)
-            if mp:
-                if mp not in passives:
-                    passives.append(mp)
-                _dbg_tokens[idx]["status"] = "PASSIVE"
-                _dbg_tokens[idx]["matched"] = mp
-                _any_individual = True
-                continue
-            mc = _match_passive(t["text"], ALL_CURSES)
-            if mc:
-                if mc not in curses:
-                    curses.append(mc)
-                _dbg_tokens[idx]["status"] = "CURSE"
-                _dbg_tokens[idx]["matched"] = mc
-                _any_individual = True
-                continue
-
-        # Relic name detection: first unmatched high-confidence line
-        if not _any_individual and relic_name is None and line_conf > 0.55:
-            _first = line_text
-            if _first and not _first[0].isdigit():
-                relic_name = _first
-                for idx in _line_dbg_indices:
-                    if _dbg_tokens[idx]["status"] == "PENDING":
-                        _dbg_tokens[idx]["status"] = "RELIC_NAME"
-                        _dbg_tokens[idx]["matched"] = _first
-
-        # Mark remaining PENDING tokens as NO_MATCH
-        for idx in _line_dbg_indices:
-            if _dbg_tokens[idx]["status"] == "PENDING":
-                _dbg_tokens[idx]["status"] = "NO_MATCH"
-
-    # ── Legacy token-merge fallback ──────────────────────────────────────── #
-    # Catch any remaining unmatched tokens that the line reconstruction missed
-    # (e.g. tokens that ended up in separate lines due to Y-center variance).
-    _unmatched = [(d["text"], d["y"]) for d in _dbg_tokens
-                  if d["status"] == "NO_MATCH" and len(d["text"]) >= 5]
-    _unmatched.sort(key=lambda x: x[1])
-    for i in range(len(_unmatched)):
-        for j in range(i + 1, min(i + 4, len(_unmatched))):  # try 2-4 token combos
-            merged = _unmatched[i][0] + " " + " ".join(
-                _unmatched[k][0] for k in range(i + 1, j + 1))
-            merged_match = _match_passive(merged, ALL_PASSIVES_SORTED, cutoff=0.80)
-            if merged_match and merged_match not in passives:
-                passives.append(merged_match)
-                for k in range(i, j + 1):
-                    for _dt in _dbg_tokens:
-                        if _dt["text"] == _unmatched[k][0] and _dt["status"] == "NO_MATCH":
-                            _dt["status"] = "PASSIVE"
-                            _dt["reason"] = "token_merge_fallback"
-                            _dt["matched"] = merged_match
-                            break
-                break
-
-    # ── Passive-rescue pass ──────────────────────────────────────────────── #
-    # Retry low-confidence tokens against ALL_PASSIVES_SORTED.  Motivated by
-    # Delicate relics (1 passive): the single passive line can land at the top
-    # of the cropped region with slightly reduced contrast, pushing its OCR
-    # confidence below the 0.35 floor even though the text is correct.  A
-    # lower fuzzy cutoff (0.78) recovers these while staying well above random-
-    # noise.  Tokens already matched as passives or with conf < 0.05 are skipped.
-    for _lct, _lcc, _lcy in _low_conf_tokens:
-        if _lcc < 0.05 or _lct in passives:
-            continue
-        _rescue_passive = _match_passive(_lct, ALL_PASSIVES_SORTED, cutoff=0.78)
-        if _rescue_passive and _rescue_passive not in passives:
-            passives.append(_rescue_passive)
-            for _dt in reversed(_dbg_tokens):
-                if _dt["text"] == _lct and _dt["status"] == "DROPPED":
-                    _dt["status"]  = "PASSIVE"
-                    _dt["reason"]  = "low_conf_rescue"
-                    _dt["matched"] = _rescue_passive
-                    break
-
-    # ── Curse-rescue pass ────────────────────────────────────────────────── #
-    # Retry low-confidence tokens against ALL_CURSES only.  The 0.82 fuzzy
-    # similarity threshold inside _match_passive is still the real gate;
-    # we only bypass the OCR-confidence floor because curse text (light-blue,
-    # smaller font) inherently scores lower than white passive/name text.
-    # Tokens with conf < 0.10 are still treated as garbage and skipped.
-    for _lct, _lcc, _lcy in _low_conf_tokens:
-        if _lcc < 0.05 or _lct in curses:
-            continue
-        # Lower similarity cutoff (0.75 vs default 0.82): low-conf curse tokens
-        # are often OCR-mangled enough that 0.82 rejects correct matches.
-        # 0.75 recovers those while remaining well above random-noise territory
-        # (tested against all 24 known curses — no cross-passive false matches).
-        _rescue_curse = _match_passive(_lct, ALL_CURSES, cutoff=0.75)
-        if _rescue_curse and _rescue_curse not in curses:
-            curses.append(_rescue_curse)
-            # Patch the already-appended DROPPED token so diag shows the outcome.
-            for _dt in reversed(_dbg_tokens):
-                if _dt["text"] == _lct and _dt["status"] == "DROPPED":
-                    _dt["status"]  = "CURSE"
-                    _dt["reason"]  = "low_conf_rescue"
-                    _dt["matched"] = _rescue_curse
-                    break
-
-    relic_name = relic_name or "Unknown Relic"
-
-    # Prepend "Deep " when scanning Deep of Night relics (relic_type="night")
-    # and the name wasn't already captured with the prefix.
-    if (relic_type == "night"
-            and relic_name != "Unknown Relic"
-            and not relic_name.startswith("Deep ")):
-        relic_name = "Deep " + relic_name
-
-    # ── Color detection (best-effort) ───────────────────────────────────── #
+    # Color detection
     allowed_colors = criteria.get("allowed_colors", [])
-    if allowed_colors and len(allowed_colors) < 4:  # if all 4 enabled, skip check
-        relic_color = _detect_relic_color(relic_name)
+    if allowed_colors and len(allowed_colors) < 4:
+        relic_color = _detect_relic_color(relic_name or "")
         if relic_color and relic_color not in allowed_colors:
             return {
                 "relics_found": [{"name": relic_name, "passives": passives, "curses": curses}],
@@ -682,13 +926,12 @@ def analyze(
                 "_ocr_tokens": _dbg_tokens,
             }
 
+    # Criteria matching
     if doors is not None:
         from bot.door_generator import check_doors
         match, matched_passives, near_misses = check_doors(passives, doors)
     else:
         match, matched_passives, near_misses = _check_criteria(passives, criteria)
-    # Patch near-miss records with the actual relic name (criteria checker
-    # uses a placeholder because it doesn't receive the name).
     for _nm in near_misses:
         if _nm.get("relic_name") == "current relic" and relic_name:
             _nm["relic_name"] = relic_name
@@ -707,6 +950,28 @@ def analyze(
         ),
         "_ocr_tokens": _dbg_tokens,
     }
+
+
+def analyze_for_nav(
+    image_bytes: bytes,
+    criteria: dict,
+    relic_type: str  = "",
+    doors: "list[tuple] | None" = None,
+) -> dict:
+    """analyze() variant routed through nav_ocr for main-thread callers.
+
+    Sets a thread-local flag so the readtext calls inside analyze()
+    dispatch via the navigator path (GPU priority gate or dedicated CPU
+    nav thread) instead of the normal analysis path.
+    """
+    _thread_nav_mode.on = True
+    try:
+        return analyze(
+            image_bytes, criteria,
+            relic_type=relic_type, doors=doors,
+        )
+    finally:
+        _thread_nav_mode.on = False
 
 
 def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
@@ -746,7 +1011,6 @@ def read_murk(image_bytes: bytes,
     if region is None:
         region = MURK_SHOP_REGION
 
-    reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)   # full resolution — murk digits are small
 
     h, w = img.shape[:2]
@@ -769,9 +1033,9 @@ def read_murk(image_bytes: bytes,
                 if 1 <= val <= 9_999_999:
                     candidates.append((conf, val))
 
-    _extract(reader.readtext(roi_raw))
+    _extract(nav_ocr(roi_raw))
     if not candidates:
-        _extract(reader.readtext(roi_proc))
+        _extract(nav_ocr(roi_proc))
 
     if not candidates:
         return 0, region
@@ -792,7 +1056,6 @@ def check_text_visible(image_bytes: bytes, text: str, top_fraction: float = 0.50
     Downscaling to _MAX_OCR_WIDTH gives ~2-3× speedup; the region must be at
     least 50 px tall after downscaling to keep text legible.
     """
-    reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)
     h, w = img.shape[:2]
     scan_region = img[:max(1, int(h * top_fraction)), :]
@@ -806,7 +1069,7 @@ def check_text_visible(image_bytes: bytes, text: str, top_fraction: float = 0.50
                     (_MAX_OCR_WIDTH, _new_h), Image.LANCZOS,
                 )
             )
-    results = reader.readtext(scan_region)
+    results = nav_ocr(scan_region)
     all_text = " ".join(t for _, t, c in results if c > 0.3).lower()
     return text.lower() in all_text
 
@@ -831,7 +1094,6 @@ def verify_shop_item(image_bytes: bytes, relic_type: str) -> tuple:
         (True,  "OK")         correct relic, no old-version marker.
         (False, reason_str)   wrong item, old-version relic, or inconclusive.
     """
-    reader = _get_reader()
     img = _to_array(image_bytes, max_width=0)
     h, w = img.shape[:2]
 
@@ -853,7 +1115,7 @@ def verify_shop_item(image_bytes: bytes, relic_type: str) -> tuple:
             )
         )
 
-    results = reader.readtext(roi)
+    results = nav_ocr(roi)
     # Low-confidence threshold — short words and small description text can
     # score below 0.25 in stylised game fonts; 0.05 keeps sensitivity high.
     all_text_lo = " ".join(t for _, t, c in results if c > 0.05).lower()

@@ -1,8 +1,26 @@
 ================================================================================
-  RELIC BOT v1.6.5
+  RELIC BOT v1.7.0
   Elden Ring Nightreign Relic Farming Bot
   Made by Pulgo
 ================================================================================
+
+══════════════════════════════════════════════════════════════════════════
+WHAT'S NEW IN v1.7.0
+══════════════════════════════════════════════════════════════════════════
+
+  • Slot-based OCR — faster, more accurate relic reading. Handles wrapping
+    text correctly. Replaces the previous line-reconstruction approach.
+  • Navigator OCR isolation — menu navigation OCR no longer competes with
+    analysis OCR for the GPU/CPU. Eliminates the "stale settle" issue that
+    could desync the cursor on slower systems.
+  • Phase 1 settle now retries with a single RIGHT press if the first
+    relic's passives are unreadable, instead of triggering a full menu
+    recovery. The list is circular so the skipped relic comes back around.
+  • Auto-suppression: GPU Always Analyze auto-disables for the rest of an
+    iteration after repeated input drops, then retries the next iteration.
+  • Hardened recovery: Phase -0.5 black-frame timeout has a hard ceiling,
+    Phase 3 shop-return recovery has a longer poll window and restarts the
+    iteration after two consecutive failures.
 
 Automates relic farming in Elden Ring Nightreign using on-device OCR to
 analyze relics and match them against your criteria. Works fully offline

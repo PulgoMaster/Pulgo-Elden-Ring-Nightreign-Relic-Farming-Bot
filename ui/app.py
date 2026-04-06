@@ -46,6 +46,39 @@ _LAST_PROFILE_FILE  = os.path.join(_PROFILES_DIR, ".last_profile")
 _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 
+def _detect_steam_exe(game_exe: str = "") -> str:
+    """Try to find steam.exe automatically.
+
+    Checks (in order):
+      1. System PATH
+      2. Walk up from the game exe path (Steam is always a parent dir)
+      3. Default install locations (Program Files (x86), Program Files)
+    Returns the full path to steam.exe, or '' if not found.
+    """
+    # 1. System PATH
+    found = shutil.which("steam.exe")
+    if found:
+        return found
+    # 2. Walk up from game exe
+    if game_exe and os.path.isfile(game_exe):
+        d = os.path.dirname(game_exe)
+        for _ in range(6):
+            candidate = os.path.join(d, "steam.exe")
+            if os.path.isfile(candidate):
+                return candidate
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+    # 3. Default install locations
+    for base in [os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                 os.environ.get("ProgramFiles", r"C:\Program Files")]:
+        candidate = os.path.join(base, "Steam", "steam.exe")
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
 def _detect_game_exe() -> str:
     """Probe common Steam install paths for the Nightreign executable."""
     candidates = [
@@ -539,6 +572,14 @@ class RelicBotApp(tk.Tk):
         # Input recording
         self.recorder = input_controller.InputRecorder()
         self.player = input_controller.InputPlayer()
+        try:
+            relic_analyzer.register_input_pause_hook(
+                input_controller.set_input_paused)
+            relic_analyzer.start_nav_worker()
+        except Exception:
+            pass
+        # Steam exe path — populated by _load_app_config or Browse button
+        self._steam_exe_path: str = ""
         # Diagnostic logger (test build) — created per batch run, None between runs
         self._diag: DiagnosticLogger | None = None
         self._diag_cur_iter: int = 0
@@ -645,6 +686,11 @@ class RelicBotApp(tk.Tk):
         self._intermittent_every_n_var   = tk.IntVar(value=5)
         self._hybrid_var                 = tk.BooleanVar(value=False)
         self._gpu_always_analyze_var     = tk.BooleanVar(value=False)
+        self._iter_input_drop_count      = 0
+        self._iter_gpu_aa_suppressed     = False
+        self._clean_cycles_since_suppress = 0
+        self._iter_suppress_count        = 0
+        self._p3_consecutive_fails       = 0
         self._prev_colors: set = {"Red", "Blue", "Green", "Yellow"}
         self._color_warn_job = None   # after() job for warning auto-dismiss
         self._mouse_blocker_hook   = None   # WH_MOUSE_LL hook handle
@@ -823,10 +869,23 @@ class RelicBotApp(tk.Tk):
                  "detection (window focus and game close). If your game is on\n"
                  "a different drive, browse to the correct nightreign.exe.")
 
+        ttk.Label(save_frame, text="Steam executable:").grid(row=4, column=0, sticky="w", **pad)
+        self._steam_exe_var = tk.StringVar()
+        ttk.Entry(save_frame, textvariable=self._steam_exe_var, width=52).grid(row=4, column=1, sticky="ew", **pad)
+        _steam_browse_btn = ttk.Button(save_frame, text="Browse", command=self._browse_steam_exe)
+        _steam_browse_btn.grid(row=4, column=2, **pad)
+        _Tooltip(_steam_browse_btn,
+                 "Path to steam.exe (usually C:\\Program Files (x86)\\Steam\\steam.exe).\n"
+                 "Auto-detected from common install locations on startup.\n\n"
+                 "Used to reset Steam when the game fails to relaunch between\n"
+                 "iterations. Without this, the bot can only retry the normal\n"
+                 "launch — if Steam's session gets stuck, the run will abort.\n\n"
+                 "Only set manually if Steam is in a non-standard location.")
+
         ttk.Label(
             save_frame,
             text="\u26a0  The bot requires default in-game keybinds — F must be your confirm/interact key.",
-        ).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
+        ).grid(row=5, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Choose Relic Type + Color Filter ────────────────────────── #
         type_color_frame = ttk.LabelFrame(inner, text="Choose Relic Type")
@@ -1297,6 +1356,7 @@ class RelicBotApp(tk.Tk):
             variable=self._gpu_always_analyze_var,
         )
         _gpu_aa_chk.grid(row=1, column=3, columnspan=4, sticky="w", **pad)
+
         _Tooltip(_gpu_aa_chk,
                  "Allows the GPU worker to keep analyzing relics even while CPU workers are paused for game inputs.\n"
                  "GPU inference runs on the graphics card and does not compete for the CPU time inputs need.\n"
@@ -2549,6 +2609,16 @@ class RelicBotApp(tk.Tk):
             self.game_exe_var.set(path)
             self._save_app_config()
 
+    def _browse_steam_exe(self):
+        path = filedialog.askopenfilename(
+            title="Select steam.exe",
+            filetypes=[("Executable", "*.exe"), ("All", "*.*")]
+        )
+        if path:
+            self._steam_exe_var.set(path)
+            self._steam_exe_path = path
+            self._save_app_config()
+
     # ------------------------------------------------------------------ #
     #  PROFILE MANAGEMENT
     # ------------------------------------------------------------------ #
@@ -2787,6 +2857,13 @@ class RelicBotApp(tk.Tk):
         self.game_exe_var.set(data.get("game_executable", _default_exe))
         if not data.get("game_executable") and self.game_exe_var.get():
             self._log(f"Auto-detected game: {self.game_exe_var.get()}")
+        # Steam exe path — used for Steam reset failsafe when game won't relaunch
+        _saved_steam = data.get("steam_exe_path", "")
+        if _saved_steam and os.path.isfile(_saved_steam):
+            self._steam_exe_path = _saved_steam
+        else:
+            self._steam_exe_path = _detect_steam_exe(self.game_exe_var.get())
+        self._steam_exe_var.set(self._steam_exe_path)
         # Batch settings
         self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
         self.batch_limit_var.set(str(data.get("batch_limit", "20")))
@@ -2842,6 +2919,7 @@ class RelicBotApp(tk.Tk):
             "backup_folder":    self.backup_path_var.get(),
             "batch_output":     self.batch_output_var.get(),
             "game_executable":  self.game_exe_var.get(),
+            "steam_exe_path":   getattr(self, "_steam_exe_path", ""),
             # Batch settings
             "batch_limit_type": self.batch_limit_type.get(),
             "batch_limit":      self.batch_limit_var.get(),
@@ -3048,24 +3126,207 @@ class RelicBotApp(tk.Tk):
         if not exe_path:
             return True
         exe_name = os.path.basename(exe_path)
+        # Adaptive close buffer — managed by _batch_loop, defaults to 7s.
+        # Increases when launches fail, decreases when they succeed.
+        _close_buf = getattr(self, "_launch_close_buffer", 7.0)
         if not self._is_game_running(exe_name):
             self._log("Game already not running — applying close buffer before relaunch…")
-            time.sleep(5.0)
+            time.sleep(_close_buf)
             return True
         self._log(f"Closing game ({exe_name})…")
-        _kill_exe(exe_name)
+        # Try graceful close first (WM_CLOSE) — this lets the game notify
+        # Steam that the session ended, preventing the "already running"
+        # stuck state.  Force-kill only if graceful close doesn't work.
+        _graceful_closed = False
+        try:
+            _user32 = ctypes.windll.user32
+            # Enumerate windows to find the game's main window
+            _WM_CLOSE = 0x0010
+            _game_pids = set(_pids_for_exe(exe_name))
+            if _game_pids:
+                _WNDENUMPROC = ctypes.WINFUNCTYPE(
+                    ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+                def _enum_cb(hwnd, _):
+                    _pid = ctypes.c_ulong(0)
+                    _user32.GetWindowThreadProcessId(
+                        hwnd, ctypes.byref(_pid))
+                    if _pid.value in _game_pids and _user32.IsWindowVisible(hwnd):
+                        _user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+                    return True
+                _user32.EnumWindows(_WNDENUMPROC(_enum_cb), 0)
+                # Wait up to 8s for graceful exit
+                for _ in range(16):
+                    time.sleep(0.5)
+                    if not self.bot_running:
+                        return False
+                    if not self._is_game_running(exe_name):
+                        _graceful_closed = True
+                        break
+        except Exception:
+            pass
+        if not _graceful_closed:
+            _kill_exe(exe_name)
         for _ in range(120):  # wait up to 60 s
             time.sleep(0.5)
             if not self.bot_running:
                 return False
             if not self._is_game_running(exe_name):
                 self._log("Game closed — waiting for cleanup…")
-                time.sleep(5.0)
+                time.sleep(_close_buf)
                 return True
         self._log("WARNING: Game did not close within 60s.")
         return False
 
+    def _shutdown_steam(self) -> bool:
+        """Gracefully shut down Steam and wait for it to fully exit.
+        Returns True if Steam exited within the timeout."""
+        _steam_exe = getattr(self, "_steam_exe_path", "") or ""
+        if not _steam_exe or not os.path.isfile(_steam_exe):
+            self._log("  WARNING: steam.exe path not configured — cannot reset Steam.")
+            return False
+        self._log("  Shutting down Steam to clear stale session…")
+        try:
+            subprocess.Popen(
+                [_steam_exe, "-shutdown"],
+                close_fds=True
+            )
+        except Exception as _se:
+            self._log(f"  WARNING: Could not run steam.exe: {_se}")
+            return False
+        # Poll until steam.exe is gone (up to 30s)
+        for _ in range(60):
+            time.sleep(0.5)
+            if not self.bot_running:
+                return False
+            if not _pids_for_exe("steam.exe"):
+                self._log("  Steam has shut down.")
+                time.sleep(4.0)   # let Windows finish cleanup before relaunch
+                return True
+        self._log("  WARNING: Steam did not shut down within 30s.")
+        return False
+
     _STEAM_APP_ID = "2622380"
+
+    # ------------------------------------------------------------------ #
+    #  VERIFIED MENU NAVIGATION (highlight detection)
+    # ------------------------------------------------------------------ #
+
+    # Menu item order from top to bottom (Roundtable Hold menu)
+    _MENU_ORDER = [
+        "expeditions", "character_selection", "change_garb",
+        "relic_rites", "visual_codex", "journal",
+        "small_jar_bazaar", "collector_signboard", "garden",
+        "shore", "waiting_room", "chapel", "crypt", "sparring_grounds",
+    ]
+
+    def _navigate_menu_verified(self, target_item: str,
+                                region=None,
+                                timeout: float = 10.0) -> bool:
+        """Navigate the Roundtable Hold menu to target_item using verified
+        highlight detection.  Presses DOWN one step at a time and confirms
+        each step by checking which menu row is highlighted.
+
+        Assumes the menu is already open with Expeditions highlighted.
+
+        Args:
+            target_item: key from MENU_ITEM_Y (e.g. "small_jar_bazaar").
+            region: optional screen capture region.
+            timeout: max seconds before giving up.
+
+        Returns:
+            True if the cursor is confirmed on target_item.
+            False on timeout or unexpected state.
+        """
+        from bot.screen_capture import find_highlighted_item, MENU_ITEM_Y
+
+        if target_item not in MENU_ITEM_Y:
+            self._log(f"  [MenuNav] Unknown target: {target_item}")
+            return False
+
+        target_idx = self._MENU_ORDER.index(target_item)
+        _deadline = time.time() + timeout
+        _MAX_RETRIES_PER_STEP = 3
+
+        # First, confirm we're on Expeditions (or find current position)
+        _cur_item, _cur_br, _ = find_highlighted_item(region)
+        if _cur_item is None:
+            # Menu might still be opening — wait briefly and retry
+            time.sleep(0.3)
+            _cur_item, _cur_br, _ = find_highlighted_item(region)
+        if _cur_item is None:
+            self._log("  [MenuNav] Cannot detect current menu position.")
+            return False
+
+        _cur_idx = self._MENU_ORDER.index(_cur_item)
+        self._log(f"  [MenuNav] Starting at {_cur_item} → target {target_item} "
+                  f"({target_idx - _cur_idx} steps)")
+
+        while _cur_idx != target_idx:
+            if not self.bot_running or time.time() > _deadline:
+                self._log("  [MenuNav] Timeout or stopped.")
+                return False
+
+            # Determine direction
+            if _cur_idx < target_idx:
+                _key = "Key.down"
+                _expected_idx = _cur_idx + 1
+            else:
+                _key = "Key.up"
+                _expected_idx = _cur_idx - 1
+            _expected_item = self._MENU_ORDER[_expected_idx]
+
+            # Press and verify
+            for _retry in range(_MAX_RETRIES_PER_STEP):
+                if not self.bot_running or time.time() > _deadline:
+                    return False
+
+                self.player.tap(_key, hold=0.05)
+                time.sleep(0.05)  # brief settle before checking
+
+                # Poll for the highlight to land on the expected row
+                _poll_end = time.time() + 0.5  # 500ms max per step
+                _confirmed = False
+                while time.time() < _poll_end:
+                    _item, _br, _vals = find_highlighted_item(region)
+                    if _item == _expected_item:
+                        _confirmed = True
+                        break
+                    time.sleep(0.03)
+
+                if _confirmed:
+                    _cur_idx = _expected_idx
+                    _cur_item = _expected_item
+                    break
+
+                # Not on expected — check where we actually are
+                _item, _br, _ = find_highlighted_item(region)
+                if _item == _cur_item:
+                    # Input dropped — still on previous position, retry
+                    if _retry < _MAX_RETRIES_PER_STEP - 1:
+                        self._log(
+                            f"  [MenuNav] Input dropped at {_cur_item} "
+                            f"(retry {_retry + 1})")
+                        continue
+                elif _item is not None:
+                    # Ended up somewhere unexpected
+                    self._log(
+                        f"  [MenuNav] Unexpected position: {_item} "
+                        f"(expected {_expected_item})")
+                    return False
+                else:
+                    # Can't determine position at all
+                    self._log("  [MenuNav] Lost menu position.")
+                    return False
+
+            if _cur_idx != _expected_idx:
+                # All retries exhausted for this step
+                self._log(
+                    f"  [MenuNav] Failed to move from {_cur_item} "
+                    f"after {_MAX_RETRIES_PER_STEP} retries.")
+                return False
+
+        self._log(f"  [MenuNav] Confirmed on {target_item}.")
+        return True
 
     def _open_draw_rate_doc(self):
         path = os.path.join(_REPO_ROOT, "docs", "Relic Draw Rate Mathematics.txt")
@@ -3192,17 +3453,19 @@ class RelicBotApp(tk.Tk):
           5. If found: press ESC once to exit the menu, wait 2.5 s, return.
           6. If not found: repeat from step 1.
 
-        Hard timeout: 150 s. Returns (True, elapsed_seconds) on success,
-        (False, 0.0) on timeout.
+        Hard timeout: 150 s (240 s in Conservative Timing mode).
+        Returns (True, elapsed_seconds) on success, (False, 0.0) on timeout.
         """
         _F_BURST    = 7.0    # seconds of F spam per cycle
         _F_INTERVAL = 0.15   # gap between F presses (seconds)
         _PRE_ESC    = 1.0    # settle after F burst before pressing ESC
         _POST_ESC   = 1.0    # settle after ESC before OCR check
-        _MAX_WAIT   = 150.0  # hard timeout (seconds)
+        _MAX_WAIT   = 240.0 if self._low_perf_mode_var.get() else 150.0
 
         _start = time.time()
         _cycle = 0
+        _black_frame_total_extended_s = 0.0
+        _BLACK_FRAME_CEILING_S = 600.0
 
         self._log("[Phase -0.5] Adaptive load wait — watching for in-game state…")
 
@@ -3216,7 +3479,7 @@ class RelicBotApp(tk.Tk):
             _elapsed = time.time() - _start
             if _elapsed >= _MAX_WAIT:
                 self._log(
-                    "[Phase -0.5] Could not confirm in-game state within 150 s — aborting.")
+                    f"[Phase -0.5] Could not confirm in-game state within {int(_MAX_WAIT)} s — aborting.")
                 return False, 0.0
 
             _cycle += 1
@@ -3255,8 +3518,17 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             "[Phase -0.5] Black frame detected — monitor may be off. "
                             "Waiting for signal…")
-                    # Extend timeout so the bot doesn't abort while monitor sleeps
-                    _start = max(_start, time.time() - _MAX_WAIT + 30)
+                    # Extend timeout so the bot doesn't abort while monitor sleeps,
+                    # but cap cumulative extension so we don't wait forever.
+                    _ext_remaining = _BLACK_FRAME_CEILING_S - _black_frame_total_extended_s
+                    if _ext_remaining <= 0:
+                        self._log(
+                            "[Phase -0.5] Black frame extension ceiling reached"
+                            " (10 min) — aborting load wait")
+                        return False, 0.0
+                    _new_start = max(_start, time.time() - _MAX_WAIT + 30)
+                    _black_frame_total_extended_s += max(0.0, _new_start - _start)
+                    _start = _new_start
                     continue
                 if relic_analyzer.check_text_visible(_img, "equipment", top_fraction=0.15):
                     _elapsed = time.time() - _start
@@ -3799,6 +4071,9 @@ class RelicBotApp(tk.Tk):
         self._ov_overflow_hits = 0
         self._global_murk_expected = None   # murk verified against each iteration; None = first run
         self._murk_region          = None   # pinned crop from first successful murk read
+        # Adaptive close buffer — starts at 7s, adjusts based on launch results.
+        # Increases when launch attempt 1 fails, decreases when it succeeds.
+        self._launch_close_buffer = 7.0
         # Reset batch-level reliability accumulators for this run
         self._batch_p0_extra        = 0
         self._batch_settle_retries  = 0
@@ -3921,6 +4196,7 @@ class RelicBotApp(tk.Tk):
                       and self._parallel_enabled_var.get())
         _bg_gpu_active  = _backlog_mode and _intermittent_mode and _gpu_aa_bl
         _bg_gpu_q       = queue.PriorityQueue() if _bg_gpu_active else None
+        self._bg_gpu_q  = _bg_gpu_q
         _bg_bl_state: dict = {}
         _bg_bl_lock     = threading.Lock()
         _bg_bl_dmap: dict = {}
@@ -4079,7 +4355,8 @@ class RelicBotApp(tk.Tk):
                     _ra.set_thread_device(use_gpu)
                     _ra._get_reader()   # warm CUDA/CPU model now, before first task arrives
                     while True:
-                        _gpu_aa = self._gpu_always_analyze_var.get()
+                        _gpu_aa = (self._gpu_always_analyze_var.get()
+                                   and not getattr(self, "_iter_gpu_aa_suppressed", False))
                         if _gpu_aa and not use_gpu:
                             # GPU AA on, CPU worker: wait for gate BEFORE dequeuing.
                             # Post-dequeue waiting would hold the task, preventing the
@@ -4433,49 +4710,115 @@ class RelicBotApp(tk.Tk):
             #                                case the process just hasn't spawned yet
             #                                before deciding to relaunch
             #
-            # _launch_attempts counts actual launch() calls. Up to 3 before aborting.
-            _FOCUS_POLL_INTERVAL  = 20   # s between "check process / window" cycles
-            _PROCESS_GRACE        = 15   # s to wait for process to appear before relaunch
-            _LAUNCH_MAX_ATTEMPTS  = 3
-            _NO_WINDOW_MAX        = 180  # s before assuming crashed process with no window
+            # Launch strategy:
+            #   Attempts 1-3: steam://rungameid/ via explorer (10s grace each)
+            #   Attempt  4  : Steam reset — shutdown Steam, launch exe directly
+            #   If attempt 4 fails → abort batch.
+            _m = max(1.0, self._perf_gap_mult)
+            _FOCUS_POLL_INTERVAL  = int(10 * _m)    # s between "check process / window" cycles
+            _PROCESS_GRACE        = int(10 * _m)    # s to wait for process to appear before relaunch
+            _STEAM_LAUNCH_ATTEMPTS = 3
+            _NO_WINDOW_MAX        = 180              # s before assuming crashed process with no window
 
             _game_focused      = False
             _launch_attempts   = 0
+            _steam_reset_done  = False
             _no_window_since   = None   # timestamp of first "process running, no window" observation
 
             while self.bot_running and not _game_focused:
                 # Only fire the launch command if the process is not already running.
                 # This prevents double-launching when the game is just slow to start.
                 if not self._is_game_running(exe_name):
-                    if _launch_attempts >= _LAUNCH_MAX_ATTEMPTS:
+                    # After 3 failed Steam protocol launches, do a Steam reset
+                    # and launch the exe directly — clears any stale session.
+                    if _launch_attempts >= _STEAM_LAUNCH_ATTEMPTS and not _steam_reset_done:
                         self._log(
-                            f"ERROR: Game failed to open after {_launch_attempts} "
-                            f"launch attempt(s) — cancelling batch.")
+                            f"  Game failed to launch after "
+                            f"{_STEAM_LAUNCH_ATTEMPTS} attempts — "
+                            f"resetting Steam…")
+                        if self._shutdown_steam():
+                            _steam_reset_done = True
+                            _launch_attempts += 1
+                            self._log(
+                                f"Launching game "
+                                f"(attempt {_launch_attempts} — after "
+                                f"Steam reset)…")
+                            # Wait for Steam to be ready before launching.
+                            # The protocol URL opens Steam if not running,
+                            # but Steam needs a moment to initialize.
+                            self._log(
+                                "  Waiting for Steam to restart…")
+                            _steam_ready_end = time.time() + 30
+                            while self.bot_running and time.time() < _steam_ready_end:
+                                if _pids_for_exe("steam.exe"):
+                                    time.sleep(3.0)  # let Steam finish init
+                                    break
+                                time.sleep(1.0)
+                            # Use the normal Steam protocol URL — Steam is
+                            # freshly restarted with a clean session state.
+                            self._launch_game()
+                            self._set_status(
+                                f"Batch {iteration}: Steam restarting — "
+                                f"waiting for game…", "orange")
+                            # Longer grace for Steam to fully restart + game to
+                            # boot — poll up to 120s for the game process.
+                            _grace_end = time.time() + 120
+                            while self.bot_running and time.time() < _grace_end:
+                                _game_focused = self._focus_game_window(
+                                    exe_name, timeout=1.0)
+                                if _game_focused:
+                                    break
+                                if self._is_game_running(exe_name):
+                                    break
+                                time.sleep(1.0)
+                            if _game_focused:
+                                break
+                            # Fall through to window poll below
+                        else:
+                            # Steam didn't shut down — give up
+                            self._log(
+                                "ERROR: Steam reset failed — cancelling batch.")
+                            if _async_mode and _async_relic_q is not None:
+                                _shutdown_async_workers()
+                                _async_join_timed()
+                            self.after(0, self._reset_controls)
+                            return
+
+                    elif _steam_reset_done:
+                        # Steam reset already tried and direct launch failed
+                        self._log(
+                            "ERROR: Game failed to open even after Steam "
+                            "reset — cancelling batch.")
                         if _async_mode and _async_relic_q is not None:
                             _shutdown_async_workers()
                             _async_join_timed()
                         self.after(0, self._reset_controls)
                         return
-                    _launch_attempts += 1
-                    self._log(
-                        f"Launching game "
-                        f"(attempt {_launch_attempts}/{_LAUNCH_MAX_ATTEMPTS})…")
-                    self._launch_game()
-                    self._set_status(
-                        f"Batch {iteration}: waiting for game window…", "orange")
 
-                    # Grace period: give Steam time to spawn the process before we
-                    # check whether it took. Poll for both process and window.
-                    _grace_end = time.time() + _PROCESS_GRACE
-                    while self.bot_running and time.time() < _grace_end:
-                        _game_focused = self._focus_game_window(exe_name, timeout=1.0)
+                    else:
+                        # Normal Steam protocol launch (attempts 1-3)
+                        _launch_attempts += 1
+                        self._log(
+                            f"Launching game "
+                            f"(attempt {_launch_attempts}/"
+                            f"{_STEAM_LAUNCH_ATTEMPTS})…")
+                        self._launch_game()
+                        self._set_status(
+                            f"Batch {iteration}: waiting for game window…",
+                            "orange")
+
+                        # Grace period: give Steam time to spawn the process.
+                        _grace_end = time.time() + _PROCESS_GRACE
+                        while self.bot_running and time.time() < _grace_end:
+                            _game_focused = self._focus_game_window(
+                                exe_name, timeout=1.0)
+                            if _game_focused:
+                                break
+                            if self._is_game_running(exe_name):
+                                break
+                            time.sleep(0.5)
                         if _game_focused:
                             break
-                        if self._is_game_running(exe_name):
-                            break   # process appeared — fall through to window poll
-                        time.sleep(0.5)
-                    if _game_focused:
-                        break
                 else:
                     self._set_status(
                         f"Batch {iteration}: waiting for game window…", "orange")
@@ -4511,6 +4854,29 @@ class RelicBotApp(tk.Tk):
             if not self.bot_running:
                 self.after(0, self._reset_controls)
                 return
+
+            # ── Adaptive close buffer feedback ─────────────────────────── #
+            # Adjust the close buffer based on how many launch attempts it
+            # took this iteration.  This tunes the buffer in real time so
+            # fast systems stay fast and slow systems get more room.
+            if _launch_attempts <= 1:
+                # First attempt succeeded — system is healthy, slowly decay
+                self._launch_close_buffer = max(
+                    5.0, self._launch_close_buffer - 1.0)
+            elif _steam_reset_done:
+                # Had to reset Steam — max out the buffer
+                self._launch_close_buffer = 15.0
+                self._log(
+                    f"  [Adaptive] Close buffer raised to "
+                    f"{self._launch_close_buffer:.0f}s (Steam reset was needed)")
+            else:
+                # Needed 2+ attempts — increase buffer for next time
+                self._launch_close_buffer = min(
+                    15.0, self._launch_close_buffer + 3.0)
+                self._log(
+                    f"  [Adaptive] Close buffer raised to "
+                    f"{self._launch_close_buffer:.0f}s "
+                    f"(launch needed {_launch_attempts} attempts)")
 
             # Game window confirmed — begin adaptive load wait (Phase -0.5).
             self._log("Game window focused — starting adaptive load wait…")
@@ -4878,8 +5244,6 @@ class RelicBotApp(tk.Tk):
                                     "save_filename":     save_filename,
                                     "batch_id":          batch_id,
                                     "_run_log_path":     batch_log_path,
-                                    "crop_left":         relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
-                                    "crop_top":          relic_analyzer._PREVIEW_CROP_TOP_FRAC,
                                     "_retries":          0,
                                 }))
 
@@ -5780,7 +6144,9 @@ class RelicBotApp(tk.Tk):
                     # gate entirely — GPU inference doesn't compete for CPU time.
                     # All other workers (CPU workers, or GPU worker with AA off)
                     # respect the shared gate as normal.
-                    if not (use_gpu and self._gpu_always_analyze_var.get()):
+                    _aa_live = (self._gpu_always_analyze_var.get()
+                                and not getattr(self, "_iter_gpu_aa_suppressed", False))
+                    if not (use_gpu and _aa_live):
                         _go_ev = self._ocr_go_event
                         if _go_ev is not None and not _go_ev.is_set():
                             while not _go_ev.wait(timeout=1.0):
@@ -5877,8 +6243,6 @@ class RelicBotApp(tk.Tk):
                     "save_filename":     _bl_state[iteration]["save_filename"],
                     "batch_id":          _bl_state[iteration]["batch_id"],
                     "_run_log_path":     _bl_state[iteration]["_run_log_path"],
-                    "crop_left":         relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
-                    "crop_top":          relic_analyzer._PREVIEW_CROP_TOP_FRAC,
                     "_retries":          0,
                 }
                 _bl_q.put(((iteration, _si), _task))
@@ -6164,14 +6528,10 @@ class RelicBotApp(tk.Tk):
                     _mem_wait_logged = True
                 time.sleep(1.0)
 
-        crop_left  = task.get("crop_left",  relic_analyzer._CROP_LEFT_FRAC)
-        crop_top   = task.get("crop_top",   relic_analyzer._CROP_TOP_FRAC)
         relic_type = task.get("relic_type", "")
         try:
             _ocr_t0 = time.perf_counter()
             result = relic_analyzer.analyze(img_bytes, criteria,
-                                            crop_left=crop_left,
-                                            crop_top=crop_top,
                                             relic_type=relic_type,
                                             doors=self._doors)
             _ocr_dur = time.perf_counter() - _ocr_t0
@@ -7211,11 +7571,14 @@ class RelicBotApp(tk.Tk):
         self._iter_safe_path_used    = False
         self._iter_settle_poll_depth = 0
         self._iter_batches_settled   = 0
+        self._iter_input_drop_count  = 0
+        self._iter_gpu_aa_suppressed = False
+        self._clean_cycles_since_suppress = 0
+        self._iter_suppress_count = 0
+        self._p3_consecutive_fails   = 0
 
-        # Expected Phase 0 input count and exact key sequence (for validation)
-        _p0_expected      = sum(1 for e in self.phase_events[0] if e["type"] == "key_press")
-        _p0_expected_keys = [e["key"] for e in self.phase_events[0] if e["type"] == "key_press"]
         _P01_MAX_ATTEMPTS = 3   # max Phase 0+1 retries before aborting iteration
+        _timing_p0_secs: float | None = None   # Phase 0 duration (clean run only)
 
         # Dynamic wait for Phase 0: polls for "Small Jar Bazaar" text in the top
         # portion of the screen for up to 30 s before firing section 2 of Phase 0.
@@ -7272,12 +7635,12 @@ class RelicBotApp(tk.Tk):
             if not self.bot_running or self._reset_iter_requested:
                 return relic_results
 
-            # ── Phase 0: Setup ─────────────────────────────────────────── #
+            # ── Phase 0: Setup (verified menu navigation) ─────────────── #
             if self.phase_events[0]:
                 if self._diag:
                     self._diag.phase_start("Phase 0 (shop nav)",
                                            f"attempt={_p01_att + 1}")
-                self._iter_p0_attempts += 1   # count each attempt for calibration
+                self._iter_p0_attempts += 1
                 attempt_label = (f" (attempt {_p01_att + 1}/{_P01_MAX_ATTEMPTS})"
                                  if _p01_att > 0 else "")
                 self._set_status(f"{label}: setup{attempt_label}…", "green")
@@ -7285,59 +7648,97 @@ class RelicBotApp(tk.Tk):
                     self._focus_game_window(_p0_exe, timeout=3.0)
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
-                # play_split: fire M + down×6 + F (8 keys), poll for "Small Jar
-                # Bazaar" text (up to 30 s) to confirm shop loaded, then fire the
-                # remaining shop-nav inputs.
-                # extra_delay adds buffer after each key release so down arrows
-                # don't fire during the menu-open animation and get eaten.
-                # Scales with _p02_extra_delay so slower/degraded systems get
-                # proportionally more room. Applies to both Phase 0 recordings.
-                self._set_ocr_throttle(True)   # pause workers during Phase 0 inputs
+
+                self._set_ocr_throttle(True)
                 _p0_t_start = time.perf_counter()
-                _p0_sent, _p0_sent_keys = self.player.play_split(
-                    self.phase_events[0], split_after_n_keys=8,
-                    wait_fn=_p0_shop_wait, bypass_focus=True,
-                    extra_delay=_p02_extra_delay)
+
+                # Step 1: Press M to open the Roundtable menu
+                self.player.tap("m", hold=0.10)
+
+                # Step 2: Wait for menu to appear (Expeditions highlighted)
+                from bot.screen_capture import find_highlighted_item
+                _menu_open = False
+                _menu_deadline = time.time() + 5.0
+                while self.bot_running and time.time() < _menu_deadline:
+                    _item, _br, _ = find_highlighted_item(region)
+                    if _item == "expeditions":
+                        _menu_open = True
+                        break
+                    time.sleep(0.05)
+
+                _p0_nav_ok = False
+                _p0_shop_ok = False
+                if _menu_open:
+                    # Step 3: Navigate to Small Jar Bazaar with verified
+                    # highlight detection (DOWN one step at a time, confirm
+                    # each step before proceeding).
+                    _p0_nav_ok = self._navigate_menu_verified(
+                        "small_jar_bazaar", region, timeout=10.0)
+
+                if _p0_nav_ok:
+                    # Step 4: Press F to enter Small Jar Bazaar
+                    self.player.tap("f", hold=0.10)
+
+                    # Step 5: Wait for shop screen (reuse existing wait)
+                    _p0_shop_wait()
+                    _p0_shop_ok = _shop_found[0]
+
+                if _p0_nav_ok and _p0_shop_ok:
+                    # Step 6: Post-shop navigation — verified UP press,
+                    # then timed RIGHT presses for Deep mode.
+                    # UP switches from the goblet tab to the flatstone tab.
+                    # The grid items change dramatically (goblets → stones),
+                    # so we verify by comparing grid snapshots.
+                    from bot.screen_capture import (
+                        capture_shop_grid, shop_grid_changed)
+
+                    time.sleep(0.3)
+                    _up_ok = False
+                    for _up_retry in range(3):
+                        if not self.bot_running:
+                            break
+                        _grid_before = capture_shop_grid(region)
+                        self.player.tap("Key.up", hold=0.05)
+                        time.sleep(0.25)
+                        _grid_after = capture_shop_grid(region)
+                        if shop_grid_changed(_grid_before, _grid_after):
+                            _up_ok = True
+                            break
+                        self._log(
+                            f"  [PostShop] UP input dropped "
+                            f"(retry {_up_retry + 1}/3)")
+                        time.sleep(0.15)
+
+                    if not _up_ok:
+                        self._log("  [PostShop] UP failed after 3 retries.")
+                        _p0_nav_ok = False
+                    elif self.relic_type_var.get() == "night":
+                        # Deep mode: RIGHT×2 to reach Deep Scenic Flatstone
+                        time.sleep(0.15)
+                        self.player.tap("Key.right", hold=0.05)
+                        time.sleep(max(0.15, 0.15 * self._perf_gap_mult))
+                        self.player.tap("Key.right", hold=0.05)
+                        time.sleep(0.15)
+
                 _p0_t_end = time.perf_counter()
-                if not _exclude_buy_phase:   # excl-ops: batch loop releases at close_game
-                    self._set_ocr_throttle(False)  # resume after Phase 0 done
+                if not _exclude_buy_phase:
+                    self._set_ocr_throttle(False)
                 if not self.bot_running or self._reset_iter_requested:
                     return relic_results
 
-                # Validate input count, key sequence, shop screen detection,
-                # AND highlighted item identity.
-                # Shop detection is the real gate — pynput always succeeds at the OS
-                # level regardless of whether the game processed the inputs.
-                _p0_count_ok = (_p0_sent == _p0_expected)
-                _p0_seq_ok   = (_p0_sent_keys == _p0_expected_keys)
-                _p0_shop_ok  = _shop_found[0]
-
-                # Shop item verification is handled by the settle check after
-                # Phase 1 (verify_shop_item distinguishes shop from relic preview).
-                # Phase 0 only needs to confirm the shop screen appeared.
-                _p0_item_ok     = True
-                _p0_item_reason = ""
-
-                # Record Phase 0 duration on clean first-attempt success only
-                # (retried runs include recovery waits — not representative).
-                if _p01_att == 0 and _p0_count_ok and _p0_seq_ok and _p0_shop_ok and _p0_item_ok:
+                if _p01_att == 0 and _p0_nav_ok and _p0_shop_ok:
                     _timing_p0_secs = _p0_t_end - _p0_t_start
 
-                if not _p0_count_ok or not _p0_seq_ok or not _p0_shop_ok or not _p0_item_ok:
-                    if not _p0_count_ok:
-                        _mismatch_desc = f"count {_p0_sent}/{_p0_expected}"
-                    elif not _p0_seq_ok:
-                        _mismatch_desc = "sequence mismatch"
-                    elif not _p0_shop_ok:
-                        _mismatch_desc = "shop screen not detected"
+                if not _p0_nav_ok or not _p0_shop_ok:
+                    if not _menu_open:
+                        _mismatch_desc = "menu did not open (Expeditions not detected)"
+                    elif not _p0_nav_ok:
+                        _mismatch_desc = "menu navigation failed"
                     else:
-                        _mismatch_desc = f"wrong shop item ({_p0_item_reason})"
+                        _mismatch_desc = "shop screen not detected"
                     self._log(
                         f"  Phase 0: validation failed ({_mismatch_desc}) "
                         f"— ESC recovery and retry.")
-                    # Reset tracking vars so stale values can't cause a false positive
-                    _p0_sent = 0
-                    _p0_sent_keys = []
                     if _p01_att < _P01_MAX_ATTEMPTS - 1:
                         self._esc_to_game_screen(region)
                         continue
@@ -7490,7 +7891,6 @@ class RelicBotApp(tk.Tk):
             _p2_settle_skip_count = 0    # per-iteration: cycles where preview had no passives
             _MAX_P2_SETTLE_SKIPS  = 4   # reset iteration after this many no-passive skips
             # Timing accumulators for this iteration (fed to _record_timing_sample at end)
-            _timing_p0_secs:       float | None       = None   # Phase 0 duration (clean run only)
             _timing_p1_samples:    list[float]         = []     # Phase 1 sec/relic per cycle
             _timing_p2_samples:    list[float]         = []     # Phase 2 sec/relic per cycle
             # When True, workers stay throttled from Phase 1 start through the end of
@@ -7516,6 +7916,7 @@ class RelicBotApp(tk.Tk):
                     }
 
             _buy_loop_done = False   # set True when "Insufficient murk" detected mid-cycle
+            _p2_duplicates_total = 0   # cumulative accepted-duplicate count across cycles
             for _batch_i in range(_buy_count):
                 if _buy_loop_done:
                     break
@@ -7608,7 +8009,14 @@ class RelicBotApp(tk.Tk):
                     _settle_ok               = False
                     _settle_no_passives      = False   # relic name seen but zero passives
                     _settle_insufficient_murk = False  # buy failed — no murk left
-                    _settle_deadline = time.monotonic() + 15.0
+                    _settle_passive_ever     = False   # any PASSIVE token seen across polls
+                    _settle_right_skipped    = False   # slot 0 skipped via RIGHT once
+                    _settle_gap_mult = max(1.0, float(self._perf_gap_mult))
+                    _settle_budget_s = 15.0
+                    if _settle_gap_mult >= 1.3:
+                        _settle_budget_s = 15.0 * _settle_gap_mult
+                    _settle_extra_sleep = 0.05 * _settle_gap_mult
+                    _settle_deadline = time.monotonic() + _settle_budget_s
                     _sc = 0
                     time.sleep(0.25)  # let the relic screen fully render before first capture
                     while time.monotonic() < _settle_deadline:
@@ -7628,13 +8036,33 @@ class RelicBotApp(tk.Tk):
                                     f"  Cycle {_batch_i + 1}: 'Insufficient murk' detected"
                                     f" — all relics purchased.")
                                 break
-                            _settle_result = relic_analyzer.analyze(
-                                _settle_img, criteria,
-                                crop_left=relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
-                                crop_top=relic_analyzer._PREVIEW_CROP_TOP_FRAC,
-                                relic_type=self.relic_type_var.get(),
-                                doors=self._doors,
-                            )
+                            _settle_use_cpu = False
+                            try:
+                                if self._gpu_always_analyze_var.get():
+                                    _bgq = getattr(self, "_bg_gpu_q", None)
+                                    _aq  = getattr(self, "_async_relic_q", None)
+                                    if (_bgq is not None and _bgq.qsize() > 0) or (
+                                            _aq is not None and _aq.qsize() > 0):
+                                        _settle_use_cpu = True
+                            except Exception:
+                                _settle_use_cpu = False
+                            if _settle_use_cpu:
+                                try:
+                                    relic_analyzer.set_thread_device(False)
+                                except Exception:
+                                    pass
+                            try:
+                                _settle_result = relic_analyzer.analyze_for_nav(
+                                    _settle_img, criteria,
+                                    relic_type=self.relic_type_var.get(),
+                                    doors=self._doors,
+                                )
+                            finally:
+                                if _settle_use_cpu:
+                                    try:
+                                        relic_analyzer.set_thread_device(None)
+                                    except Exception:
+                                        pass
                             _toks = _settle_result.get("_ocr_tokens", [])
                             # Require at least one passive — a PASSIVE token, or
                             # relics_found[0] with a non-empty passives list.
@@ -7643,6 +8071,8 @@ class RelicBotApp(tk.Tk):
                             _has_relic_passives = (
                                 bool(_rf) and bool((_rf[0] or {}).get("passives"))
                             )
+                            if _has_passive_tok or _has_relic_passives:
+                                _settle_passive_ever = True
                             if _has_passive_tok or _has_relic_passives:
                                 self._iter_settle_poll_depth += _sc + 1
                                 self._iter_batches_settled   += 1
@@ -7655,7 +8085,7 @@ class RelicBotApp(tk.Tk):
                                 _settle_no_passives = True
                         except Exception as _se:
                             self._log(f"  Cycle {_batch_i+1}: settle check err: {_se}")
-                        time.sleep(1.0)
+                        time.sleep(1.0 + _settle_extra_sleep)
                         _sc += 1
 
                     # Settle loop done.
@@ -7700,20 +8130,109 @@ class RelicBotApp(tk.Tk):
                             time.sleep(0.25)
                             try:
                                 _settle_img = screen_capture.capture(region)
-                                _settle_result = relic_analyzer.analyze(
+                                _settle_result = relic_analyzer.analyze_for_nav(
                                     _settle_img, criteria,
-                                    crop_left=relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
-                                    crop_top=relic_analyzer._PREVIEW_CROP_TOP_FRAC,
                                     relic_type=self.relic_type_var.get(),
                                     doors=self._doors,
                                 )
+                                _toks2 = _settle_result.get("_ocr_tokens", []) or []
+                                _rf2   = _settle_result.get("relics_found") or []
+                                _has_passive_tok2 = any(
+                                    t.get("status") == "PASSIVE" for t in _toks2)
+                                _has_relic_passives2 = (
+                                    bool(_rf2) and bool((_rf2[0] or {}).get("passives")))
+                                if _has_passive_tok2 or _has_relic_passives2:
+                                    _settle_passive_ever = True
                             except Exception:
                                 pass   # fall back to the earlier capture
-                            _settle_ok = True
-                            self._log(
-                                f"  Cycle {_batch_i + 1}: settle accepted — relic name"
-                                f" detected but no passives in {_sc} poll(s); proceeding"
-                                f" to Phase 2.")
+
+                            if not _settle_passive_ever and not _settle_right_skipped:
+                                self._log(
+                                    f"  [Settle] Slot 0 passive region empty —"
+                                    f" advancing to slot 1 and retrying")
+                                _settle_right_skipped = True
+                                try:
+                                    self.player.tap("Key.right", hold=0.05)
+                                except Exception:
+                                    pass
+                                time.sleep(0.20 * _settle_gap_mult)
+                                _sc = 0
+                                _settle_no_passives = False
+                                _settle_deadline_2 = time.monotonic() + _settle_budget_s
+                                while time.monotonic() < _settle_deadline_2:
+                                    if not self.bot_running or self._reset_iter_requested:
+                                        break
+                                    try:
+                                        _settle_img = screen_capture.capture(region)
+                                        if relic_analyzer.check_text_visible(
+                                                _settle_img, "insufficient murk",
+                                                top_fraction=0.85):
+                                            _settle_insufficient_murk = True
+                                            break
+                                        _settle_use_cpu2 = False
+                                        try:
+                                            if self._gpu_always_analyze_var.get():
+                                                _bgq = getattr(self, "_bg_gpu_q", None)
+                                                _aq  = getattr(self, "_async_relic_q", None)
+                                                if (_bgq is not None and _bgq.qsize() > 0) or (
+                                                        _aq is not None and _aq.qsize() > 0):
+                                                    _settle_use_cpu2 = True
+                                        except Exception:
+                                            _settle_use_cpu2 = False
+                                        if _settle_use_cpu2:
+                                            try:
+                                                relic_analyzer.set_thread_device(False)
+                                            except Exception:
+                                                pass
+                                        try:
+                                            _settle_result = relic_analyzer.analyze_for_nav(
+                                                _settle_img, criteria,
+                                                relic_type=self.relic_type_var.get(),
+                                                doors=self._doors,
+                                            )
+                                        finally:
+                                            if _settle_use_cpu2:
+                                                try:
+                                                    relic_analyzer.set_thread_device(None)
+                                                except Exception:
+                                                    pass
+                                        _toks_r = _settle_result.get("_ocr_tokens", []) or []
+                                        _rf_r   = _settle_result.get("relics_found") or []
+                                        _has_pt_r = any(t.get("status") == "PASSIVE" for t in _toks_r)
+                                        _has_rp_r = (
+                                            bool(_rf_r) and bool((_rf_r[0] or {}).get("passives")))
+                                        if _has_pt_r or _has_rp_r:
+                                            _settle_passive_ever = True
+                                            self._iter_settle_poll_depth += _sc + 1
+                                            self._iter_batches_settled   += 1
+                                            _settle_ok = True
+                                            break
+                                        if bool(_rf_r) or any(
+                                                t.get("status") == "RELIC_NAME" for t in _toks_r):
+                                            _settle_no_passives = True
+                                    except Exception as _se2:
+                                        self._log(
+                                            f"  Cycle {_batch_i+1}: settle-retry err: {_se2}")
+                                    time.sleep(1.0 + _settle_extra_sleep)
+                                    _sc += 1
+                                if not _settle_passive_ever and not _settle_insufficient_murk:
+                                    self._log(
+                                        f"  Cycle {_batch_i + 1}: settle rejected —"
+                                        f" passive region empty on skipped slot —"
+                                        f" recovering.")
+                                    _settle_no_passives = False
+                            elif not _settle_passive_ever:
+                                self._log(
+                                    f"  Cycle {_batch_i + 1}: settle rejected —"
+                                    f" passive region empty after RIGHT-skip —"
+                                    f" recovering.")
+                                _settle_no_passives = False
+                            else:
+                                _settle_ok = True
+                                self._log(
+                                    f"  Cycle {_batch_i + 1}: settle accepted — relic name"
+                                    f" detected but no passives in {_sc} poll(s); proceeding"
+                                    f" to Phase 2.")
                         else:
                             self._log(
                                 f"  Cycle {_batch_i + 1}: still on shop after Phase 1"
@@ -7800,7 +8319,8 @@ class RelicBotApp(tk.Tk):
                             # _mval > 0 guard skips the check if OCR can't read.
                             try:
                                 _mval_img = screen_capture.capture(region)
-                                _mval, _ = relic_analyzer.read_murk(_mval_img)
+                                _mval, _ = relic_analyzer.read_murk(
+                                    _mval_img, region=self._murk_region)
                                 if _mval <= 0:
                                     self._log(
                                         f"  Cycle {_batch_i + 1}: murk validation"
@@ -7812,6 +8332,16 @@ class RelicBotApp(tk.Tk):
                                         self._async_iter_abort_cleanup(
                                             iteration, _p2_submitted)
                                     return relic_results
+                                if _mval < murk_cost:
+                                    self._log(
+                                        f"  [Recovery] Murk insufficient after"
+                                        f" recovery ({_mval:,} < {murk_cost:,})"
+                                        f" — ending iteration")
+                                    if _exclude_buy_phase:
+                                        self._set_ocr_throttle(False)
+                                    _p1_ok = True
+                                    _buy_loop_done = True
+                                    break   # break _p1_try loop
                             except Exception as _mce:
                                 self._log(
                                     f"  Cycle {_batch_i + 1}: murk re-check error:"
@@ -7874,6 +8404,7 @@ class RelicBotApp(tk.Tk):
                     _p2_confirmed = 0
                     _p2_prev_crop = None
                     _p2_retries   = 0
+                    _p2_duplicate_count = 0
                     _P2_MAX_RETRIES = 3
 
                     while _p2_confirmed < _batch_size:
@@ -7956,8 +8487,33 @@ class RelicBotApp(tk.Tk):
                                 else:
                                     self._log(
                                         f"  Relic advance failed after {_P2_MAX_RETRIES}"
-                                        f" retries — accepting duplicate")
+                                        f" retries — accepting duplicate (slot advanced,"
+                                        f" relic not re-analyzed)")
                                     _p2_retries = 0
+                                    _p2_duplicate_count += 1
+                                    self._iter_input_drop_count += 1
+                                    self._clean_cycles_since_suppress = 0
+                                    if (self._iter_input_drop_count > 2
+                                            and not self._iter_gpu_aa_suppressed):
+                                        self._iter_gpu_aa_suppressed = True
+                                        self._iter_suppress_count += 1
+                                        if self._iter_suppress_count >= 2:
+                                            self._log(
+                                                "  [GPU AA] Final suppression for"
+                                                " remainder of iteration —"
+                                                " auto-suppress fired twice."
+                                                " Will retry next iteration.")
+                                        else:
+                                            self._log(
+                                                "  [GPU AA] Auto-suppressed for remainder"
+                                                " of iteration — 3+ input drops detected."
+                                                " Will retry next iteration.")
+                                    # Advance the slot counter without counting this as a
+                                    # fresh relic scan or re-analyzing the duplicate image.
+                                    # _p2_prev_crop stays as-is so the next RIGHT press
+                                    # still compares against the last confirmed-unique crop.
+                                    _p2_confirmed += 1
+                                    continue
                             _p2_prev_crop = _p2_cur_crop
                             _p2_retries = 0
 
@@ -7995,8 +8551,6 @@ class RelicBotApp(tk.Tk):
                                         "criteria":         criteria,
                                         "hit_min":          hit_min,
                                         "live_log_path":    live_log_path,
-                                        "crop_left":        relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
-                                        "crop_top":         relic_analyzer._PREVIEW_CROP_TOP_FRAC,
                                         "relic_type":       self.relic_type_var.get(),
                                         "batch_id":         async_iter_meta.get("batch_id"),
                                         "_run_log_path":    "",
@@ -8030,8 +8584,6 @@ class RelicBotApp(tk.Tk):
                                 try:
                                     result = relic_analyzer.analyze(
                                         img, criteria,
-                                        crop_left=relic_analyzer._PREVIEW_CROP_LEFT_FRAC,
-                                        crop_top=relic_analyzer._PREVIEW_CROP_TOP_FRAC,
                                         relic_type=self.relic_type_var.get(),
                                         doors=self._doors,
                                     )
@@ -8282,7 +8834,21 @@ class RelicBotApp(tk.Tk):
 
                         _relics_scanned += 1
                         _p2_confirmed += 1
+                        if self._iter_gpu_aa_suppressed:
+                            self._clean_cycles_since_suppress += 1
+                            if (self._clean_cycles_since_suppress >= 10
+                                    and self._iter_suppress_count < 2):
+                                self._iter_gpu_aa_suppressed = False
+                                self._clean_cycles_since_suppress = 0
+                                self._log(
+                                    "  [GPU AA] Re-enabled — 10 clean cycles"
+                                    " since suppression.")
 
+                    _p2_duplicates_total += _p2_duplicate_count
+                    if _p2_duplicate_count:
+                        self._log(
+                            f"  Cycle {_batch_i + 1}: {_p2_confirmed - _p2_duplicate_count}"
+                            f" confirmed + {_p2_duplicate_count} duplicate(s) accepted.")
                     if self._diag:
                         self._diag.phase_end(
                             f"Cycle {_batch_i + 1} Phase 2 (scan)",
@@ -8331,18 +8897,32 @@ class RelicBotApp(tk.Tk):
                         except Exception as _p3ve:
                             _p3v_reason = f"error: {_p3ve}"
 
-                        if not _p3_verify_ok:
+                        if _p3_verify_ok:
+                            self._p3_consecutive_fails = 0
+                        else:
+                            self._p3_consecutive_fails += 1
                             self._log(
                                 f"  Cycle {_batch_i + 1}: Phase 3 shop return"
                                 f" failed — {_p3v_reason} — ESC + Phase 0"
-                                f" recovery.")
-                            self._esc_to_game_screen(region)
+                                f" recovery. (consecutive fails:"
+                                f" {self._p3_consecutive_fails})")
+                            _esc_ok = self._esc_to_game_screen(region)
+                            if not _esc_ok:
+                                self._log(
+                                    "  [Phase 3] ESC recovery timed out —"
+                                    " escalating to iteration restart")
+                                self._p3_consecutive_fails += 1
+                                self._reset_iter_requested = True
+                                if _p2_async:
+                                    self._async_iter_abort_cleanup(
+                                        iteration, _p2_submitted)
+                                return relic_results
                             if self.phase_events[0]:
                                 self.player.play(
                                     self.phase_events[0],
                                     extra_delay=_p02_extra_delay)
                                 _p3_shop_back = False
-                                for _p3sw in range(20):
+                                for _p3sw in range(50):
                                     if not self.bot_running or self._reset_iter_requested:
                                         if _exclude_buy_phase:
                                             self._set_ocr_throttle(False)
@@ -8365,6 +8945,16 @@ class RelicBotApp(tk.Tk):
                                         pass
                                     time.sleep(0.20)
                                 if not _p3_shop_back:
+                                    if self._p3_consecutive_fails >= 2:
+                                        self._log(
+                                            "[Phase 3] Two consecutive shop-return"
+                                            " failures — restarting iteration")
+                                        self._reset_iter_requested = True
+                                        if _exclude_buy_phase:
+                                            self._set_ocr_throttle(False)
+                                        if capture_only and not _p2_async:
+                                            return _bl_captures
+                                        return relic_results
                                     self._log(
                                         "  WARNING: shop not re-detected after"
                                         " Phase 3 recovery — proceeding anyway.")
@@ -8372,7 +8962,12 @@ class RelicBotApp(tk.Tk):
                     if self._diag:
                         self._diag.phase_end(f"Cycle {_batch_i + 1} Phase 3 (reset)")
 
-            self._log(f"  Scan loop complete — {_relics_scanned} relic(s) scanned.")
+            if _p2_duplicates_total:
+                self._log(
+                    f"  Scan loop complete — {_relics_scanned} relic(s) scanned"
+                    f" + {_p2_duplicates_total} duplicate(s) accepted.")
+            else:
+                self._log(f"  Scan loop complete — {_relics_scanned} relic(s) scanned.")
 
             # ── Async Phase 2: finalize iter_state total ─────────────── #
             # Now we know the exact count submitted. Update total so workers
@@ -9617,7 +10212,8 @@ class RelicBotApp(tk.Tk):
         _resolve_cmd_base = [
             sys.executable, "--run-pip", "install", "torch",
             "--index-url", "https://download.pytorch.org/whl/cu126",
-            "--no-deps", "--dry-run", "--report",  # <report_path> appended at runtime
+            "--no-deps", "--dry-run", "--force-reinstall",
+            "--report",  # <report_path> appended at runtime
         ]
 
         dlg = tk.Toplevel(self)
@@ -9815,7 +10411,7 @@ class RelicBotApp(tk.Tk):
                         headers["Range"] = f"bytes={resume_from}-"
 
                     req = _ur.Request(wheel_url, headers=headers)
-                    with _ur.urlopen(req, context=ssl_ctx) as resp:
+                    with _ur.urlopen(req, context=ssl_ctx, timeout=30) as resp:
                         # Determine total size (Content-Range if resuming, else Content-Length)
                         cr = resp.headers.get("Content-Range", "")
                         if cr and "/" in cr:
