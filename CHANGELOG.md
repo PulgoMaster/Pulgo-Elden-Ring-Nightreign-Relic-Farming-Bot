@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 
 ---
 
-## [1.7.2] — 2026-04-07 — OCR REGION REWORK + CYAN CURSE DETECTION + DEEP DIAGNOSTICS
+## [1.7.1] — 2026-04-07 — OCR REGION REWORK + CYAN CURSE DETECTION + DEEP DIAGNOSTICS
 
 ### OCR Crop Geometry Rework
 - **Slot crops now skip the parchment icon and dialog border entirely.** `_SLOT_X_START` raised from 0.27 to 0.348 — eliminates ~95% of non-text pixels feeding into EasyOCR. Smaller crop = faster OCR with no loss of legibility.

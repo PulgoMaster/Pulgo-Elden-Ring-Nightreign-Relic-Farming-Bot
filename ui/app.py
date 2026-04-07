@@ -557,7 +557,7 @@ class RelicBotApp(tk.Tk):
         super().__init__()
         self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.7.2  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.7.1  |  Made by Pulgo")
         self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
