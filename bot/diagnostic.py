@@ -45,6 +45,88 @@ import sys
 import threading
 import time
 
+from bot.failure_classifier import (
+    classify, FailureAggregator,
+    SYSTEM, INPUT, OCR, STATE, USER,
+    INFO, WARN, ERROR, FATAL,
+)
+
+
+# Verbosity levels for the spammy per-event loggers (slot OCR, door checks,
+# match cutoff misses, advance results).  "low" suppresses all of them,
+# "normal" suppresses only the most spammy (per-token), "high" logs
+# everything.  Other event categories are always on regardless of level.
+VERBOSITY_LOW    = "low"
+VERBOSITY_NORMAL = "normal"
+VERBOSITY_HIGH   = "high"
+_VERBOSITY_RANK  = {VERBOSITY_LOW: 0, VERBOSITY_NORMAL: 1, VERBOSITY_HIGH: 2}
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+# Persistent last-run snapshot
+# ─────────────────────────────────────────────────────────────────────────── #
+# Saved next to the bot exe (or src dir in dev) as last_run_diag.json so the
+# Export Diagnostics button can render the previous run's counters and
+# failure breakdown even after the user closed and reopened the bot.
+# Cleared only when a NEW batch run starts.
+
+def _persist_path() -> str:
+    """Return the absolute path of the persistent last-run snapshot file.
+
+    Lives next to the executable (frozen) or in the project root (dev).
+    """
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        # bot/diagnostic.py → project root
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "last_run_diag.json")
+
+
+def persist_run_state(counters: dict, failures: dict,
+                      runtime: dict | None = None) -> None:
+    """Write a JSON snapshot of the last run's diagnostic state.
+
+    Called by DiagnosticLogger on iteration_end and close so the snapshot
+    is always at most one iteration stale, and survives across app
+    restarts until the next batch run wipes it.
+    """
+    import json
+    payload = {
+        "counters":    counters or {},
+        "failures":    failures or {},
+        "runtime":     runtime or {},
+        "finished_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        with open(_persist_path(), "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception:
+        pass   # never let persistence break the run
+
+
+def load_persisted_run_state() -> dict | None:
+    """Load the persisted last-run snapshot, or None if missing/corrupt."""
+    import json
+    p = _persist_path()
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def clear_persisted_run_state() -> None:
+    """Delete the persisted snapshot.  Called when a NEW batch run starts."""
+    p = _persist_path()
+    try:
+        if os.path.exists(p):
+            os.remove(p)
+    except Exception:
+        pass
+
 
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -86,6 +168,93 @@ class DiagnosticLogger:
         # GPU install tracking
         self._gpu_install_started = False
         self._gpu_install_ok = False
+
+        # Optional runtime-snapshot provider — caller (app.py) sets this
+        # so persist_run_state() can capture live app state alongside the
+        # counters and failure aggregator.  Signature: callable() -> dict.
+        self._runtime_snapshot_fn = None
+
+        # ── v1.7.x feature counters & state ───────────────────────────── #
+        # Verbosity knob (caller can set via .verbosity = "high" before run)
+        self.verbosity = VERBOSITY_NORMAL
+
+        # Failure classification
+        self._failures = FailureAggregator(recent_cap=50)
+
+        # Aggregate counters for new event types
+        self._ev = {
+            # Settle / Phase 1
+            "settle_total":         0,
+            "settle_empty_slot0":   0,
+            "settle_right_skipped": 0,
+            "settle_accepted":      0,
+            "settle_fallthrough":   0,
+            "settle_murk_recheck":  0,
+            "buy_fail_in_place":    0,
+
+            # Phase 2 / advance
+            "advance_total":        0,
+            "advance_dup_accepted": 0,
+            "advance_drop":         0,
+
+            # Phase 3
+            "p3_tooltip_retry_ok":   0,
+            "p3_tooltip_retry_fail": 0,
+            "p3_esc_timeout":        0,
+            "p3_consecutive_fails":  0,
+            "p3_iter_restart":       0,
+
+            # Phase -0.5 / load
+            "black_frame_extends":  0,
+            "black_frame_ceiling":  0,
+
+            # MenuNav
+            "menunav_recalcs":       0,
+            "menunav_doubling_hits": 0,
+            "menunav_budget_busted": 0,
+
+            # GPU AA
+            "gpu_aa_suppressions":   0,
+            "gpu_aa_re_enables":     0,
+            "gpu_aa_final_latches":  0,
+
+            # Input GPU yield
+            "input_yield_calls":     0,
+            "input_yield_wait_ms":   0.0,
+            "input_yield_max_ms":    0.0,
+
+            # Nav worker
+            "nav_worker_starts":     0,
+            "nav_worker_timeouts":   0,
+            "nav_worker_deaths":     0,
+            "nav_worker_restarts":   0,
+            "nav_worker_inline_fb":  0,
+
+            # Async / backlog
+            "async_submits":         0,
+            "async_completes":       0,
+            "async_errors":          0,
+            "async_hits":            0,
+            "backlog_flushes":       0,
+
+            # OCR pipeline detail
+            "slot_ocr_calls":        0,
+            "slot_ocr_passive_hits": 0,
+            "slot_ocr_curse_hits":   0,
+            "curse_misses":          0,
+
+            # Door / match
+            "door_gen_calls":        0,
+            "door_total_generated":  0,
+            "compat_rejects":        0,
+            "duplicate_skips":       0,
+
+            # Game state
+            "game_launches":         0,
+            "game_launch_fails":     0,
+            "save_restores":         0,
+            "perf_recalibrations":   0,
+        }
 
         # Open file, write header
         with open(self._path, "w", encoding="utf-8") as f:
@@ -287,6 +456,16 @@ class DiagnosticLogger:
             f"inputs ok/fail={s.get('inp_ok',0)}/{s.get('inp_fail',0)}  "
             f"ocr T/F/E={s.get('ocr_true',0)}/{s.get('ocr_false',0)}/{s.get('ocr_err',0)} ===\n"
         )
+        # Persist a snapshot at every iteration boundary so the
+        # last_run_diag.json file is at most one iteration stale.
+        try:
+            _rt = self._runtime_snapshot_fn() if self._runtime_snapshot_fn else {}
+        except Exception:
+            _rt = {}
+        try:
+            persist_run_state(self._ev, self._failures.snapshot(), _rt)
+        except Exception:
+            pass
 
     # ── phase timing ──────────────────────────────────────────────────────── #
 
@@ -543,6 +722,384 @@ class DiagnosticLogger:
         if ms_hook:
             ctypes.windll.user32.UnhookWindowsHookEx(ms_hook)
 
+    # ── verbosity gate ────────────────────────────────────────────────────── #
+
+    def _verb_at_least(self, level: str) -> bool:
+        return _VERBOSITY_RANK.get(self.verbosity, 1) >= _VERBOSITY_RANK.get(level, 1)
+
+    # ── failure classification ────────────────────────────────────────────── #
+
+    def log_failure(self, category: str, subcategory: str,
+                    evidence: dict | None = None,
+                    severity: str = WARN) -> None:
+        """Classify a failure event and append to .diag.
+
+        Use this whenever a recovery path triggers, an OCR call returns
+        unusable data, an input fails to land, or the game state diverges
+        from what we expected.  See bot/failure_classifier.py for category
+        and severity definitions.
+        """
+        rec = classify(category, subcategory, evidence, severity)
+        self._failures.add(rec)
+        ev_str = "  ".join(f"{k}={v}" for k, v in rec["evidence"].items())
+        self._write(
+            f"  FAILURE  {rec['severity']:5s}  "
+            f"{rec['category']}/{rec['subcategory']:32s}  {ev_str}"
+        )
+
+    # ── settle / Phase 1 events ──────────────────────────────────────────── #
+
+    def log_settle(self, slot: int, outcome: str, duration_s: float = 0.0,
+                   gap_mult: float = 0.0, scaled_budget_s: float = 0.0,
+                   note: str = "") -> None:
+        """Settle event during Phase 1.
+
+        outcome: "accepted" | "empty_slot0" | "right_skipped"
+                 | "fallthrough" | "murk_recheck" | "rejected"
+        """
+        self._ev["settle_total"] += 1
+        key = f"settle_{outcome}" if outcome != "rejected" else "settle_fallthrough"
+        if key in self._ev:
+            self._ev[key] += 1
+        self._write(
+            f"  SETTLE  slot={slot}  {outcome:14s}  "
+            f"dur={duration_s:.2f}s  gap_mult={gap_mult:.2f}  "
+            f"budget={scaled_budget_s:.2f}s"
+            + (f"  {note}" if note else "")
+        )
+        if outcome in ("fallthrough", "rejected"):
+            self.log_failure(STATE, "settle_passive_region_empty",
+                             {"slot": slot, "duration_s": round(duration_s, 2),
+                              "gap_mult": round(gap_mult, 2)},
+                             severity=ERROR)
+
+    def log_buy_fail_in_place(self, cycle: int, evidence: dict | None = None) -> None:
+        self._ev["buy_fail_in_place"] += 1
+        self._write(f"  BUY_FAIL_IN_PLACE  cycle={cycle}")
+        self.log_failure(INPUT, "buy_f_press_drop",
+                         {"cycle": cycle, **(evidence or {})},
+                         severity=WARN)
+
+    # ── Phase 2 / advance ────────────────────────────────────────────────── #
+
+    def log_advance(self, cycle: int, idx: int, outcome: str,
+                    retries: int = 0, note: str = "") -> None:
+        """outcome: confirmed | duplicate | drop | dup_accepted"""
+        self._ev["advance_total"] += 1
+        if outcome == "dup_accepted":
+            self._ev["advance_dup_accepted"] += 1
+        elif outcome == "drop":
+            self._ev["advance_drop"] += 1
+        if not self._verb_at_least(VERBOSITY_HIGH) and outcome == "confirmed":
+            return
+        self._write(
+            f"  ADVANCE  cyc={cycle}  idx={idx}  {outcome:12s}  retries={retries}"
+            + (f"  {note}" if note else "")
+        )
+        if outcome == "drop":
+            self.log_failure(INPUT, "right_advance_drop",
+                             {"cycle": cycle, "idx": idx, "retries": retries},
+                             severity=WARN)
+
+    def log_cycle_summary(self, cycle: int, confirmed: int,
+                          duplicate: int, dropped: int = 0) -> None:
+        self._write(
+            f"  CYCLE_SUMMARY  cyc={cycle}  confirmed={confirmed}  "
+            f"duplicate={duplicate}  dropped={dropped}"
+        )
+
+    # ── Phase 3 events ───────────────────────────────────────────────────── #
+
+    def log_phase3(self, event: str, cycle: int = 0, attempt: int = 0,
+                   note: str = "") -> None:
+        """event: tooltip_ok | tooltip_retry_ok | tooltip_retry_fail
+                  | esc_recovery | esc_timeout | consecutive_fails
+                  | iter_restart"""
+        if event == "tooltip_retry_ok":
+            self._ev["p3_tooltip_retry_ok"] += 1
+        elif event == "tooltip_retry_fail":
+            self._ev["p3_tooltip_retry_fail"] += 1
+        elif event == "esc_timeout":
+            self._ev["p3_esc_timeout"] += 1
+        elif event == "consecutive_fails":
+            self._ev["p3_consecutive_fails"] += 1
+        elif event == "iter_restart":
+            self._ev["p3_iter_restart"] += 1
+        self._write(f"  PHASE3  {event:22s}  cyc={cycle}  att={attempt}"
+                    + (f"  {note}" if note else ""))
+        if event == "esc_timeout":
+            self.log_failure(STATE, "p3_esc_recovery_timeout",
+                             {"cycle": cycle}, severity=ERROR)
+        elif event == "iter_restart":
+            self.log_failure(STATE, "p3_consecutive_fails_escalation",
+                             {"cycle": cycle}, severity=ERROR)
+        elif event == "tooltip_retry_fail":
+            self.log_failure(OCR, "p3_tooltip_retry_failed",
+                             {"cycle": cycle}, severity=WARN)
+
+    # ── Phase -0.5 / load ─────────────────────────────────────────────────── #
+
+    def log_load(self, event: str, total_extended_s: float = 0.0,
+                 note: str = "") -> None:
+        """event: black_frame_detected | black_frame_extend | ceiling_reached
+                  | in_game_confirmed"""
+        if event == "black_frame_extend":
+            self._ev["black_frame_extends"] += 1
+        elif event == "ceiling_reached":
+            self._ev["black_frame_ceiling"] += 1
+        self._write(
+            f"  LOAD  {event:22s}  extended_total={total_extended_s:.1f}s"
+            + (f"  {note}" if note else "")
+        )
+        if event == "ceiling_reached":
+            self.log_failure(SYSTEM, "black_frame_ceiling",
+                             {"total_extended_s": round(total_extended_s, 1)},
+                             severity=FATAL)
+
+    # ── MenuNav events ───────────────────────────────────────────────────── #
+
+    def log_menunav(self, event: str, from_row: str = "", expected: str = "",
+                    got: str = "", recalc_n: int = 0, budget: int = 0,
+                    note: str = "") -> None:
+        """event: start | confirmed | recalc_on_doubling | recalc_path
+                  | budget_exhausted | esc_fallback"""
+        if event == "recalc_on_doubling":
+            self._ev["menunav_recalcs"] += 1
+            self._ev["menunav_doubling_hits"] += 1
+        elif event == "recalc_path":
+            self._ev["menunav_recalcs"] += 1
+        elif event == "budget_exhausted":
+            self._ev["menunav_budget_busted"] += 1
+        self._write(
+            f"  MENUNAV  {event:22s}  from={from_row}  exp={expected}  "
+            f"got={got}  recalc={recalc_n}/{budget}"
+            + (f"  {note}" if note else "")
+        )
+        if event == "recalc_on_doubling":
+            self.log_failure(INPUT, "menunav_input_doubling",
+                             {"from": from_row, "expected": expected,
+                              "got": got, "recalc_n": recalc_n},
+                             severity=WARN)
+        elif event == "budget_exhausted":
+            self.log_failure(STATE, "menunav_budget_exhausted",
+                             {"from": from_row, "expected": expected,
+                              "recalc_n": recalc_n},
+                             severity=ERROR)
+
+    # ── GPU AA suppression / latch ────────────────────────────────────────── #
+
+    def log_gpu_aa(self, event: str, current_iter: int = 0,
+                   drops: int = 0, suppress_count: int = 0,
+                   note: str = "") -> None:
+        """event: auto_suppress | re_enable | final_latch"""
+        if event == "auto_suppress":
+            self._ev["gpu_aa_suppressions"] += 1
+        elif event == "re_enable":
+            self._ev["gpu_aa_re_enables"] += 1
+        elif event == "final_latch":
+            self._ev["gpu_aa_final_latches"] += 1
+        self._write(
+            f"  GPU_AA  {event:14s}  iter={current_iter}  drops={drops}  "
+            f"suppress_count={suppress_count}"
+            + (f"  {note}" if note else "")
+        )
+        if event == "auto_suppress":
+            self.log_failure(INPUT, "gpu_aa_input_drop_cascade",
+                             {"iter": current_iter, "drops": drops,
+                              "suppress_count": suppress_count},
+                             severity=WARN)
+        elif event == "final_latch":
+            self.log_failure(INPUT, "gpu_aa_latch_held",
+                             {"iter": current_iter,
+                              "suppress_count": suppress_count},
+                             severity=ERROR)
+
+    # ── Input GPU yield gate (v1.7.1) ─────────────────────────────────────── #
+
+    def log_input_yield(self, phase: str, key: str, wait_ms: float) -> None:
+        """Log how long an input call had to wait on the GPU inflight lock.
+        Lets us see whether the yield gate is actually doing work and how
+        much it costs in real input latency."""
+        self._ev["input_yield_calls"] += 1
+        self._ev["input_yield_wait_ms"] += wait_ms
+        if wait_ms > self._ev["input_yield_max_ms"]:
+            self._ev["input_yield_max_ms"] = wait_ms
+        if not self._verb_at_least(VERBOSITY_HIGH) and wait_ms < 5.0:
+            return
+        self._write(
+            f"  INPUT_YIELD  {phase:14s}  key={key:12s}  wait={wait_ms:.1f}ms"
+        )
+
+    # ── Nav worker (CPU mode dedicated thread) ────────────────────────────── #
+
+    def log_nav_worker(self, event: str, note: str = "") -> None:
+        """event: started | submit | complete | timeout | death |
+                  restart | inline_fallback"""
+        if event == "started":
+            self._ev["nav_worker_starts"] += 1
+        elif event == "timeout":
+            self._ev["nav_worker_timeouts"] += 1
+        elif event == "death":
+            self._ev["nav_worker_deaths"] += 1
+        elif event == "restart":
+            self._ev["nav_worker_restarts"] += 1
+        elif event == "inline_fallback":
+            self._ev["nav_worker_inline_fb"] += 1
+        if not self._verb_at_least(VERBOSITY_HIGH) and event in ("submit", "complete"):
+            return
+        self._write(f"  NAV_WORKER  {event:18s}  {note}")
+        if event == "timeout":
+            self.log_failure(SYSTEM, "nav_worker_timeout", {},
+                             severity=WARN)
+        elif event == "death":
+            self.log_failure(SYSTEM, "nav_worker_died", {},
+                             severity=ERROR)
+
+    # ── Async analysis ───────────────────────────────────────────────────── #
+
+    def log_async(self, event: str, note: str = "") -> None:
+        """event: submit | complete | error | hit | flush"""
+        if event == "submit":
+            self._ev["async_submits"] += 1
+        elif event == "complete":
+            self._ev["async_completes"] += 1
+        elif event == "error":
+            self._ev["async_errors"] += 1
+        elif event == "hit":
+            self._ev["async_hits"] += 1
+        elif event == "flush":
+            self._ev["backlog_flushes"] += 1
+        if not self._verb_at_least(VERBOSITY_HIGH) and event in ("submit", "complete"):
+            return
+        self._write(f"  ASYNC  {event:10s}  {note}")
+        if event == "error":
+            self.log_failure(SYSTEM, "async_worker_error",
+                             {"note": note[:80]}, severity=WARN)
+
+    # ── OCR pipeline detail ──────────────────────────────────────────────── #
+
+    def log_slot_ocr(self, current_iter: int, relic_idx: int, slot_idx: int,
+                     passive: str | None, curse: str | None,
+                     duration_s: float = 0.0,
+                     raw_token_count: int = 0) -> None:
+        self._ev["slot_ocr_calls"] += 1
+        if passive:
+            self._ev["slot_ocr_passive_hits"] += 1
+        if curse:
+            self._ev["slot_ocr_curse_hits"] += 1
+        if not self._verb_at_least(VERBOSITY_HIGH):
+            return
+        self._write(
+            f"  SLOT_OCR  iter={current_iter}  relic={relic_idx}  "
+            f"slot={slot_idx}  passive={passive!r}  curse={curse!r}  "
+            f"tokens={raw_token_count}  dur={duration_s:.3f}s"
+        )
+
+    def log_curse_miss(self, current_iter: int, cycle: int, slot_idx: int,
+                       raw_text: str = "", dump_path: str = "") -> None:
+        """Curse pixels visible but no curse matched.  The raw crop has
+        been dumped to <batch_run>/curse_misses/ for offline iteration."""
+        self._ev["curse_misses"] += 1
+        self._write(
+            f"  CURSE_MISS  iter={current_iter}  cyc={cycle}  slot={slot_idx}  "
+            f"raw={raw_text[:60]!r}  dump={os.path.basename(dump_path) if dump_path else '?'}"
+        )
+        self.log_failure(OCR, "curse_pixels_no_match",
+                         {"iter": current_iter, "cycle": cycle,
+                          "slot": slot_idx, "raw": raw_text[:80],
+                          "dump": os.path.basename(dump_path) if dump_path else ""},
+                         severity=WARN)
+
+    def log_passive_miss(self, current_iter: int, slot_idx: int,
+                         raw_text: str) -> None:
+        """Token was classified as passive (white text) but dictionary
+        match failed.  Tracks dictionary gaps in passives.py and
+        OCR-mangled real passives that fall below the fuzzy threshold."""
+        self._ev.setdefault("passive_misses", 0)
+        self._ev["passive_misses"] += 1
+        if not self._verb_at_least(VERBOSITY_HIGH):
+            # Still classify as failure for aggregator, just don't
+            # write per-call line at NORMAL verbosity.
+            self.log_failure(OCR, "passive_no_match",
+                             {"iter": current_iter, "slot": slot_idx,
+                              "raw": raw_text[:80]},
+                             severity=WARN)
+            return
+        self._write(
+            f"  PASSIVE_MISS  iter={current_iter}  slot={slot_idx}  "
+            f"raw={raw_text[:80]!r}"
+        )
+        self.log_failure(OCR, "passive_no_match",
+                         {"iter": current_iter, "slot": slot_idx,
+                          "raw": raw_text[:80]},
+                         severity=WARN)
+
+    def log_name_no_passives(self, current_iter: int, relic_idx: int,
+                             relic_name: str) -> None:
+        """Name OCR succeeded but all passive slots came back empty.
+        This is the v1.7.1 regression signature — keep monitoring it."""
+        self._write(
+            f"  OCR_REGRESSION_SIGNATURE  iter={current_iter}  "
+            f"relic={relic_idx}  name={relic_name!r}  passives=EMPTY"
+        )
+        self.log_failure(OCR, "name_ok_passives_empty",
+                         {"iter": current_iter, "relic": relic_idx,
+                          "name": relic_name}, severity=ERROR)
+
+    # ── Door generation / matching ────────────────────────────────────────── #
+
+    def log_door_gen(self, mode: str, door_count: int,
+                     types: dict | None = None) -> None:
+        self._ev["door_gen_calls"] += 1
+        self._ev["door_total_generated"] += door_count
+        breakdown = ""
+        if types:
+            breakdown = "  " + " ".join(f"{k}={v}" for k, v in types.items())
+        self._write(f"  DOOR_GEN  mode={mode}  doors={door_count}{breakdown}")
+
+    def log_compat_reject(self, door_id: str, conflicting: list) -> None:
+        self._ev["compat_rejects"] += 1
+        if not self._verb_at_least(VERBOSITY_HIGH):
+            return
+        self._write(f"  COMPAT_REJECT  door={door_id}  conflicts={conflicting}")
+
+    def log_duplicate_skip(self, current_iter: int, idx: int, reason: str) -> None:
+        self._ev["duplicate_skips"] += 1
+        self._write(f"  DUP_SKIP  iter={current_iter}  idx={idx}  reason={reason}")
+
+    # ── Game state ────────────────────────────────────────────────────────── #
+
+    def log_game(self, event: str, attempt: int = 0, note: str = "") -> None:
+        """event: launch_start | launch_ok | launch_fail | focus_ok |
+                  close | save_restore | steam_reset"""
+        if event == "launch_start":
+            self._ev["game_launches"] += 1
+        elif event == "launch_fail":
+            self._ev["game_launch_fails"] += 1
+        elif event == "save_restore":
+            self._ev["save_restores"] += 1
+        self._write(f"  GAME  {event:14s}  attempt={attempt}"
+                    + (f"  {note}" if note else ""))
+        if event == "launch_fail":
+            self.log_failure(SYSTEM, "game_launch_fail",
+                             {"attempt": attempt, "note": note[:80]},
+                             severity=ERROR)
+
+    def log_perf_calibration(self, old_mult: float, new_mult: float,
+                             sample_n: int = 0) -> None:
+        self._ev["perf_recalibrations"] += 1
+        self._write(
+            f"  PERF_CALIBRATION  {old_mult:.3f}× → {new_mult:.3f}×  "
+            f"(samples={sample_n})"
+        )
+
+    def log_profile(self, event: str, name: str = "", mode: str = "",
+                    migrated: bool = False) -> None:
+        self._write(
+            f"  PROFILE  {event:14s}  name={name!r}  mode={mode}  "
+            f"migrated={migrated}"
+        )
+
     # ── session summary ───────────────────────────────────────────────────── #
 
     def write_summary(self):
@@ -603,10 +1160,156 @@ class DiagnosticLogger:
                 f"GPU install        : {'SUCCESS' if self._gpu_install_ok else 'FAILED/INCOMPLETE'}"
             )
 
+        # ── v1.7.x feature aggregates ────────────────────────────────── #
+        e = self._ev
+        lines.append("")
+        lines.append("--- Phase 1 / Settle ---")
+        lines.append(
+            f"Settle calls       : {e['settle_total']}  "
+            f"empty_slot0={e['settle_empty_slot0']}  "
+            f"right_skipped={e['settle_right_skipped']}  "
+            f"accepted={e['settle_accepted']}  "
+            f"fallthrough={e['settle_fallthrough']}"
+        )
+        lines.append(f"Buy fail-in-place  : {e['buy_fail_in_place']}")
+
+        lines.append("--- Phase 2 / Advance ---")
+        lines.append(
+            f"Advances           : {e['advance_total']}  "
+            f"dup_accepted={e['advance_dup_accepted']}  "
+            f"drops={e['advance_drop']}"
+        )
+
+        lines.append("--- Phase 3 ---")
+        lines.append(
+            f"Tooltip retry      : ok={e['p3_tooltip_retry_ok']}  "
+            f"fail={e['p3_tooltip_retry_fail']}  "
+            f"esc_timeout={e['p3_esc_timeout']}  "
+            f"iter_restarts={e['p3_iter_restart']}"
+        )
+
+        lines.append("--- Phase -0.5 / Load ---")
+        lines.append(
+            f"Black-frame extends: {e['black_frame_extends']}  "
+            f"ceiling_hit={e['black_frame_ceiling']}"
+        )
+
+        lines.append("--- MenuNav ---")
+        lines.append(
+            f"Recalcs            : {e['menunav_recalcs']}  "
+            f"doubling={e['menunav_doubling_hits']}  "
+            f"budget_busted={e['menunav_budget_busted']}"
+        )
+
+        lines.append("--- GPU AA suppression ---")
+        lines.append(
+            f"Suppressions       : {e['gpu_aa_suppressions']}  "
+            f"re_enables={e['gpu_aa_re_enables']}  "
+            f"final_latches={e['gpu_aa_final_latches']}"
+        )
+
+        lines.append("--- Input GPU yield gate ---")
+        avg_wait = (e['input_yield_wait_ms'] / e['input_yield_calls']
+                    if e['input_yield_calls'] else 0.0)
+        lines.append(
+            f"Yield calls        : {e['input_yield_calls']}  "
+            f"avg={avg_wait:.1f}ms  max={e['input_yield_max_ms']:.1f}ms"
+        )
+
+        lines.append("--- Nav worker ---")
+        lines.append(
+            f"Nav worker         : starts={e['nav_worker_starts']}  "
+            f"timeouts={e['nav_worker_timeouts']}  "
+            f"deaths={e['nav_worker_deaths']}  "
+            f"restarts={e['nav_worker_restarts']}  "
+            f"inline_fb={e['nav_worker_inline_fb']}"
+        )
+
+        lines.append("--- Async / backlog ---")
+        lines.append(
+            f"Async              : submit={e['async_submits']}  "
+            f"complete={e['async_completes']}  "
+            f"errors={e['async_errors']}  "
+            f"hits={e['async_hits']}  "
+            f"flushes={e['backlog_flushes']}"
+        )
+
+        lines.append("--- OCR pipeline ---")
+        passive_rate = (e['slot_ocr_passive_hits'] / e['slot_ocr_calls'] * 100
+                        if e['slot_ocr_calls'] else 0.0)
+        lines.append(
+            f"Slot OCR           : calls={e['slot_ocr_calls']}  "
+            f"passive_hits={e['slot_ocr_passive_hits']} ({passive_rate:.1f}%)  "
+            f"curse_hits={e['slot_ocr_curse_hits']}"
+        )
+        lines.append(f"Curse misses (PNG) : {e['curse_misses']}  (see curse_misses/ folder)")
+
+        lines.append("--- Doors / matching ---")
+        lines.append(
+            f"Door gen           : calls={e['door_gen_calls']}  "
+            f"total_doors={e['door_total_generated']}  "
+            f"compat_rejects={e['compat_rejects']}  "
+            f"dup_skips={e['duplicate_skips']}"
+        )
+
+        lines.append("--- Game state ---")
+        lines.append(
+            f"Game launches      : {e['game_launches']}  "
+            f"fails={e['game_launch_fails']}  "
+            f"save_restores={e['save_restores']}  "
+            f"perf_recalibrations={e['perf_recalibrations']}"
+        )
+
+        # ── Failure classification breakdown ─────────────────────────── #
+        snap = self._failures.snapshot()
+        lines.append("")
+        lines.append("=== FAILURE CLASSIFICATION ===")
+        lines.append(f"Total failures     : {snap['total']}")
+        if snap['cat_counts']:
+            lines.append("By category:")
+            for cat in (SYSTEM, INPUT, OCR, STATE, USER):
+                n = snap['cat_counts'].get(cat, 0)
+                if n:
+                    lines.append(f"  {cat:8s}  {n}")
+        if snap['severity_counts']:
+            lines.append("By severity:")
+            for sev in (INFO, WARN, ERROR, FATAL):
+                n = snap['severity_counts'].get(sev, 0)
+                if n:
+                    lines.append(f"  {sev:6s}  {n}")
+        if snap['counts']:
+            lines.append("Top subcategories:")
+            sorted_subs = sorted(snap['counts'].items(),
+                                 key=lambda kv: kv[1], reverse=True)
+            for key, n in sorted_subs[:15]:
+                lines.append(f"  {key:50s}  {n}")
+        if snap['recent']:
+            lines.append("")
+            lines.append("Most recent failures (up to 10):")
+            for rec in snap['recent'][-10:]:
+                ev_str = "  ".join(f"{k}={v}" for k, v in rec.get('evidence', {}).items())
+                lines.append(
+                    f"  [{rec['ts_str']}]  {rec['severity']:5s}  "
+                    f"{rec['category']}/{rec['subcategory']}  {ev_str}"
+                )
+
         lines.append(f"\nFull log           : {self._path}")
         lines.append("=" * 72)
 
         self._write_block("\n".join(lines))
+
+    # ── snapshot accessors (Export Diagnostics consumer) ──────────────────── #
+
+    def get_event_counters(self) -> dict:
+        """Return a copy of the v1.7.x feature counters dict."""
+        return dict(self._ev)
+
+    def get_failure_snapshot(self) -> dict:
+        """Return failure classifier snapshot for Export Diagnostics."""
+        return self._failures.snapshot()
+
+    def get_path(self) -> str:
+        return self._path
 
     # ── lifecycle ─────────────────────────────────────────────────────────── #
 
@@ -617,3 +1320,20 @@ class DiagnosticLogger:
         self._closed = True
         self.stop_interference_monitor()
         self.write_summary()
+        # Final persistence: capture the last runtime snapshot alongside
+        # the closed counters and failure aggregator.  This is what the
+        # Export Diagnostics button reads after an app restart.
+        try:
+            _rt = self._runtime_snapshot_fn() if self._runtime_snapshot_fn else {}
+        except Exception:
+            _rt = {}
+        try:
+            persist_run_state(self._ev, self._failures.snapshot(), _rt)
+        except Exception:
+            pass
+
+    def set_runtime_snapshot_fn(self, fn) -> None:
+        """app.py installs a callable that returns a dict of live app
+        state (perf_gap_mult, GPU AA suppression flags, P3 fail counters,
+        etc.) so persist_run_state() can capture it alongside counters."""
+        self._runtime_snapshot_fn = fn

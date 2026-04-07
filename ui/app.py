@@ -557,7 +557,7 @@ class RelicBotApp(tk.Tk):
         super().__init__()
         self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.6.5  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.7.2  |  Made by Pulgo")
         self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
@@ -3246,6 +3246,7 @@ class RelicBotApp(tk.Tk):
         target_idx = self._MENU_ORDER.index(target_item)
         _deadline = time.time() + timeout
         _MAX_RETRIES_PER_STEP = 3
+        _MAX_RECALCS = 4   # how many times we accept an unexpected-position recovery
 
         # First, confirm we're on Expeditions (or find current position)
         _cur_item, _cur_br, _ = find_highlighted_item(region)
@@ -3258,6 +3259,7 @@ class RelicBotApp(tk.Tk):
             return False
 
         _cur_idx = self._MENU_ORDER.index(_cur_item)
+        _recalc_count = 0
         self._log(f"  [MenuNav] Starting at {_cur_item} → target {target_item} "
                   f"({target_idx - _cur_idx} steps)")
 
@@ -3274,6 +3276,7 @@ class RelicBotApp(tk.Tk):
                 _key = "Key.up"
                 _expected_idx = _cur_idx - 1
             _expected_item = self._MENU_ORDER[_expected_idx]
+            _recalculated = False
 
             # Press and verify
             for _retry in range(_MAX_RETRIES_PER_STEP):
@@ -3308,17 +3311,56 @@ class RelicBotApp(tk.Tk):
                             f"(retry {_retry + 1})")
                         continue
                 elif _item is not None:
-                    # Ended up somewhere unexpected
+                    # Ended up somewhere unexpected — could be input doubling
+                    # (one tap registered as two) or a missed beat.  If the
+                    # cursor is still on a known menu row, accept it as the
+                    # new current position and recompute the path instead of
+                    # bailing all the way back to ESC recovery.
+                    if _item in self._MENU_ORDER and _recalc_count < _MAX_RECALCS:
+                        _recalc_count += 1
+                        self._log(
+                            f"  [MenuNav] Unexpected position: {_item} "
+                            f"(expected {_expected_item}) — recalculating "
+                            f"path ({_recalc_count}/{_MAX_RECALCS})")
+                        if getattr(self, "_diag", None):
+                            try:
+                                self._diag.log_menunav(
+                                    event="recalc_on_doubling",
+                                    from_row=_cur_item,
+                                    expected=_expected_item,
+                                    got=_item,
+                                    recalc_n=_recalc_count,
+                                    budget=_MAX_RECALCS)
+                            except Exception:
+                                pass
+                        _cur_item = _item
+                        _cur_idx  = self._MENU_ORDER.index(_item)
+                        _recalculated = True
+                        # Brief settle so any in-flight key repeat finishes
+                        # before the next tap.
+                        time.sleep(0.15)
+                        break   # exit retry loop, outer while reroutes
                     self._log(
                         f"  [MenuNav] Unexpected position: {_item} "
                         f"(expected {_expected_item})")
+                    if getattr(self, "_diag", None):
+                        try:
+                            self._diag.log_menunav(
+                                event="budget_exhausted",
+                                from_row=_cur_item,
+                                expected=_expected_item,
+                                got=_item,
+                                recalc_n=_recalc_count,
+                                budget=_MAX_RECALCS)
+                        except Exception:
+                            pass
                     return False
                 else:
                     # Can't determine position at all
                     self._log("  [MenuNav] Lost menu position.")
                     return False
 
-            if _cur_idx != _expected_idx:
+            if not _recalculated and _cur_idx != _expected_idx:
                 # All retries exhausted for this step
                 self._log(
                     f"  [MenuNav] Failed to move from {_cur_item} "
@@ -3518,6 +3560,13 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             "[Phase -0.5] Black frame detected — monitor may be off. "
                             "Waiting for signal…")
+                        if self._diag:
+                            try:
+                                self._diag.log_load(
+                                    event="black_frame_detected",
+                                    total_extended_s=_black_frame_total_extended_s)
+                            except Exception:
+                                pass
                     # Extend timeout so the bot doesn't abort while monitor sleeps,
                     # but cap cumulative extension so we don't wait forever.
                     _ext_remaining = _BLACK_FRAME_CEILING_S - _black_frame_total_extended_s
@@ -3525,9 +3574,24 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             "[Phase -0.5] Black frame extension ceiling reached"
                             " (10 min) — aborting load wait")
+                        if self._diag:
+                            try:
+                                self._diag.log_load(
+                                    event="ceiling_reached",
+                                    total_extended_s=_black_frame_total_extended_s)
+                            except Exception:
+                                pass
                         return False, 0.0
                     _new_start = max(_start, time.time() - _MAX_WAIT + 30)
-                    _black_frame_total_extended_s += max(0.0, _new_start - _start)
+                    _ext_added = max(0.0, _new_start - _start)
+                    _black_frame_total_extended_s += _ext_added
+                    if _ext_added > 0 and self._diag:
+                        try:
+                            self._diag.log_load(
+                                event="black_frame_extend",
+                                total_extended_s=_black_frame_total_extended_s)
+                        except Exception:
+                            pass
                     _start = _new_start
                     continue
                 if relic_analyzer.check_text_visible(_img, "equipment", top_fraction=0.15):
@@ -3535,6 +3599,14 @@ class RelicBotApp(tk.Tk):
                     self._log(
                         f"[Phase -0.5] Equipment menu detected — in-game confirmed "
                         f"({_elapsed:.1f} s after window focus).")
+                    if self._diag:
+                        try:
+                            self._diag.log_load(
+                                event="in_game_confirmed",
+                                total_extended_s=_black_frame_total_extended_s,
+                                note=f"after {_elapsed:.1f}s")
+                        except Exception:
+                            pass
                     _exe_bn = os.path.basename(self.game_exe_var.get().strip())
                     if _exe_bn and _boost_game_priority(_exe_bn):
                         self._log("[Phase -0.5] Game process boosted to HIGH priority.")
@@ -4117,11 +4189,55 @@ class RelicBotApp(tk.Tk):
                 self._log(f"Batch output folder: {run_dir}")
                 # ── Diagnostic logger (input-test build) ──────────────────
                 try:
+                    # Wipe any prior persisted snapshot — a new batch run is
+                    # starting, the previous run's data is now stale.
+                    try:
+                        from bot.diagnostic import clear_persisted_run_state
+                        clear_persisted_run_state()
+                    except Exception:
+                        pass
                     self._diag = DiagnosticLogger(run_dir)
                     self._diag.log_hardware()
                     self._diag.log_settings(self)
                     self._diag.start_interference_monitor()
+                    self._diag.set_runtime_snapshot_fn(self._collect_runtime_snapshot)
                     self.player.diag = self._diag
+                    # Curse-miss capture: dump RAW failing crops to a per-run
+                    # subfolder so we can iterate against actual screenshots.
+                    # Also wire a hook so each miss flows into the .diag log.
+                    try:
+                        import os as _os
+                        from bot import relic_analyzer as _ra
+                        _ra.set_curse_miss_dir(_os.path.join(run_dir, "curse_misses"))
+
+                        def _curse_miss_diag_hook(slot_idx, raw_text, dump_path):
+                            _d = getattr(self, "_diag", None)
+                            _ci = getattr(self, "_diag_cur_iter", 0) or 0
+                            if _d:
+                                try:
+                                    _d.log_curse_miss(
+                                        current_iter=_ci, cycle=0,
+                                        slot_idx=slot_idx,
+                                        raw_text=raw_text,
+                                        dump_path=dump_path or "")
+                                except Exception:
+                                    pass
+                        _ra.set_curse_miss_hook(_curse_miss_diag_hook)
+
+                        def _passive_miss_diag_hook(slot_idx, raw_text):
+                            _d = getattr(self, "_diag", None)
+                            _ci = getattr(self, "_diag_cur_iter", 0) or 0
+                            if _d:
+                                try:
+                                    _d.log_passive_miss(
+                                        current_iter=_ci,
+                                        slot_idx=slot_idx,
+                                        raw_text=raw_text)
+                                except Exception:
+                                    pass
+                        _ra.set_passive_miss_hook(_passive_miss_diag_hook)
+                    except Exception as _ce:
+                        self._log(f"[DIAG] curse-miss dir init failed: {_ce}")
                 except Exception as _de:
                     self._log(f"[DIAG] Logger init failed: {_de}")
 
@@ -4690,8 +4806,20 @@ class RelicBotApp(tk.Tk):
             try:
                 save_manager.restore(save_path, backup_path)
                 self._log("Save restored.")
+                if self._diag:
+                    try:
+                        self._diag.log_game(event="save_restore")
+                    except Exception:
+                        pass
             except Exception as e:
                 self._log(f"ERROR restoring save: {e}")
+                if self._diag:
+                    try:
+                        self._diag.log_failure(
+                            "SYSTEM", "save_restore_fail",
+                            {"error": str(e)[:80]}, severity="ERROR")
+                    except Exception:
+                        pass
                 self.after(0, self._reset_controls)
                 return
             self._set_status(f"Batch {iteration}: launching game…", "orange")
@@ -4789,6 +4917,14 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             "ERROR: Game failed to open even after Steam "
                             "reset — cancelling batch.")
+                        if self._diag:
+                            try:
+                                self._diag.log_game(
+                                    event="launch_fail",
+                                    attempt=_launch_attempts,
+                                    note="Steam reset attempted; game still failed to open")
+                            except Exception:
+                                pass
                         if _async_mode and _async_relic_q is not None:
                             _shutdown_async_workers()
                             _async_join_timed()
@@ -4802,6 +4938,13 @@ class RelicBotApp(tk.Tk):
                             f"Launching game "
                             f"(attempt {_launch_attempts}/"
                             f"{_STEAM_LAUNCH_ATTEMPTS})…")
+                        if self._diag:
+                            try:
+                                self._diag.log_game(
+                                    event="launch_start",
+                                    attempt=_launch_attempts)
+                            except Exception:
+                                pass
                         self._launch_game()
                         self._set_status(
                             f"Batch {iteration}: waiting for game window…",
@@ -4918,6 +5061,7 @@ class RelicBotApp(tk.Tk):
                     _new_mult = max(1.0, min(2.5,
                         (sum(_recent) / len(_recent)) / self._first_load_elapsed))
                     if abs(_new_mult - self._perf_gap_mult) >= 0.05:
+                        _old_mult = self._perf_gap_mult
                         self._perf_gap_mult = _new_mult
                         self._log(
                             f"  [Adaptive] System factor updated: {_new_mult:.2f}× "
@@ -4925,6 +5069,14 @@ class RelicBotApp(tk.Tk):
                             f"baseline {self._first_load_elapsed:.1f} s) — "
                             f"input gaps scaled accordingly."
                         )
+                        if self._diag:
+                            try:
+                                self._diag.log_perf_calibration(
+                                    old_mult=_old_mult,
+                                    new_mult=_new_mult,
+                                    sample_n=len(_recent))
+                            except Exception:
+                                pass
                         # Keep persisted mult in sync
                         self._save_calibration({
                             "machine_id": self._get_machine_id(),
@@ -5836,13 +5988,18 @@ class RelicBotApp(tk.Tk):
         self._async_results_list = None
 
         # ── Diagnostic: close logger (writes summary, stops hook monitor) ──
+        # NOTE: we intentionally keep self._diag around as a closed-but-
+        # readable instance so Export Diagnostics, run immediately after a
+        # run finishes, can still pull live counters and the failure
+        # snapshot.  The next batch run will replace self._diag with a
+        # fresh instance.  We DO clear player.diag because the player
+        # shouldn't keep writing to a closed logger.
         if self._diag:
             try:
                 self._diag.close()
             except Exception:
                 pass
             finally:
-                self._diag = None
                 self.player.diag = None
 
         # ── Backlog mode: process all deferred screenshots ─────────────── #
@@ -6559,6 +6716,40 @@ class RelicBotApp(tk.Tk):
         if _ocr_tokens and self._diag is not None:
             try:
                 self._diag.log_ocr_dump(iteration, step_i, _ocr_tokens)
+            except Exception:
+                pass
+
+        # Track per-relic OCR pipeline health.  This is the v1.7.1 regression
+        # signature watcher: name OCR succeeds but ALL passive slots come back
+        # empty.  If we'd had this in v1.7.1 we'd have caught the laptop bug
+        # in the first cycle instead of the next morning.
+        if self._diag is not None:
+            try:
+                _rf = result.get("relics_found") or []
+                _r0 = _rf[0] if _rf else {}
+                _rname = (_r0 or {}).get("name") if isinstance(_r0, dict) else None
+                _rpass = (_r0 or {}).get("passives", []) if isinstance(_r0, dict) else []
+                _rcurses = (_r0 or {}).get("curses", []) if isinstance(_r0, dict) else []
+                # Increment slot OCR aggregates (counter only — text is gated
+                # to HIGH verbosity to avoid spamming the .diag file).
+                # We log 3 "slot" calls per relic (one per slot crop) so the
+                # passive_hits / curse_hits ratios reflect actual slot health.
+                _passive_hits = len(_rpass)
+                _curse_hits   = len(_rcurses)
+                for _slot in range(3):
+                    self._diag.log_slot_ocr(
+                        current_iter=iteration,
+                        relic_idx=step_i + 1,
+                        slot_idx=_slot,
+                        passive=(_rpass[_slot] if _slot < _passive_hits else None),
+                        curse=(_rcurses[_slot] if _slot < _curse_hits else None),
+                        duration_s=0.0, raw_token_count=0)
+                # Regression signature: name read OK, ALL passives empty.
+                if _rname and not _rpass:
+                    self._diag.log_name_no_passives(
+                        current_iter=iteration,
+                        relic_idx=step_i + 1,
+                        relic_name=_rname)
             except Exception:
                 pass
 
@@ -7978,11 +8169,25 @@ class RelicBotApp(tk.Tk):
                     if _lpm:
                         _p1_gap += 0.10
                     _t_p1_start = time.perf_counter()
-                    self.player.tap("f", hold=_p1_hold)
-                    time.sleep(_p1_gap)
-                    self.player.tap("Key.down", hold=_p1_hold)
-                    time.sleep(_p1_gap)
-                    self.player.tap("f", hold=_p1_hold)
+                    # GPU yield: drain any in-flight readtext before pressing F
+                    # so the game's input poll isn't competing with a GPU stall.
+                    # No-op in CPU mode.
+                    _yield_t0 = time.perf_counter()
+                    with relic_analyzer.input_gpu_yield():
+                        _yield_wait_ms = (time.perf_counter() - _yield_t0) * 1000.0
+                        if self._diag:
+                            try:
+                                self._diag.log_input_yield(
+                                    phase="Phase 1 buy",
+                                    key="f",
+                                    wait_ms=_yield_wait_ms)
+                            except Exception:
+                                pass
+                        self.player.tap("f", hold=_p1_hold)
+                        time.sleep(_p1_gap)
+                        self.player.tap("Key.down", hold=_p1_hold)
+                        time.sleep(_p1_gap)
+                        self.player.tap("f", hold=_p1_hold)
                     _path_name = f"alt (mult {self._perf_gap_mult:.2f}×)"
                     # Keep throttle ON through the settle poll below.
                     # Releasing it here lets async workers run OCR concurrently,
@@ -8151,6 +8356,20 @@ class RelicBotApp(tk.Tk):
                                     f"  [Settle] Slot 0 passive region empty —"
                                     f" advancing to slot 1 and retrying")
                                 _settle_right_skipped = True
+                                if self._diag:
+                                    try:
+                                        self._diag.log_settle(
+                                            slot=0, outcome="empty_slot0",
+                                            duration_s=0.0,
+                                            gap_mult=_settle_gap_mult,
+                                            scaled_budget_s=_settle_budget_s,
+                                            note="firing RIGHT-skip recovery")
+                                        self._diag.log_settle(
+                                            slot=0, outcome="right_skipped",
+                                            gap_mult=_settle_gap_mult,
+                                            scaled_budget_s=_settle_budget_s)
+                                    except Exception:
+                                        pass
                                 try:
                                     self.player.tap("Key.right", hold=0.05)
                                 except Exception:
@@ -8215,12 +8434,30 @@ class RelicBotApp(tk.Tk):
                                             f"  Cycle {_batch_i+1}: settle-retry err: {_se2}")
                                     time.sleep(1.0 + _settle_extra_sleep)
                                     _sc += 1
+                                if _settle_ok and self._diag:
+                                    try:
+                                        self._diag.log_settle(
+                                            slot=1, outcome="accepted",
+                                            gap_mult=_settle_gap_mult,
+                                            scaled_budget_s=_settle_budget_s,
+                                            note="post RIGHT-skip")
+                                    except Exception:
+                                        pass
                                 if not _settle_passive_ever and not _settle_insufficient_murk:
                                     self._log(
                                         f"  Cycle {_batch_i + 1}: settle rejected —"
                                         f" passive region empty on skipped slot —"
                                         f" recovering.")
                                     _settle_no_passives = False
+                                    if self._diag:
+                                        try:
+                                            self._diag.log_settle(
+                                                slot=1, outcome="fallthrough",
+                                                gap_mult=_settle_gap_mult,
+                                                scaled_budget_s=_settle_budget_s,
+                                                note="passive empty after RIGHT-skip")
+                                        except Exception:
+                                            pass
                             elif not _settle_passive_ever:
                                 self._log(
                                     f"  Cycle {_batch_i + 1}: settle rejected —"
@@ -8417,7 +8654,21 @@ class RelicBotApp(tk.Tk):
 
                         # Advance RIGHT for every slot after the first.
                         if _p2_confirmed > 0:
-                            self.player.tap("Key.right", hold=0.05)
+                            # GPU yield: drain any in-flight readtext before pressing RIGHT
+                            # so the game's input poll doesn't get dropped during a GPU stall.
+                            # No-op in CPU mode.
+                            _yield_t0 = time.perf_counter()
+                            with relic_analyzer.input_gpu_yield():
+                                _yield_wait_ms = (time.perf_counter() - _yield_t0) * 1000.0
+                                if self._diag:
+                                    try:
+                                        self._diag.log_input_yield(
+                                            phase="Phase 2 advance",
+                                            key="right",
+                                            wait_ms=_yield_wait_ms)
+                                    except Exception:
+                                        pass
+                                self.player.tap("Key.right", hold=0.05)
                             _p2_advance_settle = 0.20 * max(1.0, self._perf_gap_mult)
                             time.sleep(_p2_advance_settle)
                             if not self.bot_running or self._reset_iter_requested:
@@ -8493,6 +8744,15 @@ class RelicBotApp(tk.Tk):
                                     _p2_duplicate_count += 1
                                     self._iter_input_drop_count += 1
                                     self._clean_cycles_since_suppress = 0
+                                    if self._diag:
+                                        try:
+                                            self._diag.log_advance(
+                                                cycle=_batch_i + 1,
+                                                idx=_p2_confirmed,
+                                                outcome="dup_accepted",
+                                                retries=_P2_MAX_RETRIES)
+                                        except Exception:
+                                            pass
                                     if (self._iter_input_drop_count > 2
                                             and not self._iter_gpu_aa_suppressed):
                                         self._iter_gpu_aa_suppressed = True
@@ -8503,11 +8763,29 @@ class RelicBotApp(tk.Tk):
                                                 " remainder of iteration —"
                                                 " auto-suppress fired twice."
                                                 " Will retry next iteration.")
+                                            if self._diag:
+                                                try:
+                                                    self._diag.log_gpu_aa(
+                                                        event="final_latch",
+                                                        current_iter=iteration,
+                                                        drops=self._iter_input_drop_count,
+                                                        suppress_count=self._iter_suppress_count)
+                                                except Exception:
+                                                    pass
                                         else:
                                             self._log(
                                                 "  [GPU AA] Auto-suppressed for remainder"
                                                 " of iteration — 3+ input drops detected."
                                                 " Will retry next iteration.")
+                                            if self._diag:
+                                                try:
+                                                    self._diag.log_gpu_aa(
+                                                        event="auto_suppress",
+                                                        current_iter=iteration,
+                                                        drops=self._iter_input_drop_count,
+                                                        suppress_count=self._iter_suppress_count)
+                                                except Exception:
+                                                    pass
                                     # Advance the slot counter without counting this as a
                                     # fresh relic scan or re-analyzing the duplicate image.
                                     # _p2_prev_crop stays as-is so the next RIGHT press
@@ -8843,6 +9121,15 @@ class RelicBotApp(tk.Tk):
                                 self._log(
                                     "  [GPU AA] Re-enabled — 10 clean cycles"
                                     " since suppression.")
+                                if self._diag:
+                                    try:
+                                        self._diag.log_gpu_aa(
+                                            event="re_enable",
+                                            current_iter=iteration,
+                                            drops=self._iter_input_drop_count,
+                                            suppress_count=self._iter_suppress_count)
+                                    except Exception:
+                                        pass
 
                     _p2_duplicates_total += _p2_duplicate_count
                     if _p2_duplicate_count:
@@ -8897,6 +9184,41 @@ class RelicBotApp(tk.Tk):
                         except Exception as _p3ve:
                             _p3v_reason = f"error: {_p3ve}"
 
+                        # Cheap retry: tooltip OCR can be inconclusive on a
+                        # single bad frame.  One re-grab + re-OCR before
+                        # escalating to ESC recovery saves a multi-second
+                        # detour for what is usually a transient frame issue.
+                        if not _p3_verify_ok:
+                            try:
+                                time.sleep(0.25)
+                                _p3v_img = screen_capture.capture(region)
+                                _p3_verify_ok, _p3v_reason2 = (
+                                    relic_analyzer.verify_shop_item(
+                                        _p3v_img, self.relic_type_var.get()))
+                                if _p3_verify_ok:
+                                    self._log(
+                                        f"  Cycle {_batch_i + 1}: Phase 3"
+                                        f" tooltip OCR recovered on retry.")
+                                    if self._diag:
+                                        try:
+                                            self._diag.log_phase3(
+                                                event="tooltip_retry_ok",
+                                                cycle=_batch_i + 1)
+                                        except Exception:
+                                            pass
+                                else:
+                                    _p3v_reason = _p3v_reason2
+                                    if self._diag:
+                                        try:
+                                            self._diag.log_phase3(
+                                                event="tooltip_retry_fail",
+                                                cycle=_batch_i + 1,
+                                                note=_p3v_reason[:60])
+                                        except Exception:
+                                            pass
+                            except Exception as _p3ve2:
+                                _p3v_reason = f"retry error: {_p3ve2}"
+
                         if _p3_verify_ok:
                             self._p3_consecutive_fails = 0
                         else:
@@ -8906,13 +9228,28 @@ class RelicBotApp(tk.Tk):
                                 f" failed — {_p3v_reason} — ESC + Phase 0"
                                 f" recovery. (consecutive fails:"
                                 f" {self._p3_consecutive_fails})")
+                            if self._diag:
+                                try:
+                                    self._diag.log_phase3(
+                                        event="consecutive_fails",
+                                        cycle=_batch_i + 1,
+                                        attempt=self._p3_consecutive_fails,
+                                        note=_p3v_reason[:60])
+                                except Exception:
+                                    pass
                             _esc_ok = self._esc_to_game_screen(region)
                             if not _esc_ok:
                                 self._log(
                                     "  [Phase 3] ESC recovery timed out —"
                                     " escalating to iteration restart")
-                                self._p3_consecutive_fails += 1
                                 self._reset_iter_requested = True
+                                if self._diag:
+                                    try:
+                                        self._diag.log_phase3(
+                                            event="esc_timeout",
+                                            cycle=_batch_i + 1)
+                                    except Exception:
+                                        pass
                                 if _p2_async:
                                     self._async_iter_abort_cleanup(
                                         iteration, _p2_submitted)
@@ -8950,6 +9287,14 @@ class RelicBotApp(tk.Tk):
                                             "[Phase 3] Two consecutive shop-return"
                                             " failures — restarting iteration")
                                         self._reset_iter_requested = True
+                                        if self._diag:
+                                            try:
+                                                self._diag.log_phase3(
+                                                    event="iter_restart",
+                                                    cycle=_batch_i + 1,
+                                                    attempt=self._p3_consecutive_fails)
+                                            except Exception:
+                                                pass
                                         if _exclude_buy_phase:
                                             self._set_ocr_throttle(False)
                                         if capture_only and not _p2_async:
@@ -10050,11 +10395,41 @@ class RelicBotApp(tk.Tk):
         except Exception as e:
             return False, "", f"GPU check error: {e}"
 
+    def _collect_runtime_snapshot(self) -> dict:
+        """Return a serializable dict of live v1.7.x runtime state.
+
+        Installed on the DiagnosticLogger so persist_run_state() can capture
+        these fields alongside the counters and failure aggregator at every
+        iteration boundary.  All values are best-effort — never raises.
+        """
+        try:
+            return {
+                "window_title":               self.title(),
+                "perf_gap_mult":              float(getattr(self, "_perf_gap_mult", 1.0)),
+                "p3_consecutive_fails":       int(getattr(self, "_p3_consecutive_fails", 0)),
+                "iter_input_drop_count":      int(getattr(self, "_iter_input_drop_count", 0)),
+                "iter_gpu_aa_suppressed":     bool(getattr(self, "_iter_gpu_aa_suppressed", False)),
+                "iter_suppress_count":        int(getattr(self, "_iter_suppress_count", 0)),
+                "clean_cycles_since_suppress": int(getattr(self, "_clean_cycles_since_suppress", 0)),
+                "reset_iter_requested":       bool(getattr(self, "_reset_iter_requested", False)),
+                "bot_running":                bool(getattr(self, "bot_running", False)),
+            }
+        except Exception:
+            return {}
+
     def _export_diagnostics(self):
         """
         Collect system/GPU/file diagnostics into a small text file and open it.
         The user can then share this file for remote diagnosis without
         needing to copy the entire bot folder.
+
+        The "Live" sections (runtime snapshot, counters, failure
+        classification) prefer the in-memory self._diag if a run was
+        active in this session, but fall back to the persisted
+        last_run_diag.json from disk if the app was restarted between
+        the run and this export call.  The persisted snapshot is wiped
+        only when a NEW batch run starts — so the previous run's data is
+        always available until the user explicitly starts a fresh run.
         """
         import datetime
         import pathlib as _pl
@@ -10150,6 +10525,176 @@ class RelicBotApp(tk.Tk):
             lines.append(f"Phase 3 configured:      {bool(self.phase_events[3])}")
         except Exception as e:
             lines.append(f"[settings read error: {e}]")
+        lines.append("")
+
+        # ── Resolve last-run data source: live diag instance if present,
+        #    otherwise fall back to the persisted JSON snapshot on disk.
+        _last = None       # dict with keys: counters, failures, runtime, source
+        try:
+            from bot.diagnostic import load_persisted_run_state
+            if getattr(self, "_diag", None) is not None:
+                _last = {
+                    "counters": self._diag.get_event_counters(),
+                    "failures": self._diag.get_failure_snapshot(),
+                    "runtime":  self._collect_runtime_snapshot(),
+                    "source":   "live (current app session)",
+                }
+            else:
+                _persisted = load_persisted_run_state()
+                if _persisted:
+                    _last = _persisted
+                    _last["source"] = (
+                        f"persisted (run finished "
+                        f"{_persisted.get('finished_at', 'unknown')})"
+                    )
+        except Exception as _le:
+            lines.append(f"[live/persisted state load error: {_le}]")
+            _last = None
+
+        # ── v1.7.x runtime snapshot ───────────────────────────────────── #
+        lines.append("=== v1.7.x Runtime Snapshot ===")
+        if _last is None:
+            lines.append("[no run data — no batch has been run yet]")
+        else:
+            lines.append(f"Source: {_last.get('source', 'unknown')}")
+            _rt = _last.get("runtime") or {}
+            try:
+                lines.append(f"Window title:           {_rt.get('window_title', '?')}")
+                lines.append(f"Perf gap mult:          {_rt.get('perf_gap_mult', 0.0):.3f}×")
+                lines.append(f"Phase 3 cons. fails:    {_rt.get('p3_consecutive_fails', 0)}")
+                lines.append(f"Iter input drops:       {_rt.get('iter_input_drop_count', 0)}")
+                lines.append(f"Iter GPU AA suppressed: {_rt.get('iter_gpu_aa_suppressed', False)}")
+                lines.append(f"Iter suppress count:    {_rt.get('iter_suppress_count', 0)}")
+                lines.append(f"Clean cycles since sup: {_rt.get('clean_cycles_since_suppress', 0)}")
+                lines.append(f"Reset iter requested:   {_rt.get('reset_iter_requested', False)}")
+                lines.append(f"Bot running:            {_rt.get('bot_running', False)}")
+            except Exception as _re:
+                lines.append(f"[runtime snapshot render error: {_re}]")
+        lines.append("")
+
+        # ── Live diagnostic counters ──────────────────────────────────── #
+        lines.append("=== Diagnostic Counters (last run) ===")
+        if _last is None:
+            lines.append("[no run data]")
+        else:
+            _ec = _last.get("counters") or {}
+            _groups = [
+                ("Settle / Phase 1", [
+                    "settle_total", "settle_empty_slot0",
+                    "settle_right_skipped", "settle_accepted",
+                    "settle_fallthrough", "buy_fail_in_place"]),
+                ("Phase 2 advance", [
+                    "advance_total", "advance_dup_accepted", "advance_drop"]),
+                ("Phase 3", [
+                    "p3_tooltip_retry_ok", "p3_tooltip_retry_fail",
+                    "p3_esc_timeout", "p3_consecutive_fails",
+                    "p3_iter_restart"]),
+                ("Phase -0.5 / load", [
+                    "black_frame_extends", "black_frame_ceiling"]),
+                ("MenuNav", [
+                    "menunav_recalcs", "menunav_doubling_hits",
+                    "menunav_budget_busted"]),
+                ("GPU AA", [
+                    "gpu_aa_suppressions", "gpu_aa_re_enables",
+                    "gpu_aa_final_latches"]),
+                ("Input GPU yield", [
+                    "input_yield_calls", "input_yield_wait_ms",
+                    "input_yield_max_ms"]),
+                ("Nav worker", [
+                    "nav_worker_starts", "nav_worker_timeouts",
+                    "nav_worker_deaths", "nav_worker_restarts",
+                    "nav_worker_inline_fb"]),
+                ("Async / backlog", [
+                    "async_submits", "async_completes", "async_errors",
+                    "async_hits", "backlog_flushes"]),
+                ("OCR pipeline", [
+                    "slot_ocr_calls", "slot_ocr_passive_hits",
+                    "slot_ocr_curse_hits", "curse_misses"]),
+                ("Doors / matching", [
+                    "door_gen_calls", "door_total_generated",
+                    "compat_rejects", "duplicate_skips"]),
+                ("Game state", [
+                    "game_launches", "game_launch_fails",
+                    "save_restores", "perf_recalibrations"]),
+            ]
+            for _gname, _keys in _groups:
+                lines.append(f"-- {_gname} --")
+                for _k in _keys:
+                    if _k in _ec:
+                        lines.append(f"  {_k:28s} {_ec[_k]}")
+        lines.append("")
+
+        # ── Failure classification breakdown ──────────────────────────── #
+        lines.append("=== Failure Classification (last run) ===")
+        if _last is None:
+            lines.append("[no run data]")
+        else:
+            _snap = _last.get("failures") or {}
+            lines.append(f"Total failures: {_snap.get('total', 0)}")
+            if _snap.get('cat_counts'):
+                lines.append("By category:")
+                for _cat in ("SYSTEM", "INPUT", "OCR", "STATE", "USER"):
+                    _n = _snap['cat_counts'].get(_cat, 0)
+                    if _n:
+                        lines.append(f"  {_cat:8s}  {_n}")
+            if _snap.get('severity_counts'):
+                lines.append("By severity:")
+                for _sev in ("INFO", "WARN", "ERROR", "FATAL"):
+                    _n = _snap['severity_counts'].get(_sev, 0)
+                    if _n:
+                        lines.append(f"  {_sev:6s}  {_n}")
+            if _snap.get('counts'):
+                lines.append("Top subcategories:")
+                _sorted = sorted(_snap['counts'].items(),
+                                 key=lambda kv: kv[1], reverse=True)
+                for _key, _n in _sorted[:15]:
+                    lines.append(f"  {_key:50s}  {_n}")
+            if _snap.get('recent'):
+                lines.append("")
+                lines.append("Most recent 10 failures (full evidence):")
+                for _rec in _snap['recent'][-10:]:
+                    _ev = _rec.get('evidence', {})
+                    _ev_str = "  ".join(f"{k}={v}" for k, v in _ev.items())
+                    lines.append(
+                        f"  [{_rec.get('ts_str', '?')}]  {_rec.get('severity', '?'):5s}  "
+                        f"{_rec.get('category', '?')}/{_rec.get('subcategory', '?')}"
+                    )
+                    if _ev_str:
+                        lines.append(f"      {_ev_str}")
+        lines.append("")
+
+        # ── Curse miss index ──────────────────────────────────────────── #
+        lines.append("=== Curse Miss Captures ===")
+        try:
+            _bdir = _pl.Path(self.batch_output_var.get())
+            _runs = sorted([d for d in _bdir.iterdir() if d.is_dir()],
+                           key=lambda d: d.stat().st_mtime, reverse=True)
+            _miss_count = 0
+            for _run in _runs[:3]:   # last 3 runs
+                _cmd = _run / "curse_misses"
+                if _cmd.is_dir():
+                    _pngs = sorted(_cmd.glob("*.png"))
+                    if _pngs:
+                        lines.append(f"Run: {_run.name}  ({len(_pngs)} miss(es))")
+                        for _png in _pngs[:20]:
+                            _txt = _png.with_suffix(".txt")
+                            _raw = ""
+                            if _txt.exists():
+                                try:
+                                    for _line in _txt.read_text(
+                                            encoding="utf-8",
+                                            errors="replace").splitlines():
+                                        if _line.startswith("Raw concatenated text:"):
+                                            _raw = _line.split(":", 1)[1].strip()
+                                            break
+                                except Exception:
+                                    pass
+                            lines.append(f"  {_png.name}  raw={_raw[:80]}")
+                            _miss_count += 1
+            if _miss_count == 0:
+                lines.append("[no curse misses captured]")
+        except Exception as _me:
+            lines.append(f"[curse miss index error: {_me}]")
         lines.append("")
 
         # ── Most recent .diag file ────────────────────────────────────── #

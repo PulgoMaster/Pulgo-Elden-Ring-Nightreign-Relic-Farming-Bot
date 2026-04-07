@@ -196,6 +196,33 @@ def nav_ocr(crop_bgr, *, name_only=False, **kw):
         return _nav_inline_fallback(crop_bgr, kw)
 
 
+import contextlib
+
+@contextlib.contextmanager
+def input_gpu_yield():
+    """Pause GPU analysis workers around a critical game input.
+
+    Mirrors the nav_ocr GPU priority gate, but yields to the caller instead
+    of running OCR.  Sets _nav_wants_gpu so analysis workers stop spawning
+    new readtext calls, then acquires _gpu_inflight_lock so any in-flight
+    readtext drains before the caller's input is sent.  This eliminates the
+    "input drop" race where the game misses a key press while the GPU is
+    saturated by an analysis readtext.
+
+    No-op in CPU mode — CPU OCR workers don't cause input drops the same
+    way the GPU contention does.
+    """
+    if not _gpu_mode_enabled:
+        yield
+        return
+    _nav_wants_gpu.set()
+    try:
+        with _gpu_inflight_lock:
+            yield
+    finally:
+        _nav_wants_gpu.clear()
+
+
 # ── EasyOCR reader — one instance per thread ─────────────────────────── #
 #
 # EasyOCR is not thread-safe when sharing a single Reader instance.
@@ -354,20 +381,26 @@ _MAX_OCR_WIDTH = 1000
 # confirmed across Grand/Polished/Delicate, Normal and Deep.
 #
 # The X range covers the text area of the relic detail panel.
-_SLOT_X_START = 0.27     # fraction of screen width (left edge of text)
+_SLOT_X_START = 0.348    # fraction of screen width — passive/curse text (past icons)
 _SLOT_X_END   = 0.73     # fraction of screen width (right edge of text)
+# Name crop needs a WIDER x range than slot crops because the relic name
+# starts to the LEFT of where passive icons sit (verified at px 680 / 0.266
+# on a 2560x1440 screenshot — the "D" of "Deep Grand Tranquil Scene").
+# Using _SLOT_X_START for the name crop would cut off "Deep Grand".
+_NAME_X_START = 0.330    # fraction of screen width (post-icon, pre-text gap)
+_NAME_X_END   = 0.73     # fraction of screen width (right edge of relic name)
 
 # Each slot: (passive_y_center, curse_y_center) as fraction of screen height.
 # The passive line is ~0.8% tall, curse line is ~0.8% tall.
 # We crop +/- 1.5% around each center to capture the full text line.
 # Each slot center covers the full passive (1-2 lines) + optional curse.
 # Slot height of +/- 3.2% captures both without overlapping adjacent slots.
-_SLOT_CENTERS = [0.600, 0.665, 0.730]   # Y center of each slot
-_SLOT_HALF_HEIGHT = 0.032               # +/- 3.2% of screen height
+_SLOT_CENTERS = [0.595, 0.655, 0.715]   # Y center of each passive+curse pair
+_SLOT_HALF_HEIGHT = 0.028               # +/- 2.8% — disjoint crops, no neighbor bleed
 
 # Relic name position (for extracting the name before passives)
-_NAME_Y_CENTER = 0.547     # ~54.7% of screen height
-_NAME_HALF_HEIGHT = 0.015  # +/- 1.5%
+_NAME_Y_CENTER = 0.548     # measured peak of name text density
+_NAME_HALF_HEIGHT = 0.014  # +/- 1.4% — tight fit around the glyph row
 
 
 def _to_array(image_bytes: bytes, max_width: int = 0) -> np.ndarray:
@@ -697,11 +730,36 @@ def _crop_band(img: np.ndarray, y_center: float, half_height: float,
     return img[y1:y2, x1:x2]
 
 
-def _enhance_curse_pixels(crop: np.ndarray) -> np.ndarray:
-    """Convert blue-dominant text pixels to white for better OCR on curses."""
-    b = crop[:, :, 2].astype(np.int16)
+def _cyan_text_mask(crop: np.ndarray) -> np.ndarray:
+    """Boolean mask of pixels that match the curse-text cyan signature.
+
+    Curse text in-game is light cyan: high G AND high B (so G ≈ B), with
+    R noticeably lower.  Pure-blue UI elements (parchment icons, dialog
+    border, relic crystal) have B much higher than G and fail the |G−B|
+    test.  White passive text has R ≈ G ≈ B and fails the (G−R) test.
+    Dark navy background fails the brightness test.
+
+    This mask is the basis for both _has_curse_pixels (the curse-miss
+    sniff helper) and _is_curse_text (the post-OCR token classifier).
+    """
     r = crop[:, :, 0].astype(np.int16)
-    mask = (b - r > 45) & (b > 110)
+    g = crop[:, :, 1].astype(np.int16)
+    b = crop[:, :, 2].astype(np.int16)
+    return ((g > 140) & (b > 140) &        # bright (text-readable)
+            (g - r > 30) & (b - r > 30) &  # not white
+            (np.abs(g - b) < 40))           # cyan, not pure blue
+
+
+def _enhance_curse_pixels(crop: np.ndarray) -> np.ndarray:
+    """Convert cyan curse-text pixels to white for better OCR.
+
+    Used as the EasyOCR input image so cyan curse text reads as cleanly
+    as white passive text.  Token color classification (passive vs curse)
+    still happens AFTER OCR by sampling the ORIGINAL crop at each
+    token's Y.  Uses the same cyan signature as _cyan_text_mask so we
+    only convert actual curse text, not pure-blue UI elements.
+    """
+    mask = _cyan_text_mask(crop)
     if mask.any():
         out = crop.copy()
         out[mask] = [255, 255, 255]
@@ -710,43 +768,120 @@ def _enhance_curse_pixels(crop: np.ndarray) -> np.ndarray:
 
 
 def _is_curse_text(crop: np.ndarray) -> bool:
-    """Check if the bright text in a crop is blue-tinted (curse) vs white (passive).
+    """Check if a Y-strip contains curse-text cyan pixels (vs passive
+    white text or no text at all).  Uses the cyan-specific mask so pure
+    blue UI elements don't false-positive."""
+    return int(_cyan_text_mask(crop).sum()) >= 8
 
-    Returns True if the bright text pixels have B-R > 30 on average.
-    """
-    gray = np.mean(crop, axis=2)
-    bright = gray > 100
-    if bright.sum() < 10:
-        return False
-    b_bright = float(np.mean(crop[:, :, 2][bright]))
-    r_bright = float(np.mean(crop[:, :, 0][bright]))
-    return (b_bright - r_bright) > 30
+
+def _has_curse_pixels(crop: np.ndarray, min_pixels: int = 25) -> bool:
+    """Sniff helper for curse-miss capture: does the slot crop contain
+    enough cyan-text pixels to plausibly contain an actual curse line?
+    Cyan-specific so dormant power text, parchment icons, and dialog
+    borders don't trigger.  Bumped from 15 to 25 px because the cyan
+    mask is more selective (less risk of one-off pixel noise)."""
+    return int(_cyan_text_mask(crop).sum()) >= min_pixels
+
+
+# Passive-miss hook — fires when a token classified as passive (white text)
+# couldn't be matched against the dictionary.  Lets app.py log dictionary
+# gaps as OCR/passive_no_match failure events without coupling the
+# OCR module to the diagnostic logger.
+_passive_miss_hook = None   # callable(slot_idx, raw_text) -> None
+
+
+def set_passive_miss_hook(fn) -> None:
+    global _passive_miss_hook
+    _passive_miss_hook = fn
+
+
+# ── Curse miss debug capture ──────────────────────────────────────────── #
+# When a slot has detectable blue pixels but no curse matched, we dump the
+# RAW (un-enhanced) color crop as a PNG plus a sidecar with the raw OCR
+# tokens.  Lets us iterate against actual failing screenshots from the
+# laptop instead of guessing thresholds.
+
+_curse_miss_dir: "str | None" = None
+_curse_miss_lock = threading.Lock()
+_curse_miss_count = 0
+_curse_miss_max_per_run = 200   # safety cap so disk doesn't fill up
+_curse_miss_hook = None         # callable(slot_idx, raw_text, dump_path) → None
+
+
+def set_curse_miss_hook(fn) -> None:
+    """app.py installs a callback so curse misses also flow into the
+    DiagnosticLogger.  fn(slot_idx, raw_text, dump_path)."""
+    global _curse_miss_hook
+    _curse_miss_hook = fn
+
+
+def set_curse_miss_dir(path: "str | None") -> None:
+    """app.py calls this when a batch run starts.  Pass None to disable."""
+    global _curse_miss_dir, _curse_miss_count
+    with _curse_miss_lock:
+        _curse_miss_dir = path
+        _curse_miss_count = 0
+        if path:
+            try:
+                import os as _os
+                _os.makedirs(path, exist_ok=True)
+            except Exception:
+                pass
+
+
+def _dump_curse_miss(crop: np.ndarray, slot_idx: int, raw_text: str,
+                     tokens: list) -> "str | None":
+    """Save raw crop + sidecar.  Returns the saved PNG path or None."""
+    global _curse_miss_count
+    with _curse_miss_lock:
+        if not _curse_miss_dir:
+            return None
+        if _curse_miss_count >= _curse_miss_max_per_run:
+            return None
+        _curse_miss_count += 1
+        idx = _curse_miss_count
+    try:
+        import os as _os
+        import datetime as _dt
+        ts = _dt.datetime.now().strftime("%H%M%S_%f")[:-3]
+        base = f"{idx:03d}_slot{slot_idx}_{ts}"
+        png_path = _os.path.join(_curse_miss_dir, base + ".png")
+        txt_path = _os.path.join(_curse_miss_dir, base + ".txt")
+        Image.fromarray(crop).save(png_path)
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(f"Slot index: {slot_idx}\n")
+            f.write(f"Raw concatenated text: {raw_text!r}\n\n")
+            f.write("Tokens:\n")
+            for t in tokens:
+                f.write(f"  conf={t.get('conf', 0):.2f}  "
+                        f"y={int(t.get('y', -1)):4d}  "
+                        f"text={t.get('text', '')!r}\n")
+        return png_path
+    except Exception:
+        return None
 
 
 def _ocr_slot(reader, crop: np.ndarray,
-              all_passives: list, all_curses: list) -> tuple:
+              all_passives: list, all_curses: list,
+              slot_idx: int = -1) -> tuple:
     """OCR a single slot crop and return (passive, curse, dbg_tokens).
 
-    The crop contains one passive line (possibly 2 lines if wrapping) and
-    optionally one curse line below it.  Passive text is white, curse text
-    is light blue.
+    Single readtext on _enhance_curse_pixels(crop), then post-token color
+    classification by sampling the ORIGINAL crop at each token's Y.
+    Reverted from the v1.7.1 two-pass mask approach because its absolute
+    brightness thresholds killed passive OCR on the laptop.
 
     Returns:
         (passive_name or None, curse_name or None, list_of_dbg_token_dicts)
     """
-    h, w = crop.shape[:2]
+    h, _w = crop.shape[:2]
     dbg = []
 
-    # Split the crop into upper half (passive) and lower half (curse candidate)
-    # by finding where text color changes from white to blue.
-    # First, enhance curse pixels for OCR, then run OCR once on the full slot.
     enhanced = _enhance_curse_pixels(crop)
     results = _slot_readtext(reader, enhanced)
-
     if not results:
         return None, None, dbg
 
-    # Collect all tokens with their Y positions
     tokens = []
     for bbox, text, conf in results:
         text = text.strip()
@@ -754,28 +889,25 @@ def _ocr_slot(reader, crop: np.ndarray,
             continue
         y_center = (min(pt[1] for pt in bbox) + max(pt[1] for pt in bbox)) / 2
         x_center = (min(pt[0] for pt in bbox) + max(pt[0] for pt in bbox)) / 2
-        tokens.append({"text": text, "conf": conf, "y": y_center, "x": x_center, "y_frac": y_center / h})
-
+        tokens.append({"text": text, "conf": conf,
+                        "y": y_center, "x": x_center})
     if not tokens:
         return None, None, dbg
 
-    # Split tokens into passive vs curse by checking the ORIGINAL (non-enhanced)
-    # crop color at each token's Y position.
+    # Classify each token as passive vs curse by sampling the ORIGINAL
+    # (un-enhanced) crop's bright pixel color at the token's Y strip.
     passive_tokens = []
-    curse_tokens = []
+    curse_tokens   = []
     for tok in tokens:
         y = int(tok["y"])
-        # Sample a horizontal strip at this token's Y in the original crop
         y1 = max(0, y - 3)
         y2 = min(h, y + 3)
-        strip = crop[y1:y2, :]
-        if _is_curse_text(strip):
+        if _is_curse_text(crop[y1:y2, :]):
             curse_tokens.append(tok)
         else:
             passive_tokens.append(tok)
 
-    # Build passive text from passive tokens (row-bucket then X-sort)
-    def _order_tokens(toks, row_gap=15):
+    def _order(toks, row_gap=15):
         if not toks:
             return []
         ts = sorted(toks, key=lambda t: t["y"])
@@ -792,7 +924,7 @@ def _ocr_slot(reader, crop: np.ndarray,
 
     passive_name = None
     if passive_tokens:
-        passive_text = " ".join(t["text"] for t in _order_tokens(passive_tokens))
+        passive_text = " ".join(t["text"] for t in _order(passive_tokens))
         passive_name = _match_passive(passive_text, all_passives, cutoff=0.75)
         for t in passive_tokens:
             dbg.append({
@@ -801,11 +933,18 @@ def _ocr_slot(reader, crop: np.ndarray,
                 "reason": "slot_ocr",
                 "matched": passive_name,
             })
+        # Passive miss capture: white text was OCR'd but the dictionary
+        # couldn't find a match.  Fires for unknown passives, mangled
+        # OCR, and any dictionary gaps in passives.py.
+        if passive_name is None and _passive_miss_hook:
+            try:
+                _passive_miss_hook(slot_idx, passive_text)
+            except Exception:
+                pass
 
-    # Build curse text from curse tokens
     curse_name = None
     if curse_tokens:
-        curse_text = " ".join(t["text"] for t in _order_tokens(curse_tokens))
+        curse_text = " ".join(t["text"] for t in _order(curse_tokens))
         curse_name = _match_passive(curse_text, all_curses, cutoff=0.75)
         for t in curse_tokens:
             dbg.append({
@@ -814,6 +953,19 @@ def _ocr_slot(reader, crop: np.ndarray,
                 "reason": "slot_ocr",
                 "matched": curse_name,
             })
+
+    # Curse miss capture (TIGHTENED): only fire when OCR actually
+    # classified tokens as curse-colored (cyan via _is_curse_text on
+    # their y-strip) AND the dictionary couldn't match them.  No more
+    # dumping for every slot with incidental blue pixels.
+    if curse_tokens and curse_name is None:
+        raw_text = " ".join(t["text"] for t in curse_tokens)
+        _dump_path = _dump_curse_miss(crop, slot_idx, raw_text, curse_tokens)
+        if _curse_miss_hook:
+            try:
+                _curse_miss_hook(slot_idx, raw_text, _dump_path or "")
+            except Exception:
+                pass
 
     return passive_name, curse_name, dbg
 
@@ -838,7 +990,8 @@ def _ocr_by_slots(img_full: np.ndarray, reader,
         (relic_name, passives_list, curses_list, dbg_tokens_list)
     """
     # OCR the relic name
-    name_crop = _crop_band(img_full, _NAME_Y_CENTER, _NAME_HALF_HEIGHT)
+    name_crop = _crop_band(img_full, _NAME_Y_CENTER, _NAME_HALF_HEIGHT,
+                            x_start=_NAME_X_START, x_end=_NAME_X_END)
     name_results = _slot_readtext(reader, name_crop)
     # Sort name tokens left-to-right by X position for correct word order
     _name_tokens = [(min(pt[0] for pt in bbox), t.strip())
@@ -867,7 +1020,7 @@ def _ocr_by_slots(img_full: np.ndarray, reader,
     for slot_idx, slot_center in enumerate(_SLOT_CENTERS):
         slot_crop = _crop_band(img_full, slot_center, _SLOT_HALF_HEIGHT)
         passive, curse, slot_dbg = _ocr_slot(
-            reader, slot_crop, all_passives, all_curses)
+            reader, slot_crop, all_passives, all_curses, slot_idx=slot_idx)
 
         if passive and passive not in passives:
             passives.append(passive)

@@ -4,6 +4,64 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.7.2] — 2026-04-07 — OCR REGION REWORK + CYAN CURSE DETECTION + DEEP DIAGNOSTICS
+
+### OCR Crop Geometry Rework
+- **Slot crops now skip the parchment icon and dialog border entirely.** `_SLOT_X_START` raised from 0.27 to 0.348 — eliminates ~95% of non-text pixels feeding into EasyOCR. Smaller crop = faster OCR with no loss of legibility.
+- **Slot Y centers re-tuned** to `[0.595, 0.655, 0.715]` (from `[0.600, 0.665, 0.730]`) — measured against actual passive + curse pair positions in the game UI. Each slot now centers exactly on the midpoint of its passive line and curse line.
+- **Slot half-height reduced** from 0.032 to 0.028 — adjacent slot crops are now disjoint with a small gap between them. Eliminates the slot 1 → slot 2 text bleed that was contaminating OCR for cursed Deep relics with all three slots populated.
+- **Separate name crop region** — `_NAME_X_START = 0.330` (skips relic thumbnail), `_NAME_Y_CENTER = 0.548`, `_NAME_HALF_HEIGHT = 0.014` (tighter fit around the glyph row, no wasted dialog header).
+- All geometry verified against both 1080p and 1440p captures — fractions are resolution-independent and the same constants work on both.
+
+### Cyan-Specific Curse Detection
+- **Replaced "blue pixel" curse detection with cyan-specific detection.** Curse text in-game is light cyan (high G AND high B with R noticeably lower) — distinct from pure blue UI elements (parchment icons, dialog borders, the relic thumbnail crystal).
+- New `_cyan_text_mask()` shared between `_enhance_curse_pixels`, `_is_curse_text`, and `_has_curse_pixels`. Mask: `(G > 140) & (B > 140) & (G - R > 30) & (B - R > 30) & (|G - B| < 40)`.
+- Pure-blue UI elements no longer trigger curse pixel detection. White passive text no longer triggers it either.
+- `_is_curse_text` (post-OCR token classifier) now correctly routes only actual cyan text into the curse token bucket — no more dormant power text or icon edges getting misclassified as curses.
+
+### Curse Miss Capture (Targeted)
+- New per-batch debug capture: when OCR detects cyan curse tokens but `_match_passive` cannot find a match in the curse dictionary, the raw color crop is dumped to `<batch_run>/curse_misses/<idx>_slot<n>_<ts>.png` with a `.txt` sidecar containing the raw OCR tokens.
+- Capture gate is post-OCR: only fires when actual cyan tokens were classified, not on every slot with incidental blue chroma.
+- Cap of 200 dumps per run as a disk-fill safety net.
+
+### Diagnostic Logger Expansion
+- First update to `bot/diagnostic.py` since v1.6.1. **25 new logging methods** covering every feature shipped since: settle events, P2 advance/duplicate, P3 tooltip retry/recovery, P-0.5 black-frame timeouts, MenuNav recalc-on-doubling, GPU AA suppression, input GPU yield gate timing, async backlog, slot OCR pipeline, door generation, game launches, save restores, perf calibration, profile loads.
+- **48 aggregate counters** tracked per run, exposed via `get_event_counters()`.
+- **Verbosity knob** (`low / normal / high`) gates the spammy per-event lines. NORMAL keeps the diag file readable; HIGH includes per-token detail.
+
+### Failure Classifier
+- New `bot/failure_classifier.py` module — every recoverable failure event is now categorized as **SYSTEM** (game/hardware/network), **INPUT** (key delivery), **OCR** (text reading), **STATE** (bot logic), or **USER** (human interference) with severity **INFO / WARN / ERROR / FATAL**.
+- `FailureAggregator` keeps thread-safe rolling counts and a bounded list of recent records with full evidence dicts.
+- Lets you (and the developer reading the .diag file) immediately answer "did the system fail us, or did the program fail us?" for every recovery event in a run.
+
+### v1.7.1 Regression Signature Watcher
+- New post-analyze check: when name OCR succeeds but ALL passive slots come back empty, fires `OCR/name_ok_passives_empty ERROR` immediately on the first relic. Would have caught the v1.7.1 OCR mask regression on cycle 1 instead of overnight.
+
+### Persistent Last-Run Snapshot
+- `last_run_diag.json` written next to the executable on every iteration end and on close. Contains counters, failure aggregator snapshot, and runtime state (perf gap mult, GPU AA suppression flags, P3 fail counter, etc.).
+- Survives app restart. The "Export Diagnostics" button now resolves data from either the live in-memory logger or the persisted JSON automatically — you can stop a run, close the bot, reopen it days later, and still export the full diagnostic for the previous run.
+- Persisted snapshot is wiped only when the next batch run starts.
+
+### Export Diagnostics Overhaul
+- Three new sections in the exported report:
+  - **v1.7.x Runtime Snapshot** — perf mult, GPU AA state, P3 fail counter, suppression state, etc.
+  - **Diagnostic Counters (last run)** — 12 grouped key-value blocks covering every feature.
+  - **Failure Classification (last run)** — totals, per-category, per-severity, top 15 subcategories, and the most recent 10 failures with full evidence.
+- Plus a **Curse Miss Captures** index that scans the last 3 batch run folders for `curse_misses/*.png` and lists each with its raw OCR text.
+- Source attribution on every section ("live (current app session)" vs "persisted (run finished YYYY-MM-DD HH:MM:SS)").
+
+### Reliability (preserved from v1.7.0/1.7.1)
+- **Input GPU yield gate** — Phase 1 F-press and Phase 2 RIGHT presses now drain any in-flight EasyOCR call before sending input. Eliminates the cascade where GPU Always Analyze starves the game's input poll.
+- **MenuNav recalc-on-unexpected-position** — when an input gets doubled (single tap registers as two), the navigator accepts the new position, recomputes the path, and continues instead of bailing to ESC recovery. Budget: 4 recalcs per navigation.
+- **Phase 3 tooltip retry** — single re-grab + re-OCR after 0.25 s before falling through to ESC + Phase 0 recovery, for transient frame issues.
+- **Phase 3 consecutive-fails escalation** — two consecutive Phase 3 shop-return failures escalate to iteration restart instead of looping forever.
+- **Navigator OCR isolation** — Phase 1 settle OCR runs on a dedicated CPU reader (in CPU mode) or jumps the GPU queue via priority lock (in GPU mode), so navigation OCR never starves on shared resources.
+- **Slot-based OCR pipeline** — replaces the legacy line-reconstruction path. Each slot is OCR'd independently which eliminates cross-line token contamination.
+- **GPU AA auto-suppression with 2-suppression latch** — three input drops in one iteration auto-suppresses GPU Always Analyze for the rest of that iteration. Re-enables after 10 clean cycles. Latches permanently after the second suppression to avoid oscillation.
+- **Phase -0.5 black-frame ceiling** — cumulative 10-minute cap on black-frame timeout extension. Prevents the load wait from spinning forever if the monitor never wakes.
+
+---
+
 ## [1.6.5] — 2026-04-04 — ENHANCED PROBABILITY ENGINE + UI OVERHAUL
 
 ### Probability Engine
