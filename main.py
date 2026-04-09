@@ -168,9 +168,46 @@ if getattr(sys, "frozen", False):
 from ui.app import RelicBotApp
 
 
+def _set_high_res_timer():
+    """
+    Raise Windows multimedia timer resolution to 1ms for the bot process.
+
+    Default Windows timer resolution is 15.6ms, which makes time.sleep() jittery
+    by up to ~15ms. Phase 2 RIGHT presses use a 50ms hold via time.sleep(0.05);
+    under GPU contention this can stretch to 100-150ms, long enough for the game
+    to register the cursor key on multiple frames and double-advance.
+
+    timeBeginPeriod(1) makes time.sleep accurate to ~1ms across the entire
+    process, eliminating the jitter source. Paired with timeEndPeriod(1) on exit.
+
+    Returns True if the resolution was successfully raised, False otherwise.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        return ctypes.windll.winmm.timeBeginPeriod(1) == 0  # TIMERR_NOERROR == 0
+    except Exception:
+        return False
+
+
+def _restore_timer():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.winmm.timeEndPeriod(1)
+    except Exception:
+        pass
+
+
 def main():
-    app = RelicBotApp()
-    app.mainloop()
+    _set_high_res_timer()
+    try:
+        app = RelicBotApp()
+        app.mainloop()
+    finally:
+        _restore_timer()
 
 
 if __name__ == "__main__":

@@ -192,10 +192,25 @@ class DiagnosticLogger:
             "settle_murk_recheck":  0,
             "buy_fail_in_place":    0,
 
+            # Phase 1 buy-quantity verification (X/N OCR)
+            "buy_qty_verified":      0,
+            "buy_qty_corrected_q":   0,
+            "buy_qty_corrected_esc": 0,
+            "buy_qty_unrecoverable": 0,
+            "buy_qty_ocr_fail":      0,
+            "buy_qty_drift_detected": 0,
+            "buy_qty_fallback_murk": 0,
+
             # Phase 2 / advance
             "advance_total":        0,
             "advance_dup_accepted": 0,
             "advance_drop":         0,
+            "p2_wraparound_skip":   0,   # cur capture matched an EARLIER (not immediate) slot
+            "p2_input_drop_skip":   0,   # cur capture matched the IMMEDIATELY previous slot
+            "p2_recovery_attempts": 0,   # extra RIGHT presses beyond batch_size used to find missed relics
+            "p2_recovery_success":  0,   # cycles where recovery found all batch_size unique
+            "p2_relics_lost":       0,   # relics permanently lost (cycle ended without finding all)
+            "p2_cycles_short":      0,   # cycles that ended with confirmed < batch_size
 
             # Phase 3
             "p3_tooltip_retry_ok":   0,
@@ -780,25 +795,81 @@ class DiagnosticLogger:
                          {"cycle": cycle, **(evidence or {})},
                          severity=WARN)
 
+    def log_buy_qty(self, event: str, cycle: int = 0, expected: int = 0,
+                    got: int = 0, n_cap: int = 0, conf: float = 0.0,
+                    cost: int = 0, attempt: int = 0,
+                    note: str = "") -> None:
+        """event: verified | corrected_q | corrected_esc | unrecoverable
+                  | ocr_fail | drift_detected | fallback_murk
+
+        verified       — X==expected, no correction needed
+        corrected_q    — X != expected, Q-back retry succeeded
+        corrected_esc  — Q retries exhausted, ESC reset retry succeeded
+        unrecoverable  — both Q and ESC paths exhausted, abort iteration
+        ocr_fail       — OCR returned nothing parseable
+        drift_detected — X/N and murk-cost cross-check disagreed
+        fallback_murk  — X/N OCR uncertain, used murk-derived value instead
+        """
+        key = f"buy_qty_{event}"
+        if key in self._ev:
+            self._ev[key] += 1
+        self._write(
+            f"  BUY_QTY  {event:18s}  cyc={cycle}  exp={expected}  "
+            f"got={got}/{n_cap}  conf={conf:.2f}  cost={cost}  att={attempt}"
+            + (f"  {note}" if note else "")
+        )
+        if event == "ocr_fail":
+            self.log_failure(OCR, "buy_qty_ocr_fail",
+                             {"cycle": cycle, "expected": expected,
+                              "attempt": attempt}, severity=WARN)
+        elif event == "drift_detected":
+            self.log_failure(OCR, "buy_qty_drift",
+                             {"cycle": cycle, "got": got, "cost": cost},
+                             severity=WARN)
+        elif event == "unrecoverable":
+            self.log_failure(STATE, "buy_qty_unrecoverable",
+                             {"cycle": cycle, "expected": expected,
+                              "got": got}, severity=ERROR)
+
     # ── Phase 2 / advance ────────────────────────────────────────────────── #
 
     def log_advance(self, cycle: int, idx: int, outcome: str,
                     retries: int = 0, note: str = "") -> None:
-        """outcome: confirmed | duplicate | drop | dup_accepted"""
+        """outcome: confirmed | duplicate | drop | dup_accepted
+                    | wraparound_skip | input_drop_skip
+                    | recovery_success | relic_lost | cycle_short"""
         self._ev["advance_total"] += 1
         if outcome == "dup_accepted":
             self._ev["advance_dup_accepted"] += 1
         elif outcome == "drop":
             self._ev["advance_drop"] += 1
+        elif outcome == "wraparound_skip":
+            self._ev["p2_wraparound_skip"] += 1
+        elif outcome == "input_drop_skip":
+            self._ev["p2_input_drop_skip"] += 1
+        elif outcome == "recovery_success":
+            self._ev["p2_recovery_success"] += 1
+        elif outcome == "relic_lost":
+            self._ev["p2_relics_lost"] += 1
+        elif outcome == "cycle_short":
+            self._ev["p2_cycles_short"] += 1
         if not self._verb_at_least(VERBOSITY_HIGH) and outcome == "confirmed":
             return
         self._write(
-            f"  ADVANCE  cyc={cycle}  idx={idx}  {outcome:12s}  retries={retries}"
+            f"  ADVANCE  cyc={cycle}  idx={idx}  {outcome:18s}  retries={retries}"
             + (f"  {note}" if note else "")
         )
         if outcome == "drop":
             self.log_failure(INPUT, "right_advance_drop",
                              {"cycle": cycle, "idx": idx, "retries": retries},
+                             severity=WARN)
+        elif outcome == "wraparound_skip":
+            self.log_failure(INPUT, "right_advance_doubled",
+                             {"cycle": cycle, "idx": idx},
+                             severity=WARN)
+        elif outcome == "relic_lost":
+            self.log_failure(STATE, "p2_relic_unrecoverable",
+                             {"cycle": cycle, "idx": idx, "note": note},
                              severity=WARN)
 
     def log_cycle_summary(self, cycle: int, confirmed: int,

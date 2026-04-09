@@ -4,6 +4,96 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.7.2] — 2026-04-08 — PHASE 1 BUY-QUANTITY VERIFICATION + RIGHT-KEY DOUBLING ELIMINATED + GPU PRIORITY HARDENING
+
+### Phase 2 RIGHT-key doubling — root cause and fix
+
+Even after the Phase 1 buy-quantity fix shipped (see "PHASE 1 BUY-QUANTITY VERIFICATION" below), a residual ~10% of cycles were still producing in-cycle duplicate relics. The root cause turned out to be a separate failure mode: **the Phase 2 RIGHT key was occasionally registering as a double press**, causing the cursor to skip a slot. The 10-item circular menu then wrapped at the end, and the originally-skipped slot was re-recorded as a duplicate of an already-scanned slot.
+
+Three fixes layered together eliminated this entirely:
+
+**1. Windows high-resolution timer (`main.py`)**
+Default Windows multimedia timer resolution is ~15.6 ms, which makes `time.sleep(0.05)` jitter by up to ~15 ms. Under GPU contention from concurrent OCR, sleeps could stretch the effective key hold from 50 ms to 100–150 ms — long enough for the game to sample the cursor key on multiple frames. New `_set_high_res_timer()` calls `winmm.timeBeginPeriod(1)` at startup, paired with `_restore_timer()` (`timeEndPeriod(1)`) on exit. Tightens **all** `time.sleep` calls across the bot from ±15 ms to ±1 ms.
+
+**2. Phase 2 RIGHT hold shortened (`ui/app.py`)**
+The Phase 2 RIGHT advance press now uses `hold=0.02` (was `0.05`). At 60 fps that's roughly 1.2 game frames — long enough for the game to register the key-down edge, short enough that the key is released before the next frame can re-sample it. Other tap sites (Phase 0 / 1 / 3) keep `hold=0.05` since they're not in tight GPU-contended loops and have never doubled.
+
+**3. Strict nav-priority gate in `_slot_readtext` (`bot/relic_analyzer.py`)**
+The original `_wait_for_nav_yield()` only checked `_nav_wants_gpu` once per call — multiple worker threads could pass the gate before the flag was set, queue up at `_gpu_inflight_lock`, and force `input_gpu_yield()` to wait for the entire chain. Workers now re-check `_nav_wants_gpu.is_set()` **after** acquiring the lock and immediately release if the consumer arrived during the acquire race.
+
+### GPU priority architecture — verified and hardened
+
+The bot already had a one-GPU-worker-with-priority-gate architecture for OCR analysis vs game inputs. This release verifies and tightens it:
+
+- **All worker spawn sites now cap GPU mode at 1 worker.** Async path, async hybrid, backlog GPU, and backlog hybrid were already correct. Phase 4 review pipelined OCR was previously capped at 4 — fixed in this release.
+- **Phase 4 review worker shutdown is now leak-proof.** Previously, an early-return from Phase 4 (bot stopped, capture error, or analyze exception) used `_t.join(timeout=1.0)` without draining the task queue first — workers could outlive Phase 4 by several seconds and compete with the next iteration's Phase 2 inputs. New `_stop_workers()` helper drains the queue, sets `_capture_done`, joins with a 5 s timeout, and logs a warning if any worker fails to exit. All four Phase 4 exit paths now route through it.
+
+### GPU stall instrumentation
+
+New diagnostic infrastructure to identify GPU lock contention sources:
+
+- `_owned_gpu_lock(tag)` context manager records the current owner of `_gpu_inflight_lock` (call site tag, thread ident, acquire timestamp). Wraps every site that holds the lock: `_slot_readtext` ("slot_ocr"), `nav_ocr` ("nav_ocr"), `_nav_inline_fallback` ("nav_inline_fallback").
+- `input_gpu_yield()` snapshots the prior owner before each acquire and records a stall record if the wait exceeds 100 ms. Records include wait duration, blocker tag, and how long the prior owner had been holding when the wait began. Held-time is clamped to ≥0 to handle the race where the owner changes between snapshot and acquire.
+- New **GPU Stall Tracking** section in Export Diagnostics: per-tag table (count, total ms, avg ms, max wait, max held) and a Top-20 worst-stalls timeline. Reset at the start of every batch run.
+- This was the diagnostic that pinpointed the queue-contention pattern (`wait_ms >> held_ms`) and led directly to the strict-gate fix.
+
+### Net effect across the fixes
+- `p2_wraparound_skip` per cycle: pre-fix = 1.70 → after timer = 0.61 → after timer + hold = 0.00 → after strict gate + 1-worker cap + leak-proof shutdown = 0.00 (steady state).
+- `INPUT/right_advance_doubled` events: ~8628 in a pre-fix 72-iter run → 0 expected in steady state.
+- `input_yield_max_ms`: ~1171 ms → bounded by a single in-flight readtext rather than a queued chain.
+
+---
+
+## Below: original v1.7.2 release notes (still in effect — Phase 1 buy-qty work)
+
+### The bug this release fixes
+A pre-v1.7.2 batch run of 55 iterations revealed that **42% of cycles** were producing in-cycle duplicate relics — the bot was scanning the same relic multiple times within a single Phase 2 sweep. Root cause: the Phase 1 `F → DOWN → F` buy sequence was occasionally registering the DOWN press as 2, 3, or 4 presses under CPU/GPU load. On a circular 1–10 quantity slider, an extra DOWN moves the selection from `10/10` back to `9/10` (or `8/10`, etc.), so the bot ended up buying 9 relics instead of 10. Phase 2 then scanned all 10 expected slots, the cursor wrapped at the end of the smaller-than-expected menu, and the same relics got re-recorded as new ones. Distribution from the test run:
+
+- 9-item menus: 867 cycles (26%)
+- 8-item menus: 398 cycles (12%)
+- 7-item menus: 88 cycles (2.6%)
+- 6 or fewer: 50 cycles (1.5%)
+
+None of this was visible to existing diagnostics — `advance_drop` and `duplicate_skips` only catch consecutive same-as-previous-slot events, not wraparound to an earlier slot.
+
+### Fix: verified buy quantity via OCR
+After the DOWN press and before the confirm F press, the bot now OCRs the buy dialog's `X / N` line and verifies that `X` matches the expected purchase count. The cycle's `_batch_size` is replaced with the **actual verified quantity** so Phase 2 cannot wraparound by construction.
+
+- New OCR helpers in `bot/relic_analyzer.py`:
+  - `read_buy_quantity(img)` → returns `(X, N, conf)` parsed from the `X/ N` text via numeric+slash allowlist. Three token-shape parsers handle the various ways EasyOCR may segment the text.
+  - `read_cycle_murk_cost(img)` → returns the `Required Murk` value parsed from the larger digit field below the X/N line.
+  - Both regions are resolution-independent fractional crops, verified against 1080p and 1440p captures: `BUY_QTY_REGION = (0.593, 0.441, 0.658, 0.473)` and `BUY_CYCLE_COST_REGION = (0.594, 0.485, 0.664, 0.517)`.
+
+### Retry chain
+When verification fails (X doesn't match expected, OCR can't parse, or murk-cost cross-check disagrees):
+
+1. **Up to 2× Q-back retry** — press Q to close the buy dialog without losing the shop cursor position, then re-attempt `F → DOWN → OCR`. Q is verified via pixel-diff against the pre-press capture (mean abs RGB delta in the dialog area; threshold 8.0 vs measured signal of 17–21 dialog-vs-no-dialog and <2 same-state). If the Q press itself is dropped, up to 3 internal retries before escalating.
+2. **One ESC reset retry** — full ESC + Phase 0 replay + buy + verify, in case Q-recovery couldn't restore a clean state.
+3. **Abort iteration** — if the ESC retry also fails, log `STATE/buy_qty_unrecoverable ERROR` and end the iteration with a best-effort verified Q-back cleanup.
+
+### Murk-cost fallback
+When X/N OCR fails entirely (`None` returned) but the `Required Murk` value reads cleanly, the bot can still derive the quantity as `cost / per_relic_cost`. The per-relic cost is **learned dynamically** from the first clean cycle of each run (`cycle_cost / X`) — no hardcoded constants, self-corrects if costs ever change in a future patch.
+
+### Pixel-diff helper
+- New `screen_capture.screen_changed(jpeg_a, jpeg_b, region, threshold)` — generic mean-abs-RGB-delta comparator between two JPEG captures over a fractional region. Used by the Q-back verification path. Constants `_DIALOG_REGION = (0.32, 0.40, 0.68, 0.62)` and `_DIALOG_DIFF_TH = 8.0` exposed for tuning.
+
+### Diagnostic counters and Export Diagnostics
+New `Phase 1 buy-qty verify` group renders 7 counters in every Export Diagnostics dump:
+- `buy_qty_verified` — happy path (X matched on first try)
+- `buy_qty_corrected_q` — recovered via Q retry
+- `buy_qty_corrected_esc` — recovered via ESC reset retry
+- `buy_qty_unrecoverable` — both paths exhausted, iteration aborted
+- `buy_qty_ocr_fail` — OCR returned nothing parseable
+- `buy_qty_drift_detected` — X read cleanly but didn't match expected (the input-doubling case)
+- `buy_qty_fallback_murk` — recovered via murk-cost fallback when X/N OCR failed
+
+Plus per-cycle `BUY_QTY` lines in the .diag log with full evidence (cycle, expected, got, n_cap, conf, cost, attempt). Failure events route to `OCR/buy_qty_ocr_fail WARN`, `OCR/buy_qty_drift WARN`, `STATE/buy_qty_unrecoverable ERROR`.
+
+### Per-cycle cost
++100–200ms per cycle (extra 30ms in sleeps for dialog render + ~10ms capture + 60–160ms for the two OCR calls). Across a typical overnight run that's about 5–11 minutes added.
+
+---
+
 ## [1.7.1] — 2026-04-07 — OCR REGION REWORK + CYAN CURSE DETECTION + DEEP DIAGNOSTICS
 
 ### OCR Crop Geometry Rework

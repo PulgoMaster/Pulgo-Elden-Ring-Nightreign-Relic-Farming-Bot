@@ -30,6 +30,21 @@ _nav_wants_gpu       = threading.Event()
 _gpu_inflight_lock   = threading.Lock()
 _pause_inputs_for_nav = None   # callable(bool); set by app.py at startup
 
+# ── GPU stall tracking (added v1.7.2 rev 6) ──────────────────────────── #
+# When input_gpu_yield() blocks waiting for the lock, we want to know
+# which call site is holding it (slot_ocr / nav_ocr / nav_inline_fallback)
+# and how long it had been holding when our wait started. Each owning
+# site goes through _owned_gpu_lock(tag) which records itself in
+# _gpu_lock_owner. input_gpu_yield reads that snapshot before/after its
+# acquire and appends a record to _gpu_stall_records when wait >= threshold.
+_gpu_lock_owner: "tuple[str, int, float] | None" = None   # (tag, thread_ident, acquired_perf)
+_gpu_owner_lock      = threading.Lock()
+_GPU_STALL_THRESHOLD_MS = 100.0          # waits below this are not recorded
+_GPU_STALL_MAX_RECORDS  = 200            # ring-buffered list cap
+_gpu_stall_records: list = []            # list of dicts: ts, wait_ms, blocker_tag, held_ms_at_start
+_gpu_stall_counters: dict = {}           # blocker_tag -> {count, total_wait_ms, max_wait_ms, max_held_ms}
+_gpu_stall_lock      = threading.Lock()  # guards _gpu_stall_records and _gpu_stall_counters
+
 _nav_thread: "threading.Thread | None" = None
 _nav_queue: "queue.Queue | None"        = None
 _nav_thread_started = False
@@ -130,7 +145,7 @@ def _nav_inline_fallback(crop_bgr, kw):
         except Exception:
             pass
     try:
-        with _gpu_inflight_lock:
+        with _owned_gpu_lock("nav_inline_fallback"):
             reader = _get_reader()
             return reader.readtext(crop_bgr, **kw)
     finally:
@@ -158,7 +173,7 @@ def nav_ocr(crop_bgr, *, name_only=False, **kw):
             except Exception:
                 pass
         try:
-            with _gpu_inflight_lock:
+            with _owned_gpu_lock("nav_ocr"):
                 reader = _get_reader()
                 return reader.readtext(crop_bgr, **kw)
         finally:
@@ -198,6 +213,72 @@ def nav_ocr(crop_bgr, *, name_only=False, **kw):
 
 import contextlib
 
+
+@contextlib.contextmanager
+def _owned_gpu_lock(tag: str):
+    """Acquire _gpu_inflight_lock and record the current owner.
+
+    Used by every site that holds the GPU readtext lock so that
+    input_gpu_yield() can identify which site is blocking it when its
+    wait exceeds the stall threshold.
+    """
+    global _gpu_lock_owner
+    _gpu_inflight_lock.acquire()
+    _acq = time.perf_counter()
+    with _gpu_owner_lock:
+        _gpu_lock_owner = (tag, threading.get_ident(), _acq)
+    try:
+        yield
+    finally:
+        with _gpu_owner_lock:
+            _gpu_lock_owner = None
+        _gpu_inflight_lock.release()
+
+
+def _record_gpu_stall(wait_ms: float, blocker_tag: str, held_ms_at_start: float) -> None:
+    """Append a stall record (called only when wait >= _GPU_STALL_THRESHOLD_MS)."""
+    rec = {
+        "ts":               time.time(),
+        "wait_ms":          wait_ms,
+        "blocker_tag":      blocker_tag,
+        "held_ms_at_start": held_ms_at_start,
+    }
+    with _gpu_stall_lock:
+        _gpu_stall_records.append(rec)
+        if len(_gpu_stall_records) > _GPU_STALL_MAX_RECORDS:
+            del _gpu_stall_records[: len(_gpu_stall_records) - _GPU_STALL_MAX_RECORDS]
+        c = _gpu_stall_counters.setdefault(
+            blocker_tag,
+            {"count": 0, "total_wait_ms": 0.0, "max_wait_ms": 0.0, "max_held_ms": 0.0},
+        )
+        c["count"]         += 1
+        c["total_wait_ms"] += wait_ms
+        if wait_ms > c["max_wait_ms"]:
+            c["max_wait_ms"] = wait_ms
+        if held_ms_at_start > c["max_held_ms"]:
+            c["max_held_ms"] = held_ms_at_start
+
+
+def get_gpu_stall_summary() -> dict:
+    """Return a snapshot of GPU stall tracking for the diagnostic export.
+
+    Returns {"records": [...recent...], "counters": {tag: {...}}, "threshold_ms": float}.
+    """
+    with _gpu_stall_lock:
+        return {
+            "records":      list(_gpu_stall_records),
+            "counters":     {k: dict(v) for k, v in _gpu_stall_counters.items()},
+            "threshold_ms": _GPU_STALL_THRESHOLD_MS,
+        }
+
+
+def reset_gpu_stall_tracking() -> None:
+    """Clear stall records + counters at the start of each batch run."""
+    with _gpu_stall_lock:
+        _gpu_stall_records.clear()
+        _gpu_stall_counters.clear()
+
+
 @contextlib.contextmanager
 def input_gpu_yield():
     """Pause GPU analysis workers around a critical game input.
@@ -217,8 +298,33 @@ def input_gpu_yield():
         return
     _nav_wants_gpu.set()
     try:
-        with _gpu_inflight_lock:
+        # Snapshot the current owner BEFORE we start waiting, so even if the
+        # owner releases mid-wait we still know who was blocking us when we
+        # got blocked. If wait < threshold this snapshot is discarded.
+        _yield_t0 = time.perf_counter()
+        with _gpu_owner_lock:
+            _prior = _gpu_lock_owner   # tuple or None
+        _gpu_inflight_lock.acquire()
+        try:
+            _wait_ms = (time.perf_counter() - _yield_t0) * 1000.0
+            if _wait_ms >= _GPU_STALL_THRESHOLD_MS:
+                if _prior is not None:
+                    _blocker_tag = _prior[0]
+                    # Clamp to 0: if the prior owner released and a new owner
+                    # acquired between _yield_t0 and the snapshot, the new
+                    # owner's acquired_perf can be > _yield_t0, making the
+                    # raw difference negative. The blocker tag is still
+                    # correct; only the held duration is uncertain.
+                    _held_ms     = max(0.0, (_yield_t0 - _prior[2]) * 1000.0)
+                else:
+                    # Lock was free at snapshot time but somebody else grabbed
+                    # it before us — race, attribute to "unknown".
+                    _blocker_tag = "unknown_race"
+                    _held_ms     = 0.0
+                _record_gpu_stall(_wait_ms, _blocker_tag, _held_ms)
             yield
+        finally:
+            _gpu_inflight_lock.release()
     finally:
         _nav_wants_gpu.clear()
 
@@ -537,9 +643,38 @@ def _match_passive(text: str, known: list, cutoff: float = 0.82) -> str | None:
         return spell_match
     # Generic fuzzy match
     hits = difflib.get_close_matches(text, known, n=1, cutoff=cutoff)
-    if not hits:
+    matched = hits[0] if hits else None
+
+    # Substring fallback: when fuzzy match fails, check if any known passive
+    # is a non-trivial substring of the OCR text.  This catches cases where
+    # the in-game passive text is longer than the canonical dictionary entry
+    # (e.g. "[Raider] Damage taken while using Character Skill improves
+    # attack power and stamina" reads in-game on a 2nd line that the dict
+    # entry doesn't include).  We must NOT update the dictionary itself
+    # because the canonical short form is referenced by game_knowledge,
+    # pool_weights, normal_relic_categories and the UI criteria mapping —
+    # changing it would silently break user criteria filtering.
+    #
+    # Constraints to avoid spurious matches:
+    #   • Only fires when fuzzy match returned nothing.
+    #   • The substring (dict entry) must be at least 25 chars long.
+    #   • Among multiple substring hits, pick the LONGEST one (most specific).
+    if matched is None:
+        text_lower = text.lower()
+        best_substr = None
+        best_len = 0
+        for k in known:
+            if len(k) < 25:
+                continue
+            if k.lower() in text_lower and len(k) > best_len:
+                best_substr = k
+                best_len = len(k)
+        if best_substr is not None:
+            matched = best_substr
+
+    if matched is None:
         return None
-    matched = hits[0]
+
     # OCR sometimes reads "+1" as "+ 1" (space before digit) — normalize
     ocr_suffix   = re.search(r' \+\s*\d+$', text)
     match_suffix = re.search(r' \+\d+$', matched)
@@ -713,9 +848,21 @@ def _slot_readtext(reader, crop: np.ndarray):
     """
     if getattr(_thread_nav_mode, "on", False):
         return nav_ocr(crop)
-    _wait_for_nav_yield()
-    with _gpu_inflight_lock:
-        return reader.readtext(crop)
+    # Strict nav-priority gate: re-check _nav_wants_gpu AFTER acquiring the
+    # lock. Without this, multiple worker threads can pass _wait_for_nav_yield
+    # (which only checks the flag once before racing to lock.acquire) and
+    # queue up at the lock. When input_gpu_yield then sets nav_wants_gpu, it
+    # still has to wait for the entire queued chain to drain — which is what
+    # produced the 755ms stalls observed in rev 6 instrumentation (wait_ms >>
+    # held_ms because multiple slot_ocr owners cycled through during the wait).
+    # Re-checking inside the lock means: if the consumer arrived during our
+    # acquire race, we release and yield, letting the consumer in immediately.
+    while True:
+        _wait_for_nav_yield()
+        with _owned_gpu_lock("slot_ocr"):
+            if _nav_wants_gpu.is_set():
+                continue
+            return reader.readtext(crop)
 
 
 def _crop_band(img: np.ndarray, y_center: float, half_height: float,
@@ -907,7 +1054,11 @@ def _ocr_slot(reader, crop: np.ndarray,
         else:
             passive_tokens.append(tok)
 
-    def _order(toks, row_gap=15):
+    def _order_rows(toks, row_gap=15):
+        """Group tokens into rows by y proximity, return list of rows
+        (each row is x-sorted).  A row is a set of tokens whose y values
+        are within row_gap pixels of each other.  Multi-line passives
+        produce multiple rows; single-line passives produce one row."""
         if not toks:
             return []
         ts = sorted(toks, key=lambda t: t["y"])
@@ -917,15 +1068,40 @@ def _ocr_slot(reader, crop: np.ndarray,
                 rows[-1].append(t)
             else:
                 rows.append([t])
+        return [sorted(row, key=lambda t: t["x"]) for row in rows]
+
+    def _order(toks, row_gap=15):
+        """Flat token list, ordered by row then by x within row."""
         out = []
-        for row in rows:
-            out.extend(sorted(row, key=lambda t: t["x"]))
+        for row in _order_rows(toks, row_gap):
+            out.extend(row)
         return out
 
     passive_name = None
     if passive_tokens:
-        passive_text = " ".join(t["text"] for t in _order(passive_tokens))
+        # Multi-line passive support: tokens may be split across rows when
+        # the in-game text wraps to a second line (common on Delicate relics
+        # with long [Class] passives like "[Raider] Damage taken while using
+        # Character Skill improves attack power and stamina").  We join ALL
+        # tokens in y-then-x order for the primary match attempt, so a
+        # 2-line passive becomes one continuous string.
+        _rows = _order_rows(passive_tokens)
+        passive_text = " ".join(
+            t["text"] for row in _rows for t in row)
         passive_name = _match_passive(passive_text, all_passives, cutoff=0.75)
+
+        # Fallback: if the multi-row joined text doesn't match (e.g. one
+        # row's OCR was garbled but another is clean), try matching each
+        # individual row in case one of them alone is a complete passive.
+        if passive_name is None and len(_rows) > 1:
+            for row in _rows:
+                _row_text = " ".join(t["text"] for t in row)
+                _row_match = _match_passive(_row_text, all_passives, cutoff=0.75)
+                if _row_match:
+                    passive_name = _row_match
+                    passive_text = _row_text
+                    break
+
         for t in passive_tokens:
             dbg.append({
                 "text": t["text"], "conf": t["conf"], "y": int(t["y"]),
@@ -935,8 +1111,12 @@ def _ocr_slot(reader, crop: np.ndarray,
             })
         # Passive miss capture: white text was OCR'd but the dictionary
         # couldn't find a match.  Fires for unknown passives, mangled
-        # OCR, and any dictionary gaps in passives.py.
-        if passive_name is None and _passive_miss_hook:
+        # OCR, and any dictionary gaps in passives.py.  Suppressed during
+        # nav-mode (Phase 1 settle polling) because the OCR is racing the
+        # buy-dialog → relic-preview transition and may capture dialog
+        # button text ("OK CANCEL") that the watcher should ignore.
+        if (passive_name is None and _passive_miss_hook
+                and not getattr(_thread_nav_mode, "on", False)):
             try:
                 _passive_miss_hook(slot_idx, passive_text)
             except Exception:
@@ -1145,6 +1325,128 @@ def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
 # place the murk counter in completely different regions, so restricting the
 # scan to this zone also acts as an implicit shop-screen filter.
 MURK_SHOP_REGION = (0.0, 0.0, 0.45, 0.18)
+
+# Phase 1 buy-quantity dialog regions.
+# After F→DOWN the "Purchase how many?" dialog shows:
+#   • a small "X/ N" line in the upper-right of the dialog body
+#   • a "Required Murk: K" line directly below it
+# Both regions are tuned for the centred buy dialog and verified against
+# real 1080p + 1440p captures (see crop_preview_phase1/).
+BUY_QTY_REGION       = (0.593, 0.441, 0.658, 0.473)
+BUY_CYCLE_COST_REGION = (0.594, 0.485, 0.664, 0.517)
+
+
+def read_buy_quantity(image_bytes: bytes,
+                      region: tuple | None = None
+                      ) -> tuple[int | None, int | None, float]:
+    """
+    Read the "X / N" quantity from the Phase 1 "Purchase how many?" dialog.
+
+    Returns (X, N, confidence).  If the dialog cannot be parsed, returns
+    (None, None, 0.0).  X is the chosen quantity, N is the cap.
+
+    Uses a numeric+slash allowlist for tight constrained OCR — the region
+    is small and fixed-format so noise from arrow icons / dialog borders is
+    rejected at the OCR layer rather than post-parsed.
+    """
+    if region is None:
+        region = BUY_QTY_REGION
+
+    img = _to_array(image_bytes, max_width=0)
+    h, w = img.shape[:2]
+    x1 = int(w * region[0]); y1 = int(h * region[1])
+    x2 = int(w * region[2]); y2 = int(h * region[3])
+    roi = img[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None, None, 0.0
+
+    try:
+        results = nav_ocr(roi, allowlist="0123456789/")
+    except Exception:
+        return None, None, 0.0
+
+    # Collect all tokens with conf, build candidate "X/N" parses.
+    # The displayed string is "X/ N" with a space, so EasyOCR may return
+    # one token "X/" + one token "N", OR a single "X/N", OR two bare ints.
+    tokens: list[tuple[str, float]] = []
+    for _, text, conf in results:
+        if conf < 0.30:
+            continue
+        clean = text.replace(" ", "")
+        if clean:
+            tokens.append((clean, float(conf)))
+
+    if not tokens:
+        return None, None, 0.0
+
+    # Try: any single token containing a slash
+    for tok, conf in tokens:
+        if "/" in tok:
+            parts = tok.split("/")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                x_val = int(parts[0]); n_val = int(parts[1])
+                if 1 <= x_val <= 99 and 1 <= n_val <= 99 and x_val <= n_val:
+                    return x_val, n_val, conf
+
+    # Try: two adjacent tokens, first ends with "/", second is a digit
+    for i in range(len(tokens) - 1):
+        a, ca = tokens[i]; b, cb = tokens[i + 1]
+        if a.endswith("/") and a[:-1].isdigit() and b.isdigit():
+            x_val = int(a[:-1]); n_val = int(b)
+            if 1 <= x_val <= 99 and 1 <= n_val <= 99 and x_val <= n_val:
+                return x_val, n_val, min(ca, cb)
+
+    # Try: exactly two pure-int tokens
+    int_toks = [(int(t), c) for t, c in tokens if t.isdigit()]
+    if len(int_toks) == 2:
+        x_val, ca = int_toks[0]; n_val, cb = int_toks[1]
+        if 1 <= x_val <= 99 and 1 <= n_val <= 99 and x_val <= n_val:
+            return x_val, n_val, min(ca, cb)
+
+    return None, None, 0.0
+
+
+def read_cycle_murk_cost(image_bytes: bytes,
+                         region: tuple | None = None
+                         ) -> tuple[int | None, float]:
+    """
+    Read the "Required Murk: K" value from the Phase 1 buy dialog.
+
+    Returns (cost, confidence) or (None, 0.0) on failure.  Used as the
+    secondary fallback signal when read_buy_quantity is uncertain, and as
+    the per-cycle running-total cross-check.
+    """
+    if region is None:
+        region = BUY_CYCLE_COST_REGION
+
+    img = _to_array(image_bytes, max_width=0)
+    h, w = img.shape[:2]
+    x1 = int(w * region[0]); y1 = int(h * region[1])
+    x2 = int(w * region[2]); y2 = int(h * region[3])
+    roi = img[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None, 0.0
+
+    try:
+        results = nav_ocr(roi, allowlist="0123456789")
+    except Exception:
+        return None, 0.0
+
+    best: tuple[int, float] | None = None
+    for _, text, conf in results:
+        if conf < 0.30:
+            continue
+        clean = text.replace(",", "").replace(" ", "")
+        if not clean.isdigit():
+            continue
+        val = int(clean)
+        if 100 <= val <= 9_999_999:
+            if best is None or val > best[0]:
+                best = (val, float(conf))
+
+    if best is None:
+        return None, 0.0
+    return best
 
 
 def read_murk(image_bytes: bytes,

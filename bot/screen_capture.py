@@ -99,6 +99,45 @@ def crops_differ(crop_a, crop_b) -> bool:
         return True
 
 
+# Pixel-diff helper used by Phase 1 to verify the buy dialog actually closed
+# after a Q-back press.  Empirically tuned: dialog open vs closed produces
+# mean abs RGB diff ≈ 17–21 in this region; same-state diff ≈ 0–2.  Threshold
+# of 8.0 sits comfortably in the gap and tolerates JPEG noise / animation
+# frames.  Region covers the centred dialog area (excludes shop grid + char
+# model so background motion doesn't trigger false positives).
+_DIALOG_REGION   = (0.32, 0.40, 0.68, 0.62)
+_DIALOG_DIFF_TH  = 8.0
+
+
+def screen_changed(jpeg_a: bytes, jpeg_b: bytes,
+                   region: tuple = _DIALOG_REGION,
+                   threshold: float = _DIALOG_DIFF_TH) -> bool:
+    """True if the given fractional region of two JPEG captures differs
+    by more than `threshold` mean abs RGB delta.
+
+    Used by Phase 1 to confirm a Q-back press actually closed the buy
+    dialog (huge pixel delta) vs the press being dropped (no delta).
+    Returns False on any decode failure (caller treats as "no change
+    detected" and will retry).
+    """
+    try:
+        import io
+        import numpy as np
+        from PIL import Image as _PILImg
+        a = np.array(_PILImg.open(io.BytesIO(jpeg_a)).convert("RGB"))
+        b = np.array(_PILImg.open(io.BytesIO(jpeg_b)).convert("RGB"))
+        if a.shape != b.shape:
+            return True   # different resolutions = definitely changed
+        h, w = a.shape[:2]
+        x1 = int(w * region[0]); y1 = int(h * region[1])
+        x2 = int(w * region[2]); y2 = int(h * region[3])
+        ca = a[y1:y2, x1:x2].astype(np.int16)
+        cb = b[y1:y2, x1:x2].astype(np.int16)
+        return float(np.abs(ca - cb).mean()) > threshold
+    except Exception:
+        return False
+
+
 # ── Menu highlight detection ────────────────────────────────────────── #
 # The Roundtable Hold menu overlays a blue-tinted semi-transparent
 # rectangle on the currently selected item.  We detect it by measuring

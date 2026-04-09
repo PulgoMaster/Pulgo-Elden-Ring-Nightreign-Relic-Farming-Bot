@@ -557,7 +557,7 @@ class RelicBotApp(tk.Tk):
         super().__init__()
         self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.7.1  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.7.2  |  Made by Pulgo")
         self.resizable(True, True)
 
         # App icon (title-bar + alt-tab thumbnail)
@@ -4142,6 +4142,7 @@ class RelicBotApp(tk.Tk):
         self._current_batch_id = batch_id
         self._ov_overflow_hits = 0
         self._global_murk_expected = None   # murk verified against each iteration; None = first run
+        self._per_relic_murk_cost  = None   # learned from first clean Phase 1 buy-qty verify (cycle_cost / X)
         self._murk_region          = None   # pinned crop from first successful murk read
         # Adaptive close buffer — starts at 7s, adjusts based on launch results.
         # Increases when launch attempt 1 fails, decreases when it succeeds.
@@ -4153,6 +4154,12 @@ class RelicBotApp(tk.Tk):
         self._batch_failed_settle   = 0
         self._batch_total_poll_depth = 0
         self._batch_total_settled   = 0
+        # GPU stall tracking — clear records from any prior run so each
+        # batch's Export Diagnostics shows only this run's stalls.
+        try:
+            relic_analyzer.reset_gpu_stall_tracking()
+        except Exception:
+            pass
         run_dir = os.path.join(base_output, f"batch_run_{run_stamp}")
         live_log_path = os.path.join(run_dir, "live_log.txt")
         batch_log_path = os.path.join(run_dir, "run_log.txt")
@@ -8107,7 +8114,6 @@ class RelicBotApp(tk.Tk):
                     }
 
             _buy_loop_done = False   # set True when "Insufficient murk" detected mid-cycle
-            _p2_duplicates_total = 0   # cumulative accepted-duplicate count across cycles
             for _batch_i in range(_buy_count):
                 if _buy_loop_done:
                     break
@@ -8159,35 +8165,303 @@ class RelicBotApp(tk.Tk):
                         self._iter_p1_settle_retries += 1  # each retry = settle missed
                     self._iter_safe_path_used = True   # alt sequence always used
                     self._set_ocr_throttle(True)   # pause workers during Phase 1 buy inputs
-                    # Programmatic F→DOWN→F with controlled hold times (0.03 s)
-                    # and adaptive inter-key gaps.  Replaces the recorded alt sequence
-                    # to eliminate variable hold durations — a DOWN hold of 100 ms+
-                    # can double-register on CPU spikes.  0.03 s is well below any
-                    # key repeat threshold while still registering reliably.
+                    # Programmatic F→DOWN→[verify X/N]→F with controlled hold times.
+                    # Between the DOWN press and the final confirm F, we OCR the
+                    # buy dialog's "X / N" line to verify the quantity actually
+                    # landed at the expected cap (e.g. 10/10).  This catches the
+                    # input-doubling case where DOWN registered as 2+ presses and
+                    # the slider landed at 9/10 or 8/10 — previously undetectable
+                    # and the root cause of all in-cycle wraparound dupes.
+                    #
+                    # Retry chain on mismatch / OCR failure:
+                    #   1) up to 2× Q-back (closes the dialog without resetting
+                    #      our shop cursor position) and re-attempt F→DOWN
+                    #   2) one ESC reset + Phase 0 replay + retry
+                    #   3) abort iteration if still failing
                     _p1_hold = 0.03
                     _p1_gap  = max(0.12, 0.12 + 0.05 * max(0.0, self._perf_gap_mult - 1.0))
                     if _lpm:
                         _p1_gap += 0.10
                     _t_p1_start = time.perf_counter()
-                    # GPU yield: drain any in-flight readtext before pressing F
-                    # so the game's input poll isn't competing with a GPU stall.
-                    # No-op in CPU mode.
-                    _yield_t0 = time.perf_counter()
-                    with relic_analyzer.input_gpu_yield():
-                        _yield_wait_ms = (time.perf_counter() - _yield_t0) * 1000.0
-                        if self._diag:
+
+                    _QTY_MAX_Q_RETRIES = 2
+                    _qty_ok            = False
+                    _actual_batch_size = _batch_size   # default; updated on verify
+                    _qty_x = _qty_n = None
+                    _qty_conf  = 0.0
+                    _qty_cost  = None
+
+                    def _do_buy_open_and_select() -> None:
+                        """F (open buy dialog) → DOWN (jump 1→max via wrap)."""
+                        _yt0 = time.perf_counter()
+                        with relic_analyzer.input_gpu_yield():
+                            _ywait_ms = (time.perf_counter() - _yt0) * 1000.0
+                            if self._diag:
+                                try:
+                                    self._diag.log_input_yield(
+                                        phase="Phase 1 buy", key="f",
+                                        wait_ms=_ywait_ms)
+                                except Exception:
+                                    pass
+                            self.player.tap("f", hold=_p1_hold)
+                            time.sleep(_p1_gap)
+                            self.player.tap("Key.down", hold=_p1_hold)
+                        # Let the dialog quantity update render before OCR.
+                        time.sleep(max(0.15, _p1_gap))
+
+                    def _ocr_buy_dialog() -> tuple:
+                        """Capture screen and OCR both X/N and required-murk.
+                        Returns (jpeg, x, n, conf, cost) — any may be None on failure."""
+                        try:
+                            _qi = screen_capture.capture(region)
+                        except Exception:
+                            return (None, None, None, 0.0, None)
+                        _x = _n = None
+                        _cf = 0.0
+                        _ck = None
+                        try:
+                            _x, _n, _cf = relic_analyzer.read_buy_quantity(_qi)
+                        except Exception:
+                            pass
+                        try:
+                            _ck, _ = relic_analyzer.read_cycle_murk_cost(_qi)
+                        except Exception:
+                            pass
+                        return (_qi, _x, _n, _cf, _ck)
+
+                    def _q_back_with_verify(pre_jpeg) -> bool:
+                        """Press Q to back out of the buy dialog and verify it
+                        actually closed via a centre-screen pixel diff vs the
+                        pre-Q capture.  Retries up to 3 times before giving up.
+
+                        pre_jpeg: the screen capture taken JUST BEFORE this Q
+                                  attempt (dialog known to be open).
+                        Returns True if the dialog confirmed closed, False if
+                        all 3 Q presses failed to register.
+                        """
+                        for _q_try in range(3):
                             try:
-                                self._diag.log_input_yield(
-                                    phase="Phase 1 buy",
-                                    key="f",
-                                    wait_ms=_yield_wait_ms)
+                                self.player.tap("q", hold=0.05)
                             except Exception:
                                 pass
-                        self.player.tap("f", hold=_p1_hold)
-                        time.sleep(_p1_gap)
-                        self.player.tap("Key.down", hold=_p1_hold)
-                        time.sleep(_p1_gap)
-                        self.player.tap("f", hold=_p1_hold)
+                            time.sleep(max(0.15, _p1_gap))
+                            try:
+                                _post = screen_capture.capture(region)
+                            except Exception:
+                                _post = None
+                            if (_post is not None and pre_jpeg is not None
+                                    and screen_capture.screen_changed(
+                                        pre_jpeg, _post)):
+                                return True
+                            self._log(
+                                f"  Cycle {_batch_i + 1}: Q press {_q_try + 1}/3"
+                                f" did not close dialog (pixel-diff)"
+                                f" — retrying")
+                        return False
+
+                    for _qty_attempt in range(_QTY_MAX_Q_RETRIES + 1):
+                        _do_buy_open_and_select()
+                        if not self.bot_running or self._reset_iter_requested:
+                            self._set_ocr_throttle(False)
+                            if not self.bot_running and capture_only and not _p2_async:
+                                return _bl_captures
+                            return relic_results
+
+                        _qty_jpeg, _qty_x, _qty_n, _qty_conf, _qty_cost = _ocr_buy_dialog()
+
+                        # Decide outcome
+                        _accepted = False
+                        _via_fallback = False
+                        # The expected count is min(bot's planned _batch_size, game-side cap N).
+                        # If the dialog shows a smaller cap than _batch_size, the game has
+                        # less stock / less affordable than the bot expected — accept the
+                        # smaller value as authoritative (it's the most we can buy).
+                        _qty_expected = (
+                            min(_batch_size, _qty_n) if _qty_n is not None
+                            else _batch_size)
+                        if (_qty_x is not None and _qty_n is not None
+                                and _qty_x == _qty_expected):
+                            # Primary path: X/N OCR matches the achievable quantity
+                            _accepted = True
+                            _actual_batch_size = _qty_x
+                        elif _qty_x is None:
+                            # Fallback: derive X from required-murk (needs known cost)
+                            _per_cost = getattr(self, "_per_relic_murk_cost", None)
+                            if (_qty_cost is not None and _per_cost
+                                    and _per_cost > 0
+                                    and _qty_cost % _per_cost == 0):
+                                _x_from_cost = _qty_cost // _per_cost
+                                if _x_from_cost == _batch_size:
+                                    _accepted = True
+                                    _via_fallback = True
+                                    _actual_batch_size = _x_from_cost
+                                    if self._diag:
+                                        try:
+                                            self._diag.log_buy_qty(
+                                                event="fallback_murk",
+                                                cycle=_batch_i + 1,
+                                                expected=_batch_size,
+                                                got=_x_from_cost,
+                                                n_cap=_batch_size,
+                                                cost=_qty_cost,
+                                                attempt=_qty_attempt + 1)
+                                        except Exception:
+                                            pass
+                            if not _accepted and self._diag:
+                                try:
+                                    self._diag.log_buy_qty(
+                                        event="ocr_fail",
+                                        cycle=_batch_i + 1,
+                                        expected=_batch_size,
+                                        attempt=_qty_attempt + 1)
+                                except Exception:
+                                    pass
+                        else:
+                            # X != expected → drift / extra-input
+                            if self._diag:
+                                try:
+                                    self._diag.log_buy_qty(
+                                        event="drift_detected",
+                                        cycle=_batch_i + 1,
+                                        expected=_batch_size,
+                                        got=_qty_x or 0,
+                                        n_cap=_qty_n or 0,
+                                        conf=_qty_conf,
+                                        cost=_qty_cost or 0,
+                                        attempt=_qty_attempt + 1)
+                                except Exception:
+                                    pass
+
+                        if _accepted:
+                            # Confirm purchase with final F
+                            with relic_analyzer.input_gpu_yield():
+                                self.player.tap("f", hold=_p1_hold)
+                            # Learn / refresh per-relic cost from this clean cycle
+                            if (_qty_cost and _actual_batch_size > 0
+                                    and _qty_cost % _actual_batch_size == 0):
+                                _derived = _qty_cost // _actual_batch_size
+                                if 1 <= _derived <= 100_000:
+                                    self._per_relic_murk_cost = _derived
+                            # Skip the verified/corrected_q log when this cycle
+                            # was accepted via the murk-cost fallback — that
+                            # path already logged its own fallback_murk event.
+                            if self._diag and not _via_fallback:
+                                try:
+                                    if _qty_attempt == 0:
+                                        self._diag.log_buy_qty(
+                                            event="verified",
+                                            cycle=_batch_i + 1,
+                                            expected=_batch_size,
+                                            got=_actual_batch_size,
+                                            n_cap=_qty_n or _batch_size,
+                                            conf=_qty_conf,
+                                            cost=_qty_cost or 0,
+                                            attempt=_qty_attempt + 1)
+                                    else:
+                                        self._diag.log_buy_qty(
+                                            event="corrected_q",
+                                            cycle=_batch_i + 1,
+                                            expected=_batch_size,
+                                            got=_actual_batch_size,
+                                            n_cap=_qty_n or _batch_size,
+                                            conf=_qty_conf,
+                                            cost=_qty_cost or 0,
+                                            attempt=_qty_attempt + 1)
+                                except Exception:
+                                    pass
+                            _qty_ok = True
+                            break
+
+                        # Not accepted — Q-back to close dialog (cursor stays put)
+                        # and retry, unless this was the last Q-attempt slot.
+                        self._log(
+                            f"  Cycle {_batch_i + 1}: buy qty mismatch "
+                            f"(got {_qty_x}/{_qty_n} expected {_batch_size})"
+                            f" — Q-back attempt {_qty_attempt + 1}/"
+                            f"{_QTY_MAX_Q_RETRIES + 1}")
+                        if not _q_back_with_verify(_qty_jpeg):
+                            # Q failed to register 3 times in a row — break out
+                            # of the Q-retry loop early and let the ESC reset
+                            # path handle recovery.
+                            self._log(
+                                f"  Cycle {_batch_i + 1}: 3× Q presses dropped"
+                                f" — escalating to ESC reset")
+                            break
+
+                    if not _qty_ok:
+                        # Q retries exhausted → ESC reset + Phase 0 replay + one final retry
+                        self._log(
+                            f"  Cycle {_batch_i + 1}: Q retries exhausted —"
+                            f" ESC reset + Phase 0 + retry")
+                        self._esc_to_game_screen(region)
+                        if self.phase_events[0]:
+                            self.player.play(
+                                self.phase_events[0],
+                                extra_delay=_p02_extra_delay)
+                            # Brief settle before re-attempting buy
+                            time.sleep((3.0 if _lpm else 1.5)
+                                       * max(1.0, self._perf_gap_mult))
+
+                        _do_buy_open_and_select()
+                        if not self.bot_running or self._reset_iter_requested:
+                            self._set_ocr_throttle(False)
+                            if not self.bot_running and capture_only and not _p2_async:
+                                return _bl_captures
+                            return relic_results
+
+                        _qty_jpeg, _qty_x, _qty_n, _qty_conf, _qty_cost = _ocr_buy_dialog()
+                        if (_qty_x is not None and _qty_n is not None
+                                and _qty_x == _batch_size):
+                            with relic_analyzer.input_gpu_yield():
+                                self.player.tap("f", hold=_p1_hold)
+                            _actual_batch_size = _qty_x
+                            if (_qty_cost and _actual_batch_size > 0
+                                    and _qty_cost % _actual_batch_size == 0):
+                                _derived = _qty_cost // _actual_batch_size
+                                if 1 <= _derived <= 100_000:
+                                    self._per_relic_murk_cost = _derived
+                            if self._diag:
+                                try:
+                                    self._diag.log_buy_qty(
+                                        event="corrected_esc",
+                                        cycle=_batch_i + 1,
+                                        expected=_batch_size,
+                                        got=_actual_batch_size,
+                                        n_cap=_qty_n,
+                                        conf=_qty_conf,
+                                        cost=_qty_cost or 0)
+                                except Exception:
+                                    pass
+                            _qty_ok = True
+                        else:
+                            self._log(
+                                f"  Cycle {_batch_i + 1}: ESC reset retry"
+                                f" also failed (got {_qty_x}/{_qty_n})"
+                                f" — aborting iteration")
+                            if self._diag:
+                                try:
+                                    self._diag.log_buy_qty(
+                                        event="unrecoverable",
+                                        cycle=_batch_i + 1,
+                                        expected=_batch_size,
+                                        got=_qty_x or 0,
+                                        n_cap=_qty_n or 0,
+                                        conf=_qty_conf)
+                                except Exception:
+                                    pass
+                            # Best-effort dialog close before aborting (verified
+                            # so we don't leave the dialog open in the game).
+                            _q_back_with_verify(_qty_jpeg)
+                            self._set_ocr_throttle(False)
+                            if _p2_async:
+                                self._async_iter_abort_cleanup(
+                                    iteration, _p2_submitted)
+                            return relic_results
+
+                    # Quantity verified (or recovered).  Use the verified count
+                    # for the rest of this cycle so Phase 2 cannot wraparound.
+                    _batch_size = _actual_batch_size
+                    _advance_presses = max(0, _batch_size - 1)
                     _path_name = f"alt (mult {self._perf_gap_mult:.2f}×)"
                     # Keep throttle ON through the settle poll below.
                     # Releasing it here lets async workers run OCR concurrently,
@@ -8639,12 +8913,20 @@ class RelicBotApp(tk.Tk):
                     _t_p2_start = time.perf_counter()
 
                     _p2_confirmed = 0
-                    _p2_prev_crop = None
-                    _p2_retries   = 0
-                    _p2_duplicate_count = 0
-                    _P2_MAX_RETRIES = 3
+                    # Full per-cycle crop history for wraparound detection.
+                    # The previous comparator only checked against the immediately
+                    # previous slot, which missed cursor wraparounds caused by
+                    # RIGHT key doubling.  By checking each new capture against
+                    # ALL previous unique crops in this cycle, we detect when the
+                    # cursor has revisited an already-scanned position.
+                    _p2_crop_history: list = []
+                    _p2_attempts        = 0
+                    _P2_MAX_ATTEMPTS    = _batch_size * 3  # two full extra passes for recovery
+                    _p2_wraparound_hits = 0
+                    _p2_input_drop_hits = 0
 
-                    while _p2_confirmed < _batch_size:
+                    while (_p2_confirmed < _batch_size
+                           and _p2_attempts < _P2_MAX_ATTEMPTS):
                         if not self.bot_running or self._reset_iter_requested:
                             if _exclude_buy_phase:
                                 self._set_ocr_throttle(False)
@@ -8652,8 +8934,9 @@ class RelicBotApp(tk.Tk):
                                 return _bl_captures
                             return relic_results
 
-                        # Advance RIGHT for every slot after the first.
-                        if _p2_confirmed > 0:
+                        # Advance RIGHT for every attempt after the first.
+                        # The first attempt reuses the settle image (cursor at slot 0).
+                        if _p2_attempts > 0:
                             # GPU yield: drain any in-flight readtext before pressing RIGHT
                             # so the game's input poll doesn't get dropped during a GPU stall.
                             # No-op in CPU mode.
@@ -8668,7 +8951,13 @@ class RelicBotApp(tk.Tk):
                                             wait_ms=_yield_wait_ms)
                                     except Exception:
                                         pass
-                                self.player.tap("Key.right", hold=0.05)
+                                # hold=0.02 (was 0.05): with the high-res timer fix in main.py
+                                # making time.sleep accurate to ~1ms, a 20ms hold spans ~1.2 game
+                                # frames at 60fps — long enough for the game to register the key-down
+                                # edge, short enough that the key is released before the next frame
+                                # can re-sample it. Phase 2 only — other tap sites are unaffected by
+                                # the doubling problem because they're not in tight GPU-contended loops.
+                                self.player.tap("Key.right", hold=0.02)
                             _p2_advance_settle = 0.20 * max(1.0, self._perf_gap_mult)
                             time.sleep(_p2_advance_settle)
                             if not self.bot_running or self._reset_iter_requested:
@@ -8677,6 +8966,7 @@ class RelicBotApp(tk.Tk):
                                 if not self.bot_running and capture_only and not _p2_async:
                                     return _bl_captures
                                 return relic_results
+                        _p2_attempts += 1
 
                         # Capture this relic
                         _relic_num = _relics_scanned + 1
@@ -8700,7 +8990,7 @@ class RelicBotApp(tk.Tk):
                                 from PIL import Image as _PILImg
                                 _si = _PILImg.open(io.BytesIO(img))
                                 _sw, _sh = _si.size
-                                _p2_prev_crop = (
+                                _p2_cur_crop = (
                                     np.array(_si.crop((
                                         int(_sw * 0.25), int(_sh * 0.15),
                                         int(_sw * 0.75), int(_sh * 0.35)
@@ -8711,7 +9001,7 @@ class RelicBotApp(tk.Tk):
                                     )), dtype=np.int16),
                                 )
                             except Exception:
-                                _p2_prev_crop = None
+                                _p2_cur_crop = None
                         else:
                             try:
                                 _cap_result = screen_capture.capture(
@@ -8723,77 +9013,106 @@ class RelicBotApp(tk.Tk):
                                 _p2_cur_crop = None
                             result = None
 
-                            # Duplicate detection: compare description crop vs previous.
-                            # If identical, RIGHT input was dropped — retry.
-                            if (_p2_prev_crop is not None
-                                    and _p2_cur_crop is not None
-                                    and not screen_capture.crops_differ(
-                                        _p2_prev_crop, _p2_cur_crop)):
-                                _p2_retries += 1
-                                if _p2_retries < _P2_MAX_RETRIES:
-                                    self._log(
-                                        f"  Relic advance retry {_p2_retries}/"
-                                        f"{_P2_MAX_RETRIES} — input dropped, re-pressing RIGHT")
-                                    continue
-                                else:
-                                    self._log(
-                                        f"  Relic advance failed after {_P2_MAX_RETRIES}"
-                                        f" retries — accepting duplicate (slot advanced,"
-                                        f" relic not re-analyzed)")
-                                    _p2_retries = 0
-                                    _p2_duplicate_count += 1
-                                    self._iter_input_drop_count += 1
-                                    self._clean_cycles_since_suppress = 0
-                                    if self._diag:
-                                        try:
-                                            self._diag.log_advance(
-                                                cycle=_batch_i + 1,
-                                                idx=_p2_confirmed,
-                                                outcome="dup_accepted",
-                                                retries=_P2_MAX_RETRIES)
-                                        except Exception:
-                                            pass
-                                    if (self._iter_input_drop_count > 2
-                                            and not self._iter_gpu_aa_suppressed):
-                                        self._iter_gpu_aa_suppressed = True
-                                        self._iter_suppress_count += 1
-                                        if self._iter_suppress_count >= 2:
-                                            self._log(
-                                                "  [GPU AA] Final suppression for"
-                                                " remainder of iteration —"
-                                                " auto-suppress fired twice."
-                                                " Will retry next iteration.")
-                                            if self._diag:
-                                                try:
-                                                    self._diag.log_gpu_aa(
-                                                        event="final_latch",
-                                                        current_iter=iteration,
-                                                        drops=self._iter_input_drop_count,
-                                                        suppress_count=self._iter_suppress_count)
-                                                except Exception:
-                                                    pass
-                                        else:
-                                            self._log(
-                                                "  [GPU AA] Auto-suppressed for remainder"
-                                                " of iteration — 3+ input drops detected."
-                                                " Will retry next iteration.")
-                                            if self._diag:
-                                                try:
-                                                    self._diag.log_gpu_aa(
-                                                        event="auto_suppress",
-                                                        current_iter=iteration,
-                                                        drops=self._iter_input_drop_count,
-                                                        suppress_count=self._iter_suppress_count)
-                                                except Exception:
-                                                    pass
-                                    # Advance the slot counter without counting this as a
-                                    # fresh relic scan or re-analyzing the duplicate image.
-                                    # _p2_prev_crop stays as-is so the next RIGHT press
-                                    # still compares against the last confirmed-unique crop.
-                                    _p2_confirmed += 1
-                                    continue
-                            _p2_prev_crop = _p2_cur_crop
-                            _p2_retries = 0
+                        # ── Wraparound & input-drop detection ────────────────── #
+                        # Compare current crop against ALL previous unique crops
+                        # in this cycle.  If it matches:
+                        #   • the IMMEDIATELY previous slot → RIGHT input drop
+                        #     (cursor didn't move).  Retry by pressing RIGHT
+                        #     again, no slot stored.
+                        #   • an EARLIER slot → cursor wraparound caused by RIGHT
+                        #     key doubling (cursor advanced 2+ positions, then
+                        #     wrapped past one we already scanned).  Skip this
+                        #     capture, the next RIGHT press will continue walking
+                        #     through positions until we find the missed relic.
+                        # Either case: do NOT increment _p2_confirmed.  The outer
+                        # loop is bounded by _P2_MAX_ATTEMPTS = 2*_batch_size, so
+                        # one full extra pass is allowed for recovery.
+                        _matched_idx = None
+                        if _p2_cur_crop is not None and _p2_crop_history:
+                            for _hist_i, _hist_crop in enumerate(_p2_crop_history):
+                                try:
+                                    if not screen_capture.crops_differ(
+                                            _hist_crop, _p2_cur_crop):
+                                        _matched_idx = _hist_i
+                                        break
+                                except Exception:
+                                    pass
+
+                        if _matched_idx is not None:
+                            _is_input_drop = (
+                                _matched_idx == len(_p2_crop_history) - 1)
+                            if _is_input_drop:
+                                _p2_input_drop_hits += 1
+                                self._iter_input_drop_count += 1
+                                self._clean_cycles_since_suppress = 0
+                                self._log(
+                                    f"  Cycle {_batch_i + 1}: input drop on RIGHT"
+                                    f" (slot {_p2_confirmed} matches prev) — retrying")
+                                if self._diag:
+                                    try:
+                                        self._diag.log_advance(
+                                            cycle=_batch_i + 1,
+                                            idx=_p2_confirmed,
+                                            outcome="input_drop_skip",
+                                            retries=_p2_attempts - _batch_size
+                                                    if _p2_attempts > _batch_size else 0)
+                                    except Exception:
+                                        pass
+                                # Existing GPU AA suppression heuristic — preserved
+                                if (self._iter_input_drop_count > 2
+                                        and not self._iter_gpu_aa_suppressed):
+                                    self._iter_gpu_aa_suppressed = True
+                                    self._iter_suppress_count += 1
+                                    if self._iter_suppress_count >= 2:
+                                        self._log(
+                                            "  [GPU AA] Final suppression for"
+                                            " remainder of iteration —"
+                                            " auto-suppress fired twice."
+                                            " Will retry next iteration.")
+                                        if self._diag:
+                                            try:
+                                                self._diag.log_gpu_aa(
+                                                    event="final_latch",
+                                                    current_iter=iteration,
+                                                    drops=self._iter_input_drop_count,
+                                                    suppress_count=self._iter_suppress_count)
+                                            except Exception:
+                                                pass
+                                    else:
+                                        self._log(
+                                            "  [GPU AA] Auto-suppressed for remainder"
+                                            " of iteration — 3+ input drops detected."
+                                            " Will retry next iteration.")
+                                        if self._diag:
+                                            try:
+                                                self._diag.log_gpu_aa(
+                                                    event="auto_suppress",
+                                                    current_iter=iteration,
+                                                    drops=self._iter_input_drop_count,
+                                                    suppress_count=self._iter_suppress_count)
+                                            except Exception:
+                                                pass
+                            else:
+                                _p2_wraparound_hits += 1
+                                self._log(
+                                    f"  Cycle {_batch_i + 1}: wraparound detected"
+                                    f" (current capture matches earlier slot {_matched_idx}"
+                                    f" of {len(_p2_crop_history)}) — RIGHT key doubled,"
+                                    f" continuing to find missed relic")
+                                if self._diag:
+                                    try:
+                                        self._diag.log_advance(
+                                            cycle=_batch_i + 1,
+                                            idx=_p2_confirmed,
+                                            outcome="wraparound_skip",
+                                            note=f"matched_slot={_matched_idx}")
+                                    except Exception:
+                                        pass
+                            continue   # do NOT store, do NOT increment _p2_confirmed
+
+                        # New unique capture — record it in the history for future checks
+                        if _p2_cur_crop is not None:
+                            _p2_crop_history.append(_p2_cur_crop)
 
                         # Backlog capture-only mode: save image bytes without analysing.
                         # capture_only=True with no async_iter_meta means pure backlog
@@ -9131,15 +9450,49 @@ class RelicBotApp(tk.Tk):
                                     except Exception:
                                         pass
 
-                    _p2_duplicates_total += _p2_duplicate_count
-                    if _p2_duplicate_count:
+                    # Wraparound recovery summary for this cycle
+                    _p2_extra_attempts = max(0, _p2_attempts - _batch_size)
+                    if _p2_extra_attempts > 0 and self._diag:
+                        self._diag._ev["p2_recovery_attempts"] += _p2_extra_attempts
+                    if (_p2_wraparound_hits or _p2_input_drop_hits) and self._diag:
+                        if _p2_confirmed >= _batch_size:
+                            try:
+                                self._diag.log_advance(
+                                    cycle=_batch_i + 1,
+                                    idx=_p2_confirmed,
+                                    outcome="recovery_success",
+                                    note=f"wraps={_p2_wraparound_hits}"
+                                         f" drops={_p2_input_drop_hits}"
+                                         f" extra={_p2_extra_attempts}")
+                            except Exception:
+                                pass
+                    if _p2_confirmed < _batch_size:
+                        # Cycle ended without finding all relics — some are
+                        # permanently lost.  Log and move on; do not abort.
+                        _missing = _batch_size - _p2_confirmed
                         self._log(
-                            f"  Cycle {_batch_i + 1}: {_p2_confirmed - _p2_duplicate_count}"
-                            f" confirmed + {_p2_duplicate_count} duplicate(s) accepted.")
+                            f"  Cycle {_batch_i + 1}: ended short — {_p2_confirmed}/"
+                            f"{_batch_size} unique found, {_missing} relic(s) lost"
+                            f" (wraps={_p2_wraparound_hits} drops={_p2_input_drop_hits}"
+                            f" attempts={_p2_attempts}/{_P2_MAX_ATTEMPTS})")
+                        if self._diag:
+                            try:
+                                self._diag.log_advance(
+                                    cycle=_batch_i + 1,
+                                    idx=_p2_confirmed,
+                                    outcome="cycle_short",
+                                    note=f"missing={_missing}")
+                                for _ in range(_missing):
+                                    self._diag.log_advance(
+                                        cycle=_batch_i + 1,
+                                        idx=_p2_confirmed,
+                                        outcome="relic_lost")
+                            except Exception:
+                                pass
                     if self._diag:
                         self._diag.phase_end(
                             f"Cycle {_batch_i + 1} Phase 2 (scan)",
-                            slots_scanned=_batch_size)
+                            slots_scanned=_p2_confirmed)
                     # Record Phase 2 per-relic time for this cycle.
                     if _batch_size > 0:
                         _timing_p2_samples.append(
@@ -9307,12 +9660,7 @@ class RelicBotApp(tk.Tk):
                     if self._diag:
                         self._diag.phase_end(f"Cycle {_batch_i + 1} Phase 3 (reset)")
 
-            if _p2_duplicates_total:
-                self._log(
-                    f"  Scan loop complete — {_relics_scanned} relic(s) scanned"
-                    f" + {_p2_duplicates_total} duplicate(s) accepted.")
-            else:
-                self._log(f"  Scan loop complete — {_relics_scanned} relic(s) scanned.")
+            self._log(f"  Scan loop complete — {_relics_scanned} relic(s) scanned.")
 
             # ── Async Phase 2: finalize iter_state total ─────────────── #
             # Now we know the exact count submitted. Update total so workers
@@ -9409,7 +9757,15 @@ class RelicBotApp(tk.Tk):
             # while the bot navigates to the next relic.
             # Each worker thread gets its own EasyOCR reader (thread-local) so
             # multiple workers can safely run OCR in parallel.
-            _gpu_worker_cap = 4 if self._gpu_accel_var.get() else 8
+            # GPU mode: hard-cap at 1 worker. Multiple workers all serialize at
+            # the same CUDA stream anyway (no real parallelism), but each one
+            # adds a queue slot at _gpu_inflight_lock — when input_gpu_yield
+            # arrives during nav, it has to wait for EVERY worker's in-flight
+            # readtext to drain plus race-round losses against fresh acquires.
+            # With 1 worker, the wait is bounded by a single readtext duration.
+            # CPU mode keeps the higher cap — parallel CPU OCR really runs in
+            # parallel across cores and doesn't go through the GPU lock.
+            _gpu_worker_cap = 1 if self._gpu_accel_var.get() else 8
             _workers = (max(1, min(_gpu_worker_cap, self._parallel_workers_var.get()))
                         if self._parallel_enabled_var.get() else 1)
             if _workers > 1:
@@ -9445,9 +9801,40 @@ class RelicBotApp(tk.Tk):
                 _t.start()
 
             def _stop_workers():
+                # Robust shutdown: prevent Phase 4 workers from outliving the
+                # phase and leaking into the next iteration's Phase 2, where
+                # they would compete with input_gpu_yield for the GPU lock.
+                #
+                # Step 1: signal completion BEFORE draining so any worker
+                # currently in queue.get() will see capture_done on its next
+                # poll and exit cleanly.
                 _capture_done.set()
+                # Step 2: drain any remaining queued tasks so workers don't
+                # keep processing pending work. Without this, the worker loop
+                # would dequeue and run analyze() (holding the GPU lock for
+                # ~50-350ms each) for every task left in the queue.
+                while True:
+                    try:
+                        _task_q.get_nowait()
+                    except queue.Empty:
+                        break
+                # Step 3: join with a generous timeout that covers the
+                # worst-case in-flight analyze() call. With 1 GPU worker
+                # (post-fix at line 9768), at most one readtext is in
+                # flight per worker at shutdown time. 5 s gives ample
+                # margin even on the slowest observed readtext (354 ms
+                # max_held in rev 7 instrumentation).
                 for _t in _worker_threads:
-                    _t.join(timeout=1.0)
+                    _t.join(timeout=5.0)
+                    if _t.is_alive():
+                        # Worker didn't exit in time — log it but don't
+                        # block further. The leaked thread will eventually
+                        # finish its readtext and see the empty queue +
+                        # capture_done flag and exit on its own.
+                        self._log(
+                            f"  WARNING: Phase 4 worker {_t.name} did not"
+                            f" exit within 5s — may leak briefly into next"
+                            f" iteration. Investigate if this recurs.")
 
             _submitted = 0
             for step_i in range(total):
@@ -9491,8 +9878,10 @@ class RelicBotApp(tk.Tk):
             _capture_done.set()   # no more tasks coming
 
             if not self.bot_running:
-                for _t in _worker_threads:
-                    _t.join(timeout=1.0)
+                # Bot was stopped mid-Phase 4. Use the robust shutdown helper
+                # so leftover queued tasks are drained and workers don't outlive
+                # the phase to compete with the next iteration's input_gpu_yield.
+                _stop_workers()
                 return relic_results
 
             # Collect results as workers complete them
@@ -9516,8 +9905,9 @@ class RelicBotApp(tk.Tk):
 
                 if exc is not None:
                     self._log(f"ERROR analyzing relic {step_i + 1}: {exc}")
-                    for _t in _worker_threads:
-                        _t.join(timeout=1.0)
+                    # Drain pending tasks and join workers properly so they
+                    # don't keep running into the next iteration's Phase 2.
+                    _stop_workers()
                     return None
 
                 self._log_result(result)
@@ -9672,8 +10062,14 @@ class RelicBotApp(tk.Tk):
                                          stored=0, analyzed=tot)
                                if ov._win else None)
 
-            for _t in _worker_threads:
-                _t.join(timeout=2.0)
+            # Normal completion path: collection loop has consumed every
+            # submitted result, which means workers have already processed
+            # everything and put it on _done_q. _capture_done was set above
+            # at line ~9878, so workers should exit on their next 0.3s
+            # poll cycle. Use _stop_workers() for the same drain + warning
+            # behavior as the abort paths so any straggler is logged
+            # rather than silently leaking into the next iteration's Phase 2.
+            _stop_workers()
 
             for result in ordered:
                 if result is not None:
@@ -10583,8 +10979,16 @@ class RelicBotApp(tk.Tk):
                     "settle_total", "settle_empty_slot0",
                     "settle_right_skipped", "settle_accepted",
                     "settle_fallthrough", "buy_fail_in_place"]),
+                ("Phase 1 buy-qty verify", [
+                    "buy_qty_verified", "buy_qty_corrected_q",
+                    "buy_qty_corrected_esc", "buy_qty_unrecoverable",
+                    "buy_qty_ocr_fail", "buy_qty_drift_detected",
+                    "buy_qty_fallback_murk"]),
                 ("Phase 2 advance", [
-                    "advance_total", "advance_dup_accepted", "advance_drop"]),
+                    "advance_total", "advance_dup_accepted", "advance_drop",
+                    "p2_wraparound_skip", "p2_input_drop_skip",
+                    "p2_recovery_attempts", "p2_recovery_success",
+                    "p2_relics_lost", "p2_cycles_short"]),
                 ("Phase 3", [
                     "p3_tooltip_retry_ok", "p3_tooltip_retry_fail",
                     "p3_esc_timeout", "p3_consecutive_fails",
@@ -10661,6 +11065,53 @@ class RelicBotApp(tk.Tk):
                     )
                     if _ev_str:
                         lines.append(f"      {_ev_str}")
+        lines.append("")
+
+        # ── GPU stall tracking (v1.7.2 rev 6) ─────────────────────────── #
+        # Records waits ≥100ms in input_gpu_yield, attributing each to the
+        # call site that was holding _gpu_inflight_lock at the time. Used
+        # to identify what's causing the residual ~600-1000ms GPU stalls
+        # observed after rev 4/5 (timer + hold fixes solved doubling but
+        # the underlying stall source remains).
+        lines.append("=== GPU Stall Tracking ===")
+        try:
+            from bot import relic_analyzer as _ra
+            _stall = _ra.get_gpu_stall_summary()
+            _ctrs = _stall.get("counters", {})
+            _recs = _stall.get("records", [])
+            _thr  = _stall.get("threshold_ms", 0.0)
+            lines.append(f"Threshold: {_thr:.0f} ms (waits below this are not recorded)")
+            if not _ctrs:
+                lines.append("[no GPU stalls recorded above threshold]")
+            else:
+                lines.append("")
+                lines.append("Stalls by blocker:")
+                lines.append(
+                    f"  {'tag':<22s} {'count':>7s} {'total_ms':>12s} "
+                    f"{'avg_ms':>10s} {'max_wait':>10s} {'max_held':>10s}"
+                )
+                for _tag in sorted(_ctrs, key=lambda k: _ctrs[k]["total_wait_ms"], reverse=True):
+                    _c = _ctrs[_tag]
+                    _avg = _c["total_wait_ms"] / _c["count"] if _c["count"] else 0.0
+                    lines.append(
+                        f"  {_tag:<22s} {_c['count']:>7d} {_c['total_wait_ms']:>12.1f} "
+                        f"{_avg:>10.1f} {_c['max_wait_ms']:>10.1f} {_c['max_held_ms']:>10.1f}"
+                    )
+                lines.append("")
+                lines.append(f"Top 20 worst stalls (of {len(_recs)} recorded):")
+                lines.append(
+                    f"  {'time':<19s} {'wait_ms':>10s} {'held_ms':>10s}  blocker"
+                )
+                _worst = sorted(_recs, key=lambda r: r["wait_ms"], reverse=True)[:20]
+                for _r in _worst:
+                    _ts_str = time.strftime("%Y-%m-%d %H:%M:%S",
+                                            time.localtime(_r["ts"]))
+                    lines.append(
+                        f"  {_ts_str}  {_r['wait_ms']:>10.1f} "
+                        f"{_r['held_ms_at_start']:>10.1f}  {_r['blocker_tag']}"
+                    )
+        except Exception as _se:
+            lines.append(f"[gpu stall summary error: {_se}]")
         lines.append("")
 
         # ── Curse miss index ──────────────────────────────────────────── #
