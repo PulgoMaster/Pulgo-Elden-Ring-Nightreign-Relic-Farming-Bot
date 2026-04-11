@@ -2,6 +2,18 @@
 
 Automates relic farming in **Elden Ring Nightreign** using on-device OCR to analyze relics and match them against your criteria.
 
+> ## 🛡️ Safety — How RelicBot Interacts With the Game
+>
+> **RelicBot does NOT inject into the game, hook into game memory, or modify any game files.** It works entirely from the outside:
+>
+> - **Screenshots** — captures images of the screen the same way any screenshot tool would
+> - **OCR** — reads the screenshots locally on your PC to identify relic passives
+> - **Keyboard and mouse inputs** — sends regular Windows input events, the same kind your physical keyboard and mouse send
+>
+> There is no DLL injection, no memory editing, no packet manipulation, and no communication with the game process. From the game's perspective, the bot is indistinguishable from a human player. Easy Anti-Cheat sees nothing because there is nothing to see — the bot lives entirely outside the game.
+>
+> **The only safety risk is using an outdated save file** (see warnings below). As long as you give the bot your most current save before each run, you are safe.
+
 ![RelicBot scanning a Deep Grand relic](screenshots/09_relic_preview_scan.jpg)
 
 ## Videos
