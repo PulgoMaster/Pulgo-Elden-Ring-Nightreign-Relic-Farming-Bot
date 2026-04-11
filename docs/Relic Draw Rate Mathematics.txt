@@ -6,10 +6,8 @@ Derived from: EquipParamAntique.csv, AttachEffectTableParam.csv (Smithbox datami
 CREDITS
   By PulgoMaster
 
-  Sections marked [PM] highlight equations and logic originated by PulgoMaster
-  through independent reasoning, separate from raw datamine values.
-  The datamine provided numbers; the probability logic and equations were
-  reasoned from first principles.
+  All probability logic and equations in this document were derived from
+  first principles. The datamine provided the raw numbers.
 =========================================================
 
 
@@ -135,10 +133,10 @@ P_D, P_P, P_G
   Delicate, sometimes more Grand) is pure sampling noise from independent
   draws at these fixed probabilities.
 
-  [PM] The identification that relic size probability must be treated as
-  the outermost layer of the calculation — that passive odds are meaningless
-  without first weighting them by how likely each relic size is to appear —
-  was raised by PulgoMaster. Without this framing the formula is incomplete.
+  Relic size probability must be treated as the outermost layer of the
+  calculation — passive odds are meaningless without first weighting them
+  by how likely each relic size is to appear. Without this framing the
+  formula is incomplete.
 
 P_A, P_B
   DEPRECATED — this variable framing was incorrect.
@@ -150,13 +148,12 @@ P_A, P_B
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 2 — RELIC TYPE PROBABILITY (THE OUTERMOST LAYER) [PM]
+SECTION 2 — RELIC TYPE PROBABILITY (THE OUTERMOST LAYER)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[PM] This section's structure was proposed by PulgoMaster, who correctly
-identified that the probability of a passive appearing cannot be computed
-without first accounting for which relic size appears. The layered formula
-below is a direct result of that reasoning.
+The probability of a passive appearing cannot be computed without first
+accounting for which relic size appears. The layered formula below
+follows directly from that reasoning.
 
 Before any passive probabilities are computed, the game determines which
 relic SIZE appears. This is independent of the passive system and gates
@@ -350,15 +347,13 @@ KEY CONSEQUENCE OF THE CURSE-PASSIVE PAIRING RULE:
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 5 — CATEGORY EXCLUSION AND THE ODDS SHIFTING PHENOMENON [PM]
+SECTION 5 — CATEGORY EXCLUSION AND THE ODDS SHIFTING PHENOMENON
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[PM] The entire framework of this section — the question of whether odds
-shift after category elimination, the double-edge insight, and the
-C_special "slot cost with no benefit" observation — was originated by
-PulgoMaster through a line of questioning developed without reference to
-datamine numbers. The datamine only supplied the weights needed to verify
-and quantify what was already logically described.
+This section covers whether odds shift after category elimination, the
+double-edge effect, and the C_special "slot cost with no benefit" observation.
+These were derived through reasoning about the draw mechanics. The datamine
+supplied the weights needed to verify and quantify the logic.
 
 ─── 5A. THE BASIC EXCLUSION RULE ────────────────────────────────────────
 
@@ -388,14 +383,14 @@ C_q is now excluded. For slot k+1:
     After:  P(T) = 20/9800  = 0.204%
     Boost factor ≈ 1.0204
 
-─── 5C. THE DOUBLE-EDGE EFFECT [PM] ─────────────────────────────────────
+─── 5C. THE DOUBLE-EDGE EFFECT ──────────────────────────────────────────
 
-[PM] PulgoMaster identified the following non-obvious consequence: when an
+There is a non-obvious consequence here: when an
 external category is eliminated and T's raw probability rises, the raw
 probability of T's category siblings — the passives that would disqualify
 T from future slots — rises by the exact same proportional amount.
 
-PulgoMaster's original formulation (paraphrased):
+Put simply:
   "If we give 9 [sibling] passives each a 0.10% raise then it would add
    up to 0.90% while our desired passive only got raised by 0.10%."
 
@@ -435,8 +430,8 @@ external categories. Both scale by the same factor W/(W−W_Cq). Therefore:
 
 ─── 5E. WHEN DOES CATEGORY ELIMINATION PURELY HELP T? ──────────────────
 
-[PM] PulgoMaster posed this precisely: does eliminating an external
-category strictly help T, or is the benefit partially negated?
+The question: does eliminating an external category strictly help T,
+or is the benefit partially negated?
 
 On the FINAL slot of a relic: strictly positive.
   No future draws remain. Exclusion risk from siblings resolves on this
@@ -448,9 +443,9 @@ On INTERMEDIATE slots: mixed.
      increases proportionally (negative offset).
   Net effect across all remaining slots is complex — see Section 6.
 
-─── 5F. THE SPECIAL CATEGORY — SLOT COST WITH PARTIAL POOL ELIMINATION [PM] ─
+─── 5F. THE SPECIAL CATEGORY — SLOT COST WITH PARTIAL POOL ELIMINATION ──
 
-[PM] PulgoMaster identified this asymmetry: C_special passives consume
+There is an important asymmetry here: C_special passives consume
 a slot without reducing the pool for future slots at the category level.
 Formalised (corrected 2026-03-26):
 
@@ -795,13 +790,12 @@ For Group A (slot1=TABLE_300, slot2=TABLE_200, slot3=TABLE_100):
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 7 — ODDS OF MULTIPLE TARGET PASSIVES TOGETHER [PM]
+SECTION 7 — ODDS OF MULTIPLE TARGET PASSIVES TOGETHER
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[PM] PulgoMaster identified that a complete probability model must account
-for the case where the player wants multiple specific passives on the same
-relic simultaneously, and that these events are NOT independent — they
-interact through the exclusion system.
+A complete probability model must account for the case where you want
+multiple specific passives on the same relic simultaneously. These events
+are NOT independent — they interact through the exclusion system.
 
 For two targets T1 and T2 (different categories):
 
@@ -829,7 +823,7 @@ For THREE targets (a full God Roll on a Grand relic):
 
 ─── 7A. NORMAL GRAND — SIMPLIFIED MULTI-TARGET FORMULA ─────────────────
 
-  [PM] The 6-permutation sum collapses for Normal Grand relics due to
+  The 6-permutation sum collapses for Normal Grand relics due to
   tier-pool exclusivity (Section 4A). Each passive is locked to the slot
   matching its pool — a Grand-tier passive can only appear in slot 1, a
   Polished-tier passive only in slot 2, and a Delicate-tier passive only
@@ -896,13 +890,13 @@ SECTION 8 — PRACTICAL IMPLICATIONS AND SUMMARY
    All survivors boost proportionally. T is not special relative to its
    own category siblings — they all scale together.
 
-3. [PM] ELIMINATING EXTERNAL CATEGORIES HAS MIXED IMPACT ON T.
+3. ELIMINATING EXTERNAL CATEGORIES HAS MIXED IMPACT ON T.
    Final slot: strictly positive.
    Intermediate slots: positive for this slot, simultaneously raises
    T-sibling exclusion risk by the same factor. Net effect requires the
    full probability tree to evaluate.
 
-4. [PM] C_SPECIAL DRAWS ARE SLOT COST WITH NO POOL BENEFIT.
+4. C_SPECIAL DRAWS ARE SLOT COST WITH NO POOL BENEFIT.
    They use a slot without clearing any competition. Worst-case outcome
    for T on intermediate slots of multi-passive relics.
 
@@ -910,7 +904,7 @@ SECTION 8 — PRACTICAL IMPLICATIONS AND SUMMARY
    Naive multiplication of per-passive probabilities is incorrect.
    The exact answer requires the conditional probability tree.
 
-6. [PM] MULTI-TARGET PROBABILITY REQUIRES PERMUTATION SUM.
+6. MULTI-TARGET PROBABILITY REQUIRES PERMUTATION SUM.
    P(T1 AND T2) ≠ P(T1) × P(T2). All valid slot orderings must be
    enumerated and summed, each respecting the exclusion chain.
    Exception: Normal Grand (Section 7A) — tier-pool exclusivity locks
@@ -946,10 +940,9 @@ Polished (2 slots, same table both slots for simplicity):
 Grand (3 slots):
   Total ≈ 3/500 = 0.600%   (symmetric simplified case)
 
-  [PM] Note from PulgoMaster: the above shows why odds do NOT cleanly
-  multiply per slot — the exclusion system creates dependencies that
-  largely cancel in this symmetric case but create real deviations in
-  the actual asymmetric weight tables.
+  Note: this is why odds do NOT cleanly multiply per slot — the exclusion
+  system creates dependencies that largely cancel in this symmetric case
+  but create real deviations in the actual asymmetric weight tables.
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1373,7 +1366,7 @@ SECTION 13 — CHANGELOG
 2026-03-26  v1.0
   Initial document. Slot→table mapping confirmed from datamine.
   Category exclusion, double-edge effect, C_special analysis added.
-  Deep relic 4-variant structure confirmed. Credits added for [PM] logic.
+  Deep relic 4-variant structure confirmed.
 
 2026-03-26  v1.1
   P_A = P_B = 0.5 confirmed from ItemTableParam equal sub-table weights.

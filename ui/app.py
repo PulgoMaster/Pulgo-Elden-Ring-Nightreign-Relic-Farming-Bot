@@ -547,27 +547,50 @@ class RelicBotApp(tk.Tk):
         # Must run before super().__init__() — Windows assigns the taskbar slot
         # on window creation, so this must fire first or the button gets grouped
         # under python.exe and iconbitmap has no effect on the taskbar icon.
+        # AUMID is version-INDEPENDENT on purpose: bumping the version would
+        # otherwise create a new taskbar grouping slot with no cached icon, and
+        # Windows would fall back to the default python.exe icon until the user
+        # pinned the new version manually.
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "PulgoMaster.RelicBot.v1.6.5"
+                "PulgoMaster.RelicBot"
             )
         except Exception:
             pass
 
+        # Force the shell to drop any stale cached icon for this AUMID and
+        # reload from the current EXE.
+        try:
+            _SHCNE_ASSOCCHANGED = 0x08000000
+            _SHCNF_IDLIST       = 0x0000
+            ctypes.windll.shell32.SHChangeNotify(
+                _SHCNE_ASSOCCHANGED, _SHCNF_IDLIST, None, None)
+        except Exception:
+            pass
+
         super().__init__()
-        self.withdraw()   # keep window hidden until icon is set + UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.7.2  |  Made by Pulgo")
-        self.resizable(True, True)
-
-        # App icon (title-bar + alt-tab thumbnail)
-        # When frozen by PyInstaller, assets are extracted to sys._MEIPASS.
-        # In dev, fall back to the repo root (two dirs above this file).
+        # Resolve icon path BEFORE withdraw + iconbitmap.
         _icon_base = getattr(sys, "_MEIPASS",
                              os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         _icon_path = os.path.join(_icon_base, "assets", "icon.ico")
+
+        # Set the icon BEFORE withdraw().  Tk on Windows can silently drop
+        # iconbitmap calls made on a withdrawn window.
         if os.path.exists(_icon_path):
-            self.iconbitmap(_icon_path)
+            try:
+                self.iconbitmap(default=_icon_path)
+            except Exception:
+                pass
+            try:
+                self.iconbitmap(_icon_path)
+            except Exception:
+                pass
+
+        self.withdraw()   # keep window hidden until UI is built; prevents flash
+
+        self.title("Elden Ring Nightreign – Relic Bot v1.8.0  |  Made by Pulgo")
+        self.resizable(True, True)
 
         # Input recording
         self.recorder = input_controller.InputRecorder()
@@ -4215,8 +4238,6 @@ class RelicBotApp(tk.Tk):
                     try:
                         import os as _os
                         from bot import relic_analyzer as _ra
-                        _ra.set_curse_miss_dir(_os.path.join(run_dir, "curse_misses"))
-
                         def _curse_miss_diag_hook(slot_idx, raw_text, dump_path):
                             _d = getattr(self, "_diag", None)
                             _ci = getattr(self, "_diag_cur_iter", 0) or 0
@@ -4800,8 +4821,10 @@ class RelicBotApp(tk.Tk):
                 if not os.path.isdir(_copy_dir):
                     _prev_iter = iteration - 1
                     for _pfx in ("GOD ROLL", "HIT", "NEAR MISS",
-                                 "SMART GOD ROLL", "SMART", "EXCLUDED"):
-                        _cand = os.path.join(run_dir, f"{_pfx} {_prev_iter:03d}")
+                                 "SMART GOD ROLL", "SMART", "EXCLUDED", ""):
+                        _cand = os.path.join(run_dir,
+                                             f"{_pfx} {_prev_iter:03d}" if _pfx
+                                             else f"{_prev_iter:03d}")
                         if os.path.isdir(_cand):
                             _copy_dir = _cand
                             break
@@ -5275,6 +5298,11 @@ class RelicBotApp(tk.Tk):
                         "_run_log_path":    batch_log_path,
                         "_retries":         0,
                     }))
+                    if self._diag:
+                        try:
+                            self._diag.log_async("submit")
+                        except Exception:
+                            pass
 
                 _prev_save_dir = iter_dir
 
@@ -5680,13 +5708,13 @@ class RelicBotApp(tk.Tk):
             except Exception as e:
                 self._log(f"WARNING: could not write info.txt: {e}")
 
-            # Rename folder: GOD ROLL > HIT > NEAR MISS > SMART > EXCLUDED
+            # Rename folder: GOD ROLL > HIT > SMART > EXCLUDED.
+            # Near-miss iterations keep plain NNN — the Near Miss aggregation
+            # folder + screenshots + Info.txt provide the visibility.
             if num_matched >= 3:
                 tier_name = f"GOD ROLL {iteration:03d}"
             elif num_matched >= 1:
                 tier_name = f"HIT {iteration:03d}"
-            elif iteration in self._nearmiss_iterations:
-                tier_name = f"NEAR MISS {iteration:03d}"
             elif iteration in self._smart_gr_iterations:
                 tier_name = f"SMART GOD ROLL {iteration:03d}"
             elif iteration in self._smart_iterations:
@@ -5938,8 +5966,10 @@ class RelicBotApp(tk.Tk):
             # Folder may have been renamed by workers — resolve if needed.
             if not os.path.isdir(_final_copy_dir):
                 for _pfx in ("GOD ROLL", "HIT", "NEAR MISS",
-                             "SMART GOD ROLL", "SMART", "EXCLUDED"):
-                    _cand = os.path.join(run_dir, f"{_pfx} {iteration:03d}")
+                             "SMART GOD ROLL", "SMART", "EXCLUDED", ""):
+                    _cand = os.path.join(run_dir,
+                                         f"{_pfx} {iteration:03d}" if _pfx
+                                         else f"{iteration:03d}")
                     if os.path.isdir(_cand):
                         _final_copy_dir = _cand
                         break
@@ -6726,10 +6756,9 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
 
-        # Track per-relic OCR pipeline health.  This is the v1.7.1 regression
-        # signature watcher: name OCR succeeds but ALL passive slots come back
-        # empty.  If we'd had this in v1.7.1 we'd have caught the laptop bug
-        # in the first cycle instead of the next morning.
+        # Track per-relic OCR pipeline health: name OCR succeeds but ALL
+        # passive slots come back empty.  Fires an error on the first relic
+        # so broken OCR is caught immediately instead of after a long run.
         if self._diag is not None:
             try:
                 _rf = result.get("relics_found") or []
@@ -7438,8 +7467,6 @@ class RelicBotApp(tk.Tk):
             tier_name = f"GOD ROLL {iteration:03d}"
         elif num_matched >= 1:
             tier_name = f"HIT {iteration:03d}"
-        elif iteration in self._nearmiss_iterations:
-            tier_name = f"NEAR MISS {iteration:03d}"
         elif iteration in self._smart_gr_iterations:
             tier_name = f"SMART GOD ROLL {iteration:03d}"
         elif iteration in self._smart_iterations:
@@ -8164,7 +8191,8 @@ class RelicBotApp(tk.Tk):
                     if _p1_try > 0:
                         self._iter_p1_settle_retries += 1  # each retry = settle missed
                     self._iter_safe_path_used = True   # alt sequence always used
-                    self._set_ocr_throttle(True)   # pause workers during Phase 1 buy inputs
+                    self._set_ocr_throttle(True)   # pause workers — no new tasks
+                    relic_analyzer.wait_gpu_idle()  # wait for in-flight to finish
                     # Programmatic F→DOWN→[verify X/N]→F with controlled hold times.
                     # Between the DOWN press and the final confirm F, we OCR the
                     # buy dialog's "X / N" line to verify the quantity actually
@@ -8496,9 +8524,10 @@ class RelicBotApp(tk.Tk):
                         _settle_budget_s = 15.0 * _settle_gap_mult
                     _settle_extra_sleep = 0.05 * _settle_gap_mult
                     _settle_deadline = time.monotonic() + _settle_budget_s
+                    _SETTLE_MAX_POLLS = 10   # hard cap — prevents 100s+ hangs
                     _sc = 0
                     time.sleep(0.25)  # let the relic screen fully render before first capture
-                    while time.monotonic() < _settle_deadline:
+                    while time.monotonic() < _settle_deadline and _sc < _SETTLE_MAX_POLLS:
                         if not self.bot_running or self._reset_iter_requested:
                             self._set_ocr_throttle(False)
                             if not self.bot_running and capture_only and not _p2_async:
@@ -8506,42 +8535,11 @@ class RelicBotApp(tk.Tk):
                             return relic_results
                         try:
                             _settle_img = screen_capture.capture(region)
-                            # Check for "Insufficient murk" popup using the already-captured
-                            # frame — reuses the screenshot, no extra capture needed.
-                            if relic_analyzer.check_text_visible(
-                                    _settle_img, "insufficient murk", top_fraction=0.85):
-                                _settle_insufficient_murk = True
-                                self._log(
-                                    f"  Cycle {_batch_i + 1}: 'Insufficient murk' detected"
-                                    f" — all relics purchased.")
-                                break
-                            _settle_use_cpu = False
-                            try:
-                                if self._gpu_always_analyze_var.get():
-                                    _bgq = getattr(self, "_bg_gpu_q", None)
-                                    _aq  = getattr(self, "_async_relic_q", None)
-                                    if (_bgq is not None and _bgq.qsize() > 0) or (
-                                            _aq is not None and _aq.qsize() > 0):
-                                        _settle_use_cpu = True
-                            except Exception:
-                                _settle_use_cpu = False
-                            if _settle_use_cpu:
-                                try:
-                                    relic_analyzer.set_thread_device(False)
-                                except Exception:
-                                    pass
-                            try:
-                                _settle_result = relic_analyzer.analyze_for_nav(
-                                    _settle_img, criteria,
-                                    relic_type=self.relic_type_var.get(),
-                                    doors=self._doors,
-                                )
-                            finally:
-                                if _settle_use_cpu:
-                                    try:
-                                        relic_analyzer.set_thread_device(None)
-                                    except Exception:
-                                        pass
+                            _settle_result = relic_analyzer.analyze_for_nav(
+                                _settle_img, criteria,
+                                relic_type=self.relic_type_var.get(),
+                                doors=self._doors,
+                            )
                             _toks = _settle_result.get("_ocr_tokens", [])
                             # Require at least one passive — a PASSIVE token, or
                             # relics_found[0] with a non-empty passives list.
@@ -8550,6 +8548,8 @@ class RelicBotApp(tk.Tk):
                             _has_relic_passives = (
                                 bool(_rf) and bool((_rf[0] or {}).get("passives"))
                             )
+                            _rname = (_rf[0] or {}).get("name") if _rf else None
+                            _npas = len((_rf[0] or {}).get("passives", [])) if _rf else 0
                             if _has_passive_tok or _has_relic_passives:
                                 _settle_passive_ever = True
                             if _has_passive_tok or _has_relic_passives:
@@ -8567,13 +8567,31 @@ class RelicBotApp(tk.Tk):
                         time.sleep(1.0 + _settle_extra_sleep)
                         _sc += 1
 
+                    # Post-loop: check last captured frame for "Insufficient murk"
+                    # popup.  Moved out of the hot loop to avoid calling nav_ocr on
+                    # 85% of the screen every poll iteration (was the primary cause
+                    # of 100+ second settle hangs — GPU lock contention).
+                    if (not _settle_ok and not _settle_insufficient_murk
+                            and _settle_img is not None):
+                        try:
+                            if relic_analyzer.check_text_visible(
+                                    _settle_img, "insufficient murk",
+                                    top_fraction=0.85):
+                                _settle_insufficient_murk = True
+                                self._log(
+                                    f"  Cycle {_batch_i + 1}: 'Insufficient murk'"
+                                    f" detected — all relics purchased.")
+                        except Exception:
+                            pass
+
                     # Settle loop done.
-                    # Normal mode: release workers now so they can run during
-                    # the settle_no_passives verify and Phase 2 scanning.
-                    # Exclude-buy-phase mode: keep throttle ON — workers stay
-                    # paused through the entire Phase 2 capture window and are
-                    # released after the last screenshot is taken.
-                    if not _exclude_buy_phase:
+                    # GPU mode: keep throttle ON through Phase 2 — workers
+                    # were guaranteed idle by wait_gpu_idle() at Phase 1 start,
+                    # keeping them paused through Phase 2 ensures zero stalls
+                    # on input_gpu_yield RIGHT presses.  Released after Phase 2.
+                    # CPU mode: release now (no GPU lock contention).
+                    if (not _exclude_buy_phase
+                            and not self._gpu_accel_var.get()):
                         self._set_ocr_throttle(False)
 
                     # Failsafe: "Insufficient murk" popup detected in settle poll —
@@ -8652,43 +8670,17 @@ class RelicBotApp(tk.Tk):
                                 _sc = 0
                                 _settle_no_passives = False
                                 _settle_deadline_2 = time.monotonic() + _settle_budget_s
-                                while time.monotonic() < _settle_deadline_2:
+                                while (time.monotonic() < _settle_deadline_2
+                                       and _sc < _SETTLE_MAX_POLLS):
                                     if not self.bot_running or self._reset_iter_requested:
                                         break
                                     try:
                                         _settle_img = screen_capture.capture(region)
-                                        if relic_analyzer.check_text_visible(
-                                                _settle_img, "insufficient murk",
-                                                top_fraction=0.85):
-                                            _settle_insufficient_murk = True
-                                            break
-                                        _settle_use_cpu2 = False
-                                        try:
-                                            if self._gpu_always_analyze_var.get():
-                                                _bgq = getattr(self, "_bg_gpu_q", None)
-                                                _aq  = getattr(self, "_async_relic_q", None)
-                                                if (_bgq is not None and _bgq.qsize() > 0) or (
-                                                        _aq is not None and _aq.qsize() > 0):
-                                                    _settle_use_cpu2 = True
-                                        except Exception:
-                                            _settle_use_cpu2 = False
-                                        if _settle_use_cpu2:
-                                            try:
-                                                relic_analyzer.set_thread_device(False)
-                                            except Exception:
-                                                pass
-                                        try:
-                                            _settle_result = relic_analyzer.analyze_for_nav(
-                                                _settle_img, criteria,
-                                                relic_type=self.relic_type_var.get(),
-                                                doors=self._doors,
-                                            )
-                                        finally:
-                                            if _settle_use_cpu2:
-                                                try:
-                                                    relic_analyzer.set_thread_device(None)
-                                                except Exception:
-                                                    pass
+                                        _settle_result = relic_analyzer.analyze_for_nav(
+                                            _settle_img, criteria,
+                                            relic_type=self.relic_type_var.get(),
+                                            doors=self._doors,
+                                        )
                                         _toks_r = _settle_result.get("_ocr_tokens", []) or []
                                         _rf_r   = _settle_result.get("relics_found") or []
                                         _has_pt_r = any(t.get("status") == "PASSIVE" for t in _toks_r)
@@ -8708,6 +8700,19 @@ class RelicBotApp(tk.Tk):
                                             f"  Cycle {_batch_i+1}: settle-retry err: {_se2}")
                                     time.sleep(1.0 + _settle_extra_sleep)
                                     _sc += 1
+                                # Post-loop murk check (same pattern as primary loop)
+                                if (not _settle_ok and not _settle_insufficient_murk
+                                        and _settle_img is not None):
+                                    try:
+                                        if relic_analyzer.check_text_visible(
+                                                _settle_img, "insufficient murk",
+                                                top_fraction=0.85):
+                                            _settle_insufficient_murk = True
+                                            self._log(
+                                                f"  Cycle {_batch_i + 1}: 'Insufficient"
+                                                f" murk' detected — all relics purchased.")
+                                    except Exception:
+                                        pass
                                 if _settle_ok and self._diag:
                                     try:
                                         self._diag.log_settle(
@@ -8928,8 +8933,7 @@ class RelicBotApp(tk.Tk):
                     while (_p2_confirmed < _batch_size
                            and _p2_attempts < _P2_MAX_ATTEMPTS):
                         if not self.bot_running or self._reset_iter_requested:
-                            if _exclude_buy_phase:
-                                self._set_ocr_throttle(False)
+                            self._set_ocr_throttle(False)
                             if not self.bot_running and capture_only and not _p2_async:
                                 return _bl_captures
                             return relic_results
@@ -8961,8 +8965,7 @@ class RelicBotApp(tk.Tk):
                             _p2_advance_settle = 0.20 * max(1.0, self._perf_gap_mult)
                             time.sleep(_p2_advance_settle)
                             if not self.bot_running or self._reset_iter_requested:
-                                if _exclude_buy_phase:
-                                    self._set_ocr_throttle(False)
+                                self._set_ocr_throttle(False)
                                 if not self.bot_running and capture_only and not _p2_async:
                                     return _bl_captures
                                 return relic_results
@@ -9093,12 +9096,36 @@ class RelicBotApp(tk.Tk):
                                             except Exception:
                                                 pass
                             else:
+                                # End-of-list wrap fast-path: matched_idx == 0
+                                # after >=2 confirmed relics means the cursor
+                                # walked past the last real relic (buy-qty OCR
+                                # overcounted). Clamp and exit cleanly.
+                                if _matched_idx == 0 and _p2_confirmed >= 2:
+                                    self._log(
+                                        f"  Cycle {_batch_i + 1}: end-of-list wrap"
+                                        f" — buy_qty overcount detected,"
+                                        f" clamping batch_size {_batch_size}"
+                                        f"→{_p2_confirmed} (cycle complete)")
+                                    if self._diag:
+                                        try:
+                                            self._diag.log_advance(
+                                                cycle=_batch_i + 1,
+                                                idx=_p2_confirmed,
+                                                outcome="endwrap_clamp",
+                                                note=(f"old_batch={_batch_size}"
+                                                      f" new_batch={_p2_confirmed}"
+                                                      f" hist={len(_p2_crop_history)}"
+                                                      f" attempts={_p2_attempts}"))
+                                        except Exception:
+                                            pass
+                                    _batch_size = _p2_confirmed
+                                    break
                                 _p2_wraparound_hits += 1
                                 self._log(
                                     f"  Cycle {_batch_i + 1}: wraparound detected"
-                                    f" (current capture matches earlier slot {_matched_idx}"
-                                    f" of {len(_p2_crop_history)}) — RIGHT key doubled,"
-                                    f" continuing to find missed relic")
+                                    f" (matched slot {_matched_idx} of {len(_p2_crop_history)})"
+                                    f" — confirmed={_p2_confirmed}/{_batch_size}"
+                                    f" attempts={_p2_attempts}/{_P2_MAX_ATTEMPTS}")
                                 if self._diag:
                                     try:
                                         self._diag.log_advance(
@@ -9159,6 +9186,11 @@ class RelicBotApp(tk.Tk):
                                     })
                                 )
                                 _p2_submitted += 1
+                                if self._diag:
+                                    try:
+                                        self._diag.log_async("submit")
+                                    except Exception:
+                                        pass
                                 self._ov_stored_count += 1
                                 if self._overlay:
                                     _sto = self._ov_stored_count
@@ -9498,14 +9530,20 @@ class RelicBotApp(tk.Tk):
                         _timing_p2_samples.append(
                             (time.perf_counter() - _t_p2_start) / _batch_size)
 
-                # In excl-ops mode the throttle stays ON through Phase 3 —
-                # the batch loop releases it at the close_game call.
+                # GPU mode: release throttle after Phase 2 — workers resume
+                # and process the backlog during Phase 3 + Phase 0.
+                # wait_gpu_idle() at next Phase 1 start guarantees they're
+                # idle before inputs resume.
+                if (self._gpu_accel_var.get()
+                        and not _exclude_buy_phase):
+                    self._set_ocr_throttle(False)
 
                 # ── Phase 3: Reset — F to exit preview, back to shop ──────── #
                 # Use a direct tap rather than replaying the recorded sequence;
                 # the recording has a ~1.0 s pre-press gap that adds no value here.
                 if self.phase_events[3]:
                     if not self.bot_running or self._reset_iter_requested:
+                        self._set_ocr_throttle(False)
                         if _p2_async:
                             self._async_iter_abort_cleanup(iteration, _p2_submitted)
                         return relic_results
@@ -9514,10 +9552,7 @@ class RelicBotApp(tk.Tk):
                             f"Cycle {_batch_i + 1} Phase 3 (reset)",
                             f"cycle={_batch_i + 1}")
                     self._set_status(f"{label}: resetting to shop…", "green")
-                    self._set_ocr_throttle(True)   # pause workers during Phase 3 F press
                     self.player.tap("f", hold=0.05)
-                    if not _exclude_buy_phase:     # excl-ops: batch loop releases at close_game
-                        self._set_ocr_throttle(False)  # resume — workers can run during shop settle
                     time.sleep(0.40)   # shop ready within ~239ms of F release
 
                     # ── Post-Phase 3: verify shop item ─────────────────── #
@@ -9614,8 +9649,7 @@ class RelicBotApp(tk.Tk):
                                 _p3_shop_back = False
                                 for _p3sw in range(50):
                                     if not self.bot_running or self._reset_iter_requested:
-                                        if _exclude_buy_phase:
-                                            self._set_ocr_throttle(False)
+                                        self._set_ocr_throttle(False)
                                         if (not self.bot_running
                                                 and capture_only
                                                 and not _p2_async):
@@ -9648,8 +9682,7 @@ class RelicBotApp(tk.Tk):
                                                     attempt=self._p3_consecutive_fails)
                                             except Exception:
                                                 pass
-                                        if _exclude_buy_phase:
-                                            self._set_ocr_throttle(False)
+                                        self._set_ocr_throttle(False)
                                         if capture_only and not _p2_async:
                                             return _bl_captures
                                         return relic_results
@@ -10986,7 +11019,8 @@ class RelicBotApp(tk.Tk):
                     "buy_qty_fallback_murk"]),
                 ("Phase 2 advance", [
                     "advance_total", "advance_dup_accepted", "advance_drop",
-                    "p2_wraparound_skip", "p2_input_drop_skip",
+                    "p2_wraparound_skip", "p2_endwrap_clamp",
+                    "p2_input_drop_skip",
                     "p2_recovery_attempts", "p2_recovery_success",
                     "p2_relics_lost", "p2_cycles_short"]),
                 ("Phase 3", [
@@ -11067,7 +11101,7 @@ class RelicBotApp(tk.Tk):
                         lines.append(f"      {_ev_str}")
         lines.append("")
 
-        # ── GPU stall tracking (v1.7.2 rev 6) ─────────────────────────── #
+        # ── GPU stall tracking ────────────────────────────────────────── #
         # Records waits ≥100ms in input_gpu_yield, attributing each to the
         # call site that was holding _gpu_inflight_lock at the time. Used
         # to identify what's causing the residual ~600-1000ms GPU stalls

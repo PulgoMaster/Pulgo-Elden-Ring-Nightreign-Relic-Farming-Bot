@@ -25,43 +25,34 @@ and match relics against your criteria. No internet connection or account requir
 
 ---
 
-## Repository Folder Structure
+## Folder Structure
+
+After extracting the release ZIP, your folder looks like this:
 
 ```
-elden-ring-relic-bot/
-├── sequences/          Input sequence files for each phase (load these in the bot)
-├── save_backups/       Point the bot's "Backup folder" here — saves are stored here
-├── batch_output/       Point the bot's "Output folder" here — batch results go here
-├── profiles/           Your saved bot profiles (local only, never committed)
-├── bot/                Bot logic (screen capture, OCR analysis, input control)
-├── ui/                 User interface
-├── assets/             App icon and images
-├── main.py             Entry point
+RelicBot/
+├── RelicBot.exe        Launch this to start the bot
+├── sequences/          Input sequence files for each phase
+├── save_backups/       Bot stores save backups here
+├── batch_output/       Batch run results go here
+├── profiles/           Your saved bot profiles
+├── GUIDE.txt           User guide
 ├── SETUP.md            This file
-└── requirements.txt    Python dependencies
+└── _internal/          Bot internals (do not modify)
 ```
 
 ---
 
 ## Requirements
 
-- Python 3.10 or later
-- Elden Ring Nightreign installed via Steam (App ID: `2622380`)
 - Windows 10 or 11
-- ~500 MB free disk space (for the EasyOCR model download on first run)
-- **16:9 display** — the bot crops specific screen regions by fixed fractions tuned for 16:9.
-  Any resolution is fine (1080p, 1440p, 4K, etc.) as long as the aspect ratio is 16:9.
-  Ultrawide (21:9), 4:3, and other non-standard ratios are **not supported** and will cause
-  OCR to read the wrong parts of the screen.
+- Elden Ring Nightreign installed via Steam
+- **16:9 display** — any resolution (1080p, 1440p, 4K) as long as the aspect ratio is 16:9.
+  Ultrawide (21:9), 4:3, and other non-standard ratios are **not supported**.
+- No Python or other software needed — everything is bundled in the EXE
 
-### Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-> **First run note:** On first launch the bot downloads its OCR model (~100 MB) automatically.
-> This is a one-time download — after that the bot works fully offline with no ongoing costs.
+> **First run:** The bot downloads its OCR model (~100 MB) automatically on first launch.
+> One-time only — after that the bot works fully offline.
 
 ---
 
@@ -69,16 +60,14 @@ pip install -r requirements.txt
 
 ### 1. Launch the bot
 
-```bash
-python main.py
-```
+Run `RelicBot.exe` from the extracted folder.
 
 ### 2. Configure Save File & Game
 
 | Field | What to enter |
 |-------|---------------|
 | **Save file** | Path to your `NR0000.sl2` (e.g. `C:\Users\<YourName>\AppData\Roaming\Nightreign\<SteamID>\NR0000.sl2`) |
-| **Backup folder** | Point to the `save_backups/` folder inside this repo, or any folder you choose |
+| **Backup folder** | Point to the `save_backups/` folder inside the RelicBot folder, or any folder you choose |
 | **Game executable** | Path to `nightreign.exe` inside your Steam install |
 | **Steam App ID** | Pre-filled: `2622380` |
 
@@ -128,7 +117,7 @@ Add any curses you want to block. Relics carrying a blocked curse will be reject
 
 The bot runs in **Batch Mode** — it runs for a set number of loops or hours and saves every iteration for manual review.
 
-Point the **Output folder** to `batch_output/` inside this repo (or any folder).
+Point the **Output folder** to `batch_output/` inside the RelicBot folder (or any folder).
 After the run, open `README.txt` in the output folder — hits are marked with `*`.
 
 ### 9. Save a Profile

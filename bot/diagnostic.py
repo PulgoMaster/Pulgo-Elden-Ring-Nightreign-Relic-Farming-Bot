@@ -206,6 +206,7 @@ class DiagnosticLogger:
             "advance_dup_accepted": 0,
             "advance_drop":         0,
             "p2_wraparound_skip":   0,   # cur capture matched an EARLIER (not immediate) slot
+            "p2_endwrap_clamp":     0,   # end-of-list wrap detected; batch_size clamped down
             "p2_input_drop_skip":   0,   # cur capture matched the IMMEDIATELY previous slot
             "p2_recovery_attempts": 0,   # extra RIGHT presses beyond batch_size used to find missed relics
             "p2_recovery_success":  0,   # cycles where recovery found all batch_size unique
@@ -836,7 +837,7 @@ class DiagnosticLogger:
     def log_advance(self, cycle: int, idx: int, outcome: str,
                     retries: int = 0, note: str = "") -> None:
         """outcome: confirmed | duplicate | drop | dup_accepted
-                    | wraparound_skip | input_drop_skip
+                    | wraparound_skip | endwrap_clamp | input_drop_skip
                     | recovery_success | relic_lost | cycle_short"""
         self._ev["advance_total"] += 1
         if outcome == "dup_accepted":
@@ -845,6 +846,8 @@ class DiagnosticLogger:
             self._ev["advance_drop"] += 1
         elif outcome == "wraparound_skip":
             self._ev["p2_wraparound_skip"] += 1
+        elif outcome == "endwrap_clamp":
+            self._ev["p2_endwrap_clamp"] += 1
         elif outcome == "input_drop_skip":
             self._ev["p2_input_drop_skip"] += 1
         elif outcome == "recovery_success":
@@ -864,7 +867,7 @@ class DiagnosticLogger:
                              {"cycle": cycle, "idx": idx, "retries": retries},
                              severity=WARN)
         elif outcome == "wraparound_skip":
-            self.log_failure(INPUT, "right_advance_doubled",
+            self.log_failure(INPUT, "end_of_list_wrap",
                              {"cycle": cycle, "idx": idx},
                              severity=WARN)
         elif outcome == "relic_lost":

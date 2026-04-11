@@ -4,7 +4,47 @@ All notable changes to this project are documented here.
 
 ---
 
-## [1.7.2] — 2026-04-08 — PHASE 1 BUY-QUANTITY VERIFICATION + RIGHT-KEY DOUBLING ELIMINATED + GPU PRIORITY HARDENING
+## [1.8.0] — 2026-04-10 — FIRST PUBLIC RELEASE
+
+This is the first public release of RelicBot. All features listed in the changelog below have been tested and verified. Versions prior to 1.8.0 were pre-release builds used during development and testing.
+
+See README.md for a full feature overview and INSTALLATION.md for setup instructions.
+
+---
+
+## [1.7.3] [Pre-Release] — 2026-04-10 — SETTLE LOOP FIX + GPU STALL ELIMINATION + END-OF-LIST WRAP CLAMP
+
+### Settle loop fix
+- Moved `check_text_visible("insufficient murk")` out of the settle poll loop — was running full-screen `nav_ocr` on every poll, causing indefinite GPU lock contention. Now runs once after the loop exits on the last captured frame.
+- Added hard poll cap (`_SETTLE_MAX_POLLS = 10`) to both settle loops (primary and RIGHT-skip recovery). Prevents runaway loops regardless of timing.
+
+### End-of-list wrap clamp
+- Root cause of v1.7.2's `right_advance_doubled` events was buy-qty OCR overcounting (reading 10 instead of 9), NOT key doubling. The cursor walked past the last real relic and wrapped to the beginning.
+- New fast-path clamp: when `matched_idx == 0` and `confirmed >= 2`, the cycle is clamped to the confirmed count and exits cleanly. Mathematically guaranteed — doubled keys advance forward and can never revisit slot 0.
+- Renamed diagnostic counter from `right_advance_doubled` to `end_of_list_wrap` for accuracy.
+
+### GPU stall elimination
+- Async GPU workers were competing with `input_gpu_yield` during Phase 1/2 RIGHT-key and F-key presses, causing 1000+ GPU stalls per run (300+ seconds of wasted wait time).
+- Fix: at Phase 1 start, workers are paused via OCR throttle and `wait_gpu_idle()` confirms all in-flight GPU work has finished before any inputs are sent. Workers resume after settle confirms, processing the backlog during Phase 3 and Phase 0 when no input contention exists.
+- All early-exit paths release throttle unconditionally to prevent leaks.
+
+### Taskbar icon fix
+- AUMID changed from version-specific (`PulgoMaster.RelicBot.v1.6.5`) to version-independent (`PulgoMaster.RelicBot`). Prevents new taskbar slot on each version bump.
+- `iconbitmap` calls reordered before `withdraw()` — Tk on Windows can silently drop icon calls on withdrawn windows.
+- Added `SHChangeNotify(SHCNE_ASSOCCHANGED)` at startup to flush stale shell icon cache.
+
+### Near miss folder naming
+- Near miss iteration folders now use plain numeric names (e.g. `001`) instead of `NEAR MISS 001` prefix. The `Near Miss/` aggregation folder and screenshots still provide full visibility.
+- Fallback folder scan updated to find both old prefixed and new plain-numbered folders.
+
+### Other
+- Removed `curse_misses/` folder writes — curse detection proven reliable (0 misses, 1014 hits in Deep mode testing). Diagnostic counter still tracks any future misses.
+- Fixed `async_submits` diagnostic counter (was never incremented).
+- Probability documentation rewritten for clarity.
+
+---
+
+## [1.7.2] [Pre-Release] — 2026-04-08 — PHASE 1 BUY-QUANTITY VERIFICATION + RIGHT-KEY DOUBLING ELIMINATED + GPU PRIORITY HARDENING
 
 ### Phase 2 RIGHT-key doubling — root cause and fix
 
@@ -94,7 +134,7 @@ Plus per-cycle `BUY_QTY` lines in the .diag log with full evidence (cycle, expec
 
 ---
 
-## [1.7.1] — 2026-04-07 — OCR REGION REWORK + CYAN CURSE DETECTION + DEEP DIAGNOSTICS
+## [1.7.1] [Pre-Release] — 2026-04-07 — OCR REGION REWORK + CYAN CURSE DETECTION + DEEP DIAGNOSTICS
 
 ### OCR Crop Geometry Rework
 - **Slot crops now skip the parchment icon and dialog border entirely.** `_SLOT_X_START` raised from 0.27 to 0.348 — eliminates ~95% of non-text pixels feeding into EasyOCR. Smaller crop = faster OCR with no loss of legibility.
@@ -152,7 +192,7 @@ Plus per-cycle `BUY_QTY` lines in the .diag log with full evidence (cycle, expec
 
 ---
 
-## [1.6.5] — 2026-04-04 — ENHANCED PROBABILITY ENGINE + UI OVERHAUL
+## [1.6.5] [Pre-Release] — 2026-04-04 — ENHANCED PROBABILITY ENGINE + UI OVERHAUL
 
 ### Probability Engine
 - **Enhanced probability model** with exact compat-group elimination across slots — odds now account for how each passive draw removes a category from subsequent slots.
@@ -187,13 +227,13 @@ Plus per-cycle `BUY_QTY` lines in the .diag log with full evidence (cycle, expec
 
 ---
 
-## [1.6.4] — 2026-04-04 — CURSE BLOCKING FIX + COMPAT GROUP OVERHAUL
+## [1.6.4] [Pre-Release] — 2026-04-04 — CURSE BLOCKING FIX + COMPAT GROUP OVERHAUL
 
 See v1.6.5 notes above — v1.6.4 was a partial release that included the bug fixes and compat group overhaul. v1.6.5 adds the enhanced probability engine and UI overhaul.
 
 ---
 
-## [1.6.0] — 2026-03-30 — SESSION 2 FIXES + RELIC CRITERIA POLISH
+## [1.6.0] [Pre-Release] — 2026-03-30 — SESSION 2 FIXES + RELIC CRITERIA POLISH
 
 ### 2026-03-30 Session 2 Changes
 
@@ -416,7 +456,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.5.1] – 2026-03-27
+## [1.5.1] [Pre-Release] – 2026-03-27
 
 ### Added
 - **Matches View hotkey (F8)** — press F8 (configurable) to toggle the overlay between the normal log view and the full-width Matched Relics panel without touching the mouse. "Matches Hotkey" button added to Batch Mode Settings row 3 alongside the existing overlay toggle hotkey. Saved in profile as `matches_hotkey_str` / `matches_hotkey_display`.
@@ -440,7 +480,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.5.0] – 2026-03-27 — SUBSTANTIAL UPDATE
+## [1.5.0] [Pre-Release] – 2026-03-27 — SUBSTANTIAL UPDATE
 
 ### Added
 - **Matches log panel** — "View Matches" button in the overlay toggles the two log panels into a single full-width scrollable view showing every matched relic with batch #, relic #, tier (2/3 or 3/3), passives, and curses. Clicking "Back to Logs" returns to the normal split log view. All matches are also written to `matches_log.txt` in the batch run folder for persistent review.
@@ -467,7 +507,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.4.7] – 2026-03-26
+## [1.4.7] [Pre-Release] – 2026-03-26
 
 ### Added
 - **Curse detection** — relics with curse passives are now correctly identified during OCR analysis. Previously `analyze()` only matched against `ALL_PASSIVES_SORTED` (which excludes curses), so `matched_relic_curses` was always empty and `_is_curse_blocked()` never fired. All 4 confirmed false positives from the test run (HIT 014, HIT 024, HIT 030, HIT 039) were curse-carrying relics that should have been excluded. Fixed by adding a second-pass match against `ALL_CURSES` when the first-pass passive match returns None.
@@ -476,7 +516,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.4.5] – 2026-03-25
+## [1.4.5] [Pre-Release] – 2026-03-25
 
 ### Added
 - **Adaptive input-gap scaling** — the bot tracks game load time each iteration as a proxy for overall system health. As load times grow over a long run (system slowing under sustained use), a `_perf_gap_mult` multiplier rises proportionally (capped at 2.5×). Phase 0, Phase 1, and Phase 2 input gaps all scale by this factor automatically. A `[Adaptive]` log line is emitted when the multiplier changes by ≥ 5%. Resets to 1.0 at the start of each new batch.
@@ -511,7 +551,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.4.4] – 2026-03-24
+## [1.4.4] [Pre-Release] – 2026-03-24
 
 ### Fixed
 - **Screenshots missing from HIT folders** — v1.4.2's RAM optimisation placed `img_bytes = None` in the `finally` block, which ran before the screenshot-save check. Screenshots were silently never written. Bytes are now cleared after the save section so all HIT/MATCH images are correctly written to disk.
@@ -531,7 +571,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.4.3] – 2026-03-24
+## [1.4.3] [Pre-Release] – 2026-03-24
 
 ### Fixed
 - **Phase 4 scanning pre-existing relics** — Phase 4's relic count was derived from murk math (`murk ÷ 1800`) rather than the number of relics actually purchased. If the save file contained pre-existing relics, Phase 4 would scan them too, producing false positives. The bot now re-reads the murk counter immediately after Phase 1 completes and calculates `actual_bought = (murk_before − murk_after) / cost`. Phase 4 uses this value instead of the estimate.
@@ -543,7 +583,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.4.2] – 2026-03-24
+## [1.4.2] [Pre-Release] – 2026-03-24
 
 ### Fixed
 - **RAM exhaustion prevention** — async OCR workers now check free system RAM before each inference call. If available RAM drops below 400 MB, the worker sleeps and retries until memory recovers. Prevents PyTorch OOM crashes on machines where the game's memory footprint spikes during loading.
@@ -560,7 +600,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.4.1] – 2026-03-24
+## [1.4.1] [Pre-Release] – 2026-03-24
 
 ### Fixed
 - **Game launch retry loop** — if the bot closed the game and Steam was slow to re-register the session, the "waiting for game window" loop could spin forever. Replaced with three-state logic: (A) window visible → proceed; (B) process running, no window yet → keep polling up to 20 s per cycle; (C) process not found → 15 s grace period for Steam to spawn, then relaunch. After 3 failed launch attempts the batch cancels cleanly.
@@ -569,7 +609,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.4.0] – 2026-03-24
+## [1.4.0] [Pre-Release] – 2026-03-24
 
 ### Fixed
 - **Phase 3: smart F2 loop replaces blind fallback** — tab detection now runs in an 80-second loop: capture → check if on Sell → if not, detect active tab → press exact F2 count → repeat. If detection is inconclusive, presses F2 ×1 to shift position and re-detects. The old "worst-case 10 presses" and blind F2 fallback are removed; F2 ×10 wrapped the circular tab list and made navigation worse, not better.
@@ -578,7 +618,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.3.9] – 2026-03-24
+## [1.3.9] [Pre-Release] – 2026-03-24
 
 ### Fixed
 - **Phase 0 OCR: "Deep Scenic Flatstone" now detected correctly** — EasyOCR splits the item name into separate "Deep" and "Scenic Flatstone" tokens. Detection now uses positional bounding-box check: "Deep" token must be on the same title line (≤40px vertical tolerance) and to the left of "Scenic Flatstone". Previously the substring check never matched and every iteration failed Phase 0.
@@ -595,7 +635,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.4.0] – 2026-03-22
+## [1.4.0] [Pre-Release] – 2026-03-22
 
 ### Changed
 - **Merged "Relic Type" and "Relic Color Filter" into one panel** — new "Choose Relic Type" section sits directly below Save File & Game Configuration
@@ -606,7 +646,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.3.0] – 2026-03-22
+## [1.3.0] [Pre-Release] – 2026-03-22
 
 ### Added
 - **Translucent batch-mode HUD overlay** — always-on-top, bottom-left of screen
@@ -629,7 +669,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.2.0] – 2026-03-22
+## [1.2.0] [Pre-Release] – 2026-03-22
 
 ### Added
 - **Resolution-aware relic panel crop** — crops to the bottom-right quadrant where the relic info panel sits (`left = 45%`, `top = 65%` of screen dimensions)
@@ -651,7 +691,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.1.0] – 2026-03-21
+## [1.1.0] [Pre-Release] – 2026-03-21
 
 ### Changed
 - Switched OCR engine to **EasyOCR** (fully on-device, no API key required, no ongoing costs)
@@ -664,7 +704,7 @@ Completely replaces the old Phase 2/3/4 relic review loop with a faster, more re
 
 ---
 
-## [1.0.0] – 2026-03-20
+## [1.0.0] [Pre-Release] – 2026-03-20
 
 ### Added
 - Initial release

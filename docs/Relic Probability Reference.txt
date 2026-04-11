@@ -310,7 +310,7 @@ Probability that a Deep relic PASSES the curse filter (no blocked curse appears)
 
 
 ════════════════════════════════════════════════════════════════════
-SECTION G — THE CATEGORY EXCLUSION EFFECT (ODDS SHIFTING) [PM]
+SECTION G — THE CATEGORY EXCLUSION EFFECT (ODDS SHIFTING)
 ════════════════════════════════════════════════════════════════════
 
 This section explains the most counter-intuitive aspect of relic probability.
@@ -342,7 +342,7 @@ Example:
   Before:  100 / 10,000 = 1.00%
   After:   100 /  9,500 = 1.05%   → +0.05% boost
 
-─── G3. THE DOUBLE-EDGE EFFECT [PM] ─────────────────────────────────
+─── G3. THE DOUBLE-EDGE EFFECT ──────────────────────────────────────
 
 Here is the critical insight that makes this LESS GOOD than it sounds:
 

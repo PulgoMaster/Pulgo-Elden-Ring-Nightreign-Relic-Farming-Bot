@@ -329,6 +329,25 @@ def input_gpu_yield():
         _nav_wants_gpu.clear()
 
 
+def wait_gpu_idle(timeout: float = 2.0) -> bool:
+    """Wait until no worker holds _gpu_inflight_lock.
+
+    Call after _set_ocr_throttle(True) to guarantee all in-flight GPU
+    work finishes before proceeding.  Workers won't start new tasks
+    (throttle prevents it), so once the lock is free, no one will
+    re-acquire it.
+
+    Returns True if workers are idle, False on timeout.
+    No-op in CPU mode — returns immediately.
+    """
+    if not _gpu_mode_enabled:
+        return True
+    acquired = _gpu_inflight_lock.acquire(timeout=timeout)
+    if acquired:
+        _gpu_inflight_lock.release()
+    return acquired
+
+
 # ── EasyOCR reader — one instance per thread ─────────────────────────── #
 #
 # EasyOCR is not thread-safe when sharing a single Reader instance.
@@ -845,18 +864,18 @@ def _slot_readtext(reader, crop: np.ndarray):
     Uses nav_ocr() when the calling thread set _thread_nav_mode.on (i.e.
     came in via analyze_for_nav), otherwise yields to pending nav OCR
     and acquires the GPU inflight lock just like the legacy analyze path.
+
+    CPU mode: skips the GPU lock entirely — CPU workers use independent
+    thread-local readers and can run truly in parallel across cores.
     """
     if getattr(_thread_nav_mode, "on", False):
         return nav_ocr(crop)
-    # Strict nav-priority gate: re-check _nav_wants_gpu AFTER acquiring the
-    # lock. Without this, multiple worker threads can pass _wait_for_nav_yield
-    # (which only checks the flag once before racing to lock.acquire) and
-    # queue up at the lock. When input_gpu_yield then sets nav_wants_gpu, it
-    # still has to wait for the entire queued chain to drain — which is what
-    # produced the 755ms stalls observed in rev 6 instrumentation (wait_ms >>
-    # held_ms because multiple slot_ocr owners cycled through during the wait).
-    # Re-checking inside the lock means: if the consumer arrived during our
-    # acquire race, we release and yield, letting the consumer in immediately.
+    if not _gpu_mode_enabled:
+        # CPU mode: no GPU lock needed, workers run in parallel
+        return reader.readtext(crop)
+    # GPU mode: strict nav-priority gate. Re-check _nav_wants_gpu AFTER
+    # acquiring the lock so workers that raced past _wait_for_nav_yield
+    # yield immediately instead of queuing up behind the lock.
     while True:
         _wait_for_nav_yield()
         with _owned_gpu_lock("slot_ocr"):

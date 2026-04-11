@@ -2,6 +2,8 @@
 
 Automates relic farming in **Elden Ring Nightreign** using on-device OCR to analyze relics and match them against your criteria.
 
+![RelicBot scanning a Deep Grand relic](screenshots/09_relic_preview_scan.jpg)
+
 Each iteration the bot:
 1. Restores a clean save file and relaunches the game
 2. Navigates to the Relic Rites merchant (Phase 0 — runs once per iteration)
@@ -10,7 +12,20 @@ Each iteration the bot:
 5. Resets back to the buy screen with a single F press (Phase 3), then repeats from Phase 1
 6. Saves every iteration — folders renamed to HIT or GOD ROLL when a relic matches your criteria
 
-Works fully offline. No internet connection required after the first launch.
+Works fully offline. No internet connection required after initial setup.
+
+---
+
+## Quick Start
+
+1. **Download** the latest release ZIP from the [Releases](https://github.com/PulgoMaster/Pulgo-Elden-Ring-Nightreign-Relic-Farming-Bot/releases) page
+2. **Extract** the ZIP to any local folder (e.g. `C:\RelicBot\`) — avoid cloud-synced folders (OneDrive, Dropbox, etc.)
+3. **Run** `RelicBot.exe`
+4. **Configure** your save file path, game executable path, and relic type
+5. **Set your criteria** in the Relic Criteria tab
+6. **Start** Batch Mode
+
+See [INSTALLATION.md](INSTALLATION.md) for detailed first-time setup.
 
 ---
 
@@ -32,89 +47,111 @@ Works fully offline. No internet connection required after the first launch.
   If you play a run after setting up the bot, make a fresh save at Roundtable Hold and update the path in the bot.
   Running from an outdated save risks being flagged by Nightreign's anti-cheat system.
 
-See [SETUP.md](SETUP.md) for the full safety guide.
-
 ---
 
 ## Requirements
 
 - **Windows 10 or 11**
-- **Python 3.10 or later**
 - **Elden Ring Nightreign** installed via Steam
-- **~500 MB free disk space** for the one-time OCR model download
-- No specific character required — works with any Nightreign character
+- **16:9 display** (any resolution — 1080p, 1440p, 4K all work)
+- No Python or other software required — everything is bundled in the EXE
 
 ---
 
-## Quick Start
+## Configuration
 
-```bash
-# 1. Clone the repo
-git clone https://github.com/PulgoMaster/Pulgo-Elden-Ring-Nightreign-Relic-Farming-Bot.git
-cd Pulgo-Elden-Ring-Nightreign-Relic-Farming-Bot
+After launching the EXE, fill in your save file path, backup folder, and game executable path:
 
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Launch the bot
-python main.py
-```
-
-On first launch the bot downloads its OCR model (~100 MB) — one-time only, then works fully offline.
-
-For full setup instructions see **[SETUP.md](SETUP.md)**.
-For first-time installation and file location help see **[INSTALLATION.md](INSTALLATION.md)**.
-To report a bug see **[BUG_REPORT.md](BUG_REPORT.md)**.
-
----
-
-## Input Sequences & Compatibility
-
-The included input sequences work regardless of DLC ownership, character, or shop unlock state. The new phase architecture navigates directly to the Relic Rites merchant and does not depend on your Roundtable Hold layout.
-
-If a sequence ever fails on your machine (e.g. due to unusual timing), use the built-in recording tool to re-record it for your setup. See [SETUP.md](SETUP.md) for step-by-step recording instructions.
-
----
-
-## Tips for Best Results
-
-- **Start with as much Murk as possible.** The bot calculates how many relics it can afford each iteration based on your current Murk balance. More Murk = more relics reviewed per run = fewer total iterations needed to find a match. Farming a large Murk stockpile before starting the bot will significantly speed up your search.
-- **The bot automatically boosts the game's process priority** to HIGH after each load. This reduces input-drop frequency on busy systems and helps keep phase timing consistent over long runs.
-- Run the game in **Borderless Windowed** mode. Fullscreen and standard windowed both shift the capture area and will cause OCR to read the wrong screen regions.
+![Main configuration screen](screenshots/01_main_ui_config.jpg)
 
 ---
 
 ## Relic Criteria
 
-| Tab | Description |
-|-----|-------------|
-| **Build Exact Relic** | Specify up to 20 target passive combinations. Each target has up to 3 slots and a match threshold (e.g. ≥ 2 of 3 must be present). The bot stops when ANY target is satisfied. Incompatible passives are blocked automatically — selecting a passive from an exclusive compat group hides conflicting passives in the remaining slots. |
-| **Passive Pool** | Pick any number of passives; match when a relic has at least N of them simultaneously. Add **Pairings** to require two specific passives to appear together (counts as one match toward the threshold). |
-| **Combine** | Tick the checkbox at the bottom to match against either tab simultaneously. |
+The bot has two ways to specify what you're hunting for. You can use either or combine both.
 
-The Relic Criteria section shows the **Scenic Flatstone** (Normal) or **Deep Scenic Flatstone** (Deep of Night) icon at the top, which updates automatically when you switch relic types. Passive lists are filtered to show only passives available in the currently selected mode.
+### Build Exact Relic
+
+Specify up to 20 target passive combinations. Each target has up to 3 slots and a match threshold (e.g. 2 of 3 must be present). The bot stops when ANY target is satisfied. Incompatible passives are blocked automatically — selecting a passive from an exclusive compat group hides conflicting passives in the remaining slots.
+
+![Build Exact Relic tab with a 3-slot target](screenshots/02_build_exact_relic.jpg)
+
+### Passive Pool
+
+Pick any number of passives; match when a relic has at least N of them simultaneously.
+
+![Passive Pool tab](screenshots/03_passive_pool.jpg)
+
+Add **Pairings** to require two specific passives to appear together (counts as one match toward the threshold):
+
+![Passive Pool with pairings](screenshots/04_passive_pool_pairings.jpg)
+
+### Combine
+
+Tick the checkbox at the bottom to match against either tab simultaneously.
 
 ---
 
-## Hotkeys
+## Batch Mode Settings
 
-| Key | Action |
-|-----|--------|
-| **F7** | Show / hide the overlay HUD (configurable in Batch Mode Settings) |
-| **F8** | Toggle overlay between the normal log view and the full Matched Relics panel (configurable) |
-| **F9** | Stop the bot after the current iteration completes (configurable) |
+Configure parallel workers, async analysis, GPU acceleration, and the overlay HUD. The bot auto-detects your hardware and recommends settings:
 
-Both overlay hotkeys work even while the Nightreign window has focus. Inputs are automatically blocked if the Nightreign window loses focus — alt-tabbing is safe.
+![Batch Mode Settings panel](screenshots/05_batch_mode_settings.jpg)
 
 ---
 
-## Batch Mode Output
+## Odds Viewer
+
+The bot calculates the exact probability of finding your target relic based on the datamined pool weights, color filters, and curse exclusions. Numbers update live as you change your criteria:
+
+![Odds Viewer with calculated probabilities](screenshots/06_odds_viewer_settings.jpg)
+
+---
+
+## GPU Acceleration (Optional)
+
+The bot works on CPU out of the box. If you have an **NVIDIA GPU** (GTX 10-series or newer), you can install GPU acceleration from inside the bot:
+
+1. Open **Batch Mode Settings**
+2. Click **Install GPU Acceleration**
+3. Wait for the ~2.5 GB download to complete
+4. Restart RelicBot
+
+GPU mode reduces OCR time from ~3 seconds per relic to ~0.3 seconds.
+
+---
+
+## Bot In Action
+
+Once configured, the bot runs the entire farming loop autonomously. It launches the game, navigates to the Small Jar Bazaar, buys relics in batches of 10, and scans each one for matches:
+
+**Phase 0/3 — Navigating the shop**
+
+![Bot at the Small Jar Bazaar](screenshots/07_relic_scan_in_shop.jpg)
+
+**Phase 1 — Buying 10 relics at once**
+
+![Buy dialog showing 10 of 10](screenshots/08_buy_dialog.jpg)
+
+**Phase 2 — Scanning each relic with OCR**
+
+![Relic preview being scanned](screenshots/09_relic_preview_scan.jpg)
+
+**Run complete**
+
+![Run complete dialog](screenshots/10_run_complete.jpg)
+
+---
+
+## Reviewing Results
+
+Every iteration is saved with screenshots and a save file. Folders are renamed automatically based on what was found:
 
 ```
 batch_output/
-└── batch_run_2025-01-15_143022/
-    ├── run_log.txt              Full log of everything the bot printed, appended in real time
-    ├── live_log.txt             Per-relic analysis summary, appended in real time
+└── batch_run_2026-04-10_143022/
+    ├── run_log.txt              Full log of everything the bot printed
+    ├── live_log.txt             Per-relic analysis summary
     ├── matches_log.txt          All matched relics in one place
     ├── README.txt               Full breakdown of every iteration (hits marked with *)
     ├── 001/
@@ -128,10 +165,51 @@ batch_output/
     │   ├── NR0000.sl2
     │   ├── info.txt
     │   └── relic_05_MATCH.jpg
-    ├── Excluded Hits/           Relics that matched criteria but were blocked by the curse filter
-    │   ├── Excluded Hits Info.txt
-    │   └── relic_12_MATCH.jpg
-    └── Smart Analyze Hits/      Relics flagged by Smart Analyze across all iterations
+    └── Smart Analyze Hits/      Relics flagged by Smart Analyze
 ```
 
-To use a result: copy the `NR0000.sl2` from that folder into your game save location.
+Each iteration folder contains the relic screenshot and an `NR0000.sl2` save file:
+
+![Iteration folder showing relic screenshot and save file](screenshots/11_iteration_folder.jpg)
+
+Open the screenshot to confirm the relic before committing it to your game:
+
+![Relic screenshot opened in viewer](screenshots/12_relic_screenshot_view.jpg)
+
+To claim a relic, copy the `NR0000.sl2` from its iteration folder over your existing Nightreign save file at `AppData/Roaming/Nightreign/<your SteamID>/`:
+
+![Pasting the save file into the Nightreign folder](screenshots/13_paste_save_file.jpg)
+
+---
+
+## Tips for Best Results
+
+- **Start with as much Murk as possible.** The bot calculates how many relics it can afford each iteration based on your current Murk balance. More Murk = more relics reviewed per run = fewer total iterations needed to find a match.
+- **The bot automatically boosts the game's process priority** to HIGH after each load. This reduces input-drop frequency on busy systems and helps keep phase timing consistent over long runs.
+- Run the game in **Borderless Windowed** mode. Fullscreen and standard windowed both shift the capture area and will cause OCR to read the wrong screen regions.
+
+---
+
+## Hotkeys
+
+| Key | Action |
+|-----|--------|
+| **F7** | Show / hide the overlay HUD |
+| **F8** | Toggle overlay between the normal log view and the full Matched Relics panel |
+| **F9** | Stop the bot after the current iteration completes |
+
+Overlay hotkeys work even while the Nightreign window has focus. Inputs are automatically blocked if the Nightreign window loses focus — alt-tabbing is safe.
+
+---
+
+## Input Sequences & Compatibility
+
+The included input sequences work regardless of DLC ownership, character, or shop unlock state. The phase architecture navigates directly to the Relic Rites merchant and does not depend on your Roundtable Hold layout.
+
+If a sequence ever fails on your machine (e.g. due to unusual timing), use the built-in recording tool to re-record it for your setup. See [SETUP.md](SETUP.md) for step-by-step recording instructions.
+
+---
+
+## Bug Reports
+
+If you encounter a bug, open an issue on the [Issues page](https://github.com/PulgoMaster/Pulgo-Elden-Ring-Nightreign-Relic-Farming-Bot/issues). Include the `run_log.txt` and `diagnostic_*.diag` file from your batch run folder — these contain everything needed to diagnose the problem.

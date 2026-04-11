@@ -10,7 +10,7 @@ To help reproduce and fix the problem quickly, **include the following in your r
 ## What to Include
 
 ### 1. Bot version
-Check the window title or the release you downloaded. Example: `v1.3.0`
+Check the window title or the release you downloaded. Example: `v1.8.0`
 
 ### 2. What happened
 Describe what the bot did wrong. Be specific:

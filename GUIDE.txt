@@ -1,26 +1,22 @@
 ================================================================================
-  RELIC BOT v1.7.0
+  RELIC BOT v1.8.0
   Elden Ring Nightreign Relic Farming Bot
   Made by Pulgo
 ================================================================================
 
 ══════════════════════════════════════════════════════════════════════════
-WHAT'S NEW IN v1.7.0
+FEATURES
 ══════════════════════════════════════════════════════════════════════════
 
-  • Slot-based OCR — faster, more accurate relic reading. Handles wrapping
-    text correctly. Replaces the previous line-reconstruction approach.
-  • Navigator OCR isolation — menu navigation OCR no longer competes with
-    analysis OCR for the GPU/CPU. Eliminates the "stale settle" issue that
-    could desync the cursor on slower systems.
-  • Phase 1 settle now retries with a single RIGHT press if the first
-    relic's passives are unreadable, instead of triggering a full menu
-    recovery. The list is circular so the skipped relic comes back around.
-  • Auto-suppression: GPU Always Analyze auto-disables for the rest of an
-    iteration after repeated input drops, then retries the next iteration.
-  • Hardened recovery: Phase -0.5 black-frame timeout has a hard ceiling,
-    Phase 3 shop-return recovery has a longer poll window and restarts the
-    iteration after two consecutive failures.
+  • Fully automated relic farming — buy, scan, match, repeat
+  • Normal and Deep of Night relic support
+  • Build Exact Relic + Passive Pool targeting with Smart Analyze
+  • Curse and Color filters for Deep relics
+  • Odds Viewer showing exact probabilities from datamined weights
+  • GPU Acceleration for NVIDIA GPUs (optional, ~10x OCR speedup)
+  • Async Analysis — OCR runs in background while farming continues
+  • Built-in updater preserves all settings between versions
+  • Works fully offline after first launch
 
 Automates relic farming in Elden Ring Nightreign using on-device OCR to
 analyze relics and match them against your criteria. Works fully offline
@@ -376,7 +372,7 @@ After a run, your output folder contains:
       Iter_4_Relic_XX_HIT.jpg
 
     GOD ROLL 007/       All 3 passives matched
-    NEAR MISS 012/      2 of 3 from a 3-passive target
+    012/                Near miss (2 of 3 from a 3-passive target)
     SMART 015/          Smart Analyze flagged a synergy
     SMART GOD ROLL 018/ Smart Analyze found all 3 synergy passives
     EXCLUDED 020/       Matched but had excluded passive/curse
@@ -387,7 +383,7 @@ After a run, your output folder contains:
     Excluded Hits/      Copies of all excluded matches (if enabled)
 
   FOLDER PRIORITY (highest category wins):
-    GOD ROLL > HIT > NEAR MISS > SMART GOD ROLL > SMART > EXCLUDED
+    GOD ROLL > HIT > SMART GOD ROLL > SMART > EXCLUDED
 
   TO USE A RESULT:
     Copy the NR0000.sl2 from the folder into your game save location:

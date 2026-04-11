@@ -1953,10 +1953,6 @@ class RelicBuilderFrame(ttk.LabelFrame):
         self._pool = _PassivePoolTab(self._nb)
         self._nb.add(self._pool, text="  Passive Pool  ")
 
-        # Tab 2 – Build Advisor
-        self._advisor = _BuildAdvisorTab(self._nb, on_import=self._exact.import_target)
-        self._nb.add(self._advisor, text="  Build Advisor  ")
-
         # ── Tab selector + Combine toggle ─────────────────────────────── #
         select_row = ttk.Frame(self)
         select_row.pack(fill="x", padx=8, pady=(0, 2))
