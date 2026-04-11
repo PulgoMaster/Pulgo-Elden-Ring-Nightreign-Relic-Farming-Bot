@@ -4,6 +4,16 @@ Automates relic farming in **Elden Ring Nightreign** using on-device OCR to anal
 
 ![RelicBot scanning a Deep Grand relic](screenshots/09_relic_preview_scan.jpg)
 
+## Videos
+
+[![RelicBot Demo](https://img.youtube.com/vi/vXJouNHcaC8/maxresdefault.jpg)](https://www.youtube.com/watch?v=vXJouNHcaC8)
+
+**▶ [Watch the Demo](https://www.youtube.com/watch?v=vXJouNHcaC8)** — see the bot in action: full farming cycle, scanning relics, and how to commit a result to your save.
+
+**▶ [Watch the Setup Walkthrough](https://www.youtube.com/watch?v=qbmUDL8TH5U)** — full configuration walkthrough for first-time users.
+
+---
+
 Each iteration the bot:
 1. Restores a clean save file and relaunches the game
 2. Navigates to the Relic Rites merchant (Phase 0 — runs once per iteration)

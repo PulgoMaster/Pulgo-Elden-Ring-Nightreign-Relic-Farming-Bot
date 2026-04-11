@@ -2071,12 +2071,31 @@ class RelicBotApp(tk.Tk):
             justify="left",
         ).grid(row=0, column=1, sticky="w", padx=(0, 8))
 
-        # ── Credit ──────────────────────────────────────────────────── #
-        ttk.Label(inner, text="Made by Pulgo",
-                  foreground=theme.TEXT_MUTED,
-                  font=("Segoe UI", 8)).grid(
-            row=10, column=0, sticky="e", padx=12, pady=(0, 4)
+        # ── Credit + Ko-fi ──────────────────────────────────────────── #
+        _credit_row = ttk.Frame(inner)
+        _credit_row.grid(row=10, column=0, sticky="e", padx=12, pady=(0, 4))
+
+        def _open_kofi():
+            import webbrowser as _wb
+            _wb.open("https://ko-fi.com/G2G41XMFPO")
+
+        _kofi_btn = tk.Label(
+            _credit_row,
+            text="☕ Support on Ko-fi",
+            foreground="#ffffff",
+            background="#72a4f2",
+            font=("Segoe UI", 8, "bold"),
+            padx=8, pady=2,
+            cursor="hand2",
         )
+        _kofi_btn.pack(side="right", padx=(8, 0))
+        _kofi_btn.bind("<Button-1>", lambda _e: _open_kofi())
+        _kofi_btn.bind("<Enter>", lambda _e: _kofi_btn.configure(background="#5a8edf"))
+        _kofi_btn.bind("<Leave>", lambda _e: _kofi_btn.configure(background="#72a4f2"))
+
+        ttk.Label(_credit_row, text="Made by Pulgo",
+                  foreground=theme.TEXT_MUTED,
+                  font=("Segoe UI", 8)).pack(side="right")
 
         # Auto-load standard sequences after UI is built
         self.after(100, self._auto_load_sequences)
