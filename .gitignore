@@ -7,6 +7,8 @@ __pycache__/
 build/
 dist/
 *.spec
+# Keep the release-build spec so reviewers can reproduce the published EXE
+!relic_bot.spec
 
 # User-specific profiles (save paths, input sequences, settings)
 profiles/

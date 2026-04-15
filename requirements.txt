@@ -1,4 +1,26 @@
-easyocr>=1.7.0
-pynput>=1.7.6
-mss>=9.0.1
-Pillow>=10.0.0
+# RelicBot build dependencies — pinned for reproducible builds.
+#
+# Install with:
+#   pip install -r requirements.txt --index-url https://pypi.org/simple \
+#               --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# The CPU-only PyTorch index is needed so pip picks `torch==2.11.0+cpu`
+# (the CUDA build is much larger and the bot does not require CUDA).
+#
+# Python 3.14.x is required.  Older Python versions lack wheels for
+# torch 2.11 on the CPU index.
+
+easyocr==1.7.2
+mss==10.1.0
+numpy==2.4.3
+pillow==12.1.1
+pynput==1.8.1
+scikit-image==0.26.0
+scipy==1.17.1
+shapely==2.1.2
+torch==2.11.0+cpu
+torchvision==0.26.0+cpu
+opencv-python-headless==4.13.0.92
+
+# Build tool — only required when producing the distribution EXE.
+pyinstaller==6.19.0

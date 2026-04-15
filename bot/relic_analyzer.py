@@ -2,12 +2,15 @@
 Analyzes relic screenshots using local OCR (EasyOCR).
 Runs entirely on-device — no internet connection or account required.
 
-First run: EasyOCR downloads its English model (~100 MB) automatically.
-After that the bot works fully offline with no ongoing costs.
+The CRAFT detection and English recognition models are bundled in the EXE
+(resolved via _MODEL_DIR below). The bot never downloads anything at
+runtime — works offline from the first launch.
 """
 
 import io
+import os
 import re
+import sys
 import time
 import queue
 import difflib
@@ -16,6 +19,32 @@ import concurrent.futures
 
 import numpy as np
 from PIL import Image
+
+
+# ── Bundled EasyOCR model directory ──────────────────────────────────── #
+# Models are pre-downloaded at build time (see relic_bot.spec) and shipped
+# inside the EXE.  PyInstaller extracts them to sys._MEIPASS at runtime in
+# onefile mode; in source-run mode they live in <repo>/easyocr_models/ if
+# a developer pre-populates that folder (otherwise EasyOCR will download
+# them via the usual ~/.EasyOCR/model path as a fallback).
+def _resolve_model_dir() -> str | None:
+    if getattr(sys, 'frozen', False):
+        _base = getattr(sys, '_MEIPASS', None) or os.path.dirname(sys.executable)
+        _p = os.path.join(_base, 'easyocr_models')
+        if os.path.isdir(_p):
+            return _p
+    # Source run: check for a dev copy of the models
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _p = os.path.join(_repo_root, 'easyocr_models')
+    if os.path.isdir(_p):
+        return _p
+    return None
+
+_MODEL_DIR = _resolve_model_dir()
+# When a bundled/dev model dir is found, disable network download so
+# EasyOCR uses only the bundled weights.  Set to True only as a fallback
+# when running from source without a pre-populated easyocr_models/ folder.
+_USE_BUNDLED_MODELS = _MODEL_DIR is not None
 
 
 # ── Navigator OCR isolation ──────────────────────────────────────────── #
@@ -92,7 +121,11 @@ def _nav_worker_loop() -> None:
     except Exception:
         pass
     try:
-        _nav_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+        _reader_kwargs = {"gpu": False, "verbose": False}
+        if _USE_BUNDLED_MODELS:
+            _reader_kwargs["model_storage_directory"] = _MODEL_DIR
+            _reader_kwargs["download_enabled"] = False
+        _nav_reader = easyocr.Reader(["en"], **_reader_kwargs)
     except Exception:
         _nav_reader = None
     while True:
@@ -456,7 +489,11 @@ def _get_reader():
         except Exception:
             pass
         import easyocr
-        _thread_local.reader     = easyocr.Reader(["en"], gpu=_use_gpu, verbose=False)
+        _reader_kwargs = {"gpu": _use_gpu, "verbose": False}
+        if _USE_BUNDLED_MODELS:
+            _reader_kwargs["model_storage_directory"] = _MODEL_DIR
+            _reader_kwargs["download_enabled"] = False
+        _thread_local.reader     = easyocr.Reader(["en"], **_reader_kwargs)
         _thread_local.reader_gpu = _use_gpu
     return _thread_local.reader
 
