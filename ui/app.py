@@ -589,7 +589,7 @@ class RelicBotApp(tk.Tk):
 
         self.withdraw()   # keep window hidden until UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.8.1  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.8.2  |  Made by Pulgo")
         self.resizable(True, True)
 
         # Input recording
@@ -4219,14 +4219,35 @@ class RelicBotApp(tk.Tk):
         from bot.door_generator import generate_doors, generate_smart_doors
         rtype = self.relic_type_var.get()
         self._doors = generate_doors(criteria, rtype)
+        _doors_by_size = (
+            sum(1 for d in self._doors if len(d[0]) == 3),
+            sum(1 for d in self._doors if len(d[0]) == 2),
+            sum(1 for d in self._doors if len(d[0]) == 1),
+        )
         self._log(f"  [Doors] {len(self._doors)} door(s) generated "
-                  f"({sum(1 for d in self._doors if len(d[0]) == 3)} x3/3, "
-                  f"{sum(1 for d in self._doors if len(d[0]) == 2)} x2/3, "
-                  f"{sum(1 for d in self._doors if len(d[0]) == 1)} x1/3)")
+                  f"({_doors_by_size[0]} x3/3, {_doors_by_size[1]} x2/3, "
+                  f"{_doors_by_size[2]} x1/3)")
+        if self._diag:
+            try:
+                self._diag.log_door_gen(
+                    mode=criteria.get("mode", "exact"),
+                    door_count=len(self._doors),
+                    types={"3": _doors_by_size[0],
+                           "2": _doors_by_size[1],
+                           "1": _doors_by_size[2]})
+            except Exception:
+                pass
         # Smart Analyze doors — only generated when the feature is enabled.
         if self._smart_analyze_var.get():
             self._smart_doors = generate_smart_doors(rtype)
             self._log(f"  [Smart Analyze] {len(self._smart_doors)} synergy door(s) generated")
+            if self._diag:
+                try:
+                    self._diag.log_door_gen(
+                        mode="smart_analyze",
+                        door_count=len(self._smart_doors))
+                except Exception:
+                    pass
         else:
             self._smart_doors = []
         region = self._get_region()
@@ -4621,7 +4642,17 @@ class RelicBotApp(tk.Tk):
                         try:
                             self._analyze_relic_task(
                                 _task, _w_state, _w_lock, _w_dmap, _w_res)
+                            if self._diag:
+                                try:
+                                    self._diag.log_async("complete")
+                                except Exception:
+                                    pass
                         except Exception as _re:
+                            if self._diag:
+                                try:
+                                    self._diag.log_async("error", str(_re)[:80])
+                                except Exception:
+                                    pass
                             _retries = _task.get("_retry_count", 0)
                             _was_gpu = bool(_task.get("_use_gpu"))
                             if _retries < 2:
@@ -4736,7 +4767,17 @@ class RelicBotApp(tk.Tk):
                             try:
                                 self._analyze_relic_task(
                                     _task, _ois, _ol, _odm, _or)
+                                if self._diag:
+                                    try:
+                                        self._diag.log_async("complete")
+                                    except Exception:
+                                        pass
                             except Exception as _oexc:
+                                if self._diag:
+                                    try:
+                                        self._diag.log_async("error", str(_oexc)[:80])
+                                    except Exception:
+                                        pass
                                 self._log(
                                     f"  [Overflow worker] Unhandled error on relic "
                                     f"{_task.get('step_i', -1) + 1} "
@@ -7136,6 +7177,14 @@ class RelicBotApp(tk.Tk):
             self._ov_at_23        += _c_g2
             self._ov_at_duds      += _c_dud
             self._ov_total_relics += 1
+
+            # Async-task hit counter — increments for any match category
+            # (god roll, hit, or excluded hit; duds are not hits).
+            if self._diag and (_c_g3 or _c_g2 or _category == "EXCLUDED"):
+                try:
+                    self._diag.log_async("hit", _category or "")
+                except Exception:
+                    pass
 
             with self._iter_contrib_lock:
                 c = self._iter_contributions.setdefault(iteration, {})
@@ -9664,40 +9713,58 @@ class RelicBotApp(tk.Tk):
                         except Exception as _p3ve:
                             _p3v_reason = f"error: {_p3ve}"
 
-                        # Cheap retry: tooltip OCR can be inconclusive on a
-                        # single bad frame.  One re-grab + re-OCR before
-                        # escalating to ESC recovery saves a multi-second
-                        # detour for what is usually a transient frame issue.
+                        # Retry loop: tooltip OCR fails when the verify
+                        # call lands on a frame that's still transitioning
+                        # (F tap dropped, or GPU contention delayed the
+                        # actual capture).  Wait for GPU idle first so the
+                        # retry OCR isn't queued behind Phase 2 backlog,
+                        # then try up to 3 times with 0.5s spacing.  Total
+                        # tolerance ~1.5s vs the old 0.25s single retry.
                         if not _p3_verify_ok:
+                            _p3_retry_max = 3
                             try:
-                                time.sleep(0.25)
-                                _p3v_img = screen_capture.capture(region)
-                                _p3_verify_ok, _p3v_reason2 = (
-                                    relic_analyzer.verify_shop_item(
-                                        _p3v_img, self.relic_type_var.get()))
+                                relic_analyzer.wait_gpu_idle(timeout=1.0)
+                            except Exception:
+                                pass
+                            for _p3_att in range(1, _p3_retry_max + 1):
+                                # Bail out quickly if user hit Stop or the
+                                # iteration is already flagged for restart.
+                                if not self.bot_running or self._reset_iter_requested:
+                                    break
+                                try:
+                                    time.sleep(0.5)
+                                    _p3v_img = screen_capture.capture(region)
+                                    _p3_verify_ok, _p3v_reason2 = (
+                                        relic_analyzer.verify_shop_item(
+                                            _p3v_img, self.relic_type_var.get()))
+                                except Exception as _p3ve2:
+                                    _p3v_reason2 = f"retry error: {_p3ve2}"
+                                    _p3_verify_ok = False
                                 if _p3_verify_ok:
                                     self._log(
                                         f"  Cycle {_batch_i + 1}: Phase 3"
-                                        f" tooltip OCR recovered on retry.")
+                                        f" tooltip OCR recovered on retry"
+                                        f" {_p3_att}/{_p3_retry_max}.")
                                     if self._diag:
                                         try:
                                             self._diag.log_phase3(
                                                 event="tooltip_retry_ok",
-                                                cycle=_batch_i + 1)
-                                        except Exception:
-                                            pass
-                                else:
-                                    _p3v_reason = _p3v_reason2
-                                    if self._diag:
-                                        try:
-                                            self._diag.log_phase3(
-                                                event="tooltip_retry_fail",
                                                 cycle=_batch_i + 1,
-                                                note=_p3v_reason[:60])
+                                                attempt=_p3_att)
                                         except Exception:
                                             pass
-                            except Exception as _p3ve2:
-                                _p3v_reason = f"retry error: {_p3ve2}"
+                                    break
+                                # Retry failed — log this attempt's reason.
+                                _p3v_reason = _p3v_reason2
+                                if self._diag:
+                                    try:
+                                        self._diag.log_phase3(
+                                            event="tooltip_retry_fail",
+                                            cycle=_batch_i + 1,
+                                            attempt=_p3_att,
+                                            note=_p3v_reason[:60])
+                                    except Exception:
+                                        pass
 
                         if _p3_verify_ok:
                             self._p3_consecutive_fails = 0

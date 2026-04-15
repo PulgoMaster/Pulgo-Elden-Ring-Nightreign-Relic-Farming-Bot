@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.8.2] — 2026-04-15 — PHASE 3 TOOLTIP RETRY HARDENING + DIAGNOSTIC COUNTER WIRING
+
+### Phase 3 tooltip retry
+- Bumped the Phase 3 post-reset tooltip verification from a single 0.25s retry to a 3-attempt loop with 0.5s spacing between attempts. A `wait_gpu_idle()` call runs before the retries so the OCR isn't queued behind Phase 2 async backlog.
+- Each failed retry attempt now logs its own `tooltip_retry_fail` event with an attempt index, so the cause of a failure chain is visible in diagnostics.
+- Retry loop polls `bot_running` / `_reset_iter_requested` between attempts so Stop button stays responsive.
+
+### Diagnostic counter wiring
+- Wired `async_completes`, `async_errors`, and `async_hits` — previously only `async_submits` incremented. Diagnostics now show a full picture of async worker throughput.
+- Wired `door_gen_calls` and `door_total_generated` on both the exact-criteria door set and Smart Analyze doors.
+
+---
+
 ## [1.8.1] — 2026-04-15 — PROFILE RELIABILITY + ODDS VIEWER FIXES
 
 ### Profile data protection
