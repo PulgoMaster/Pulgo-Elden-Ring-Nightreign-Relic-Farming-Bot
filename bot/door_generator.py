@@ -29,6 +29,22 @@ if TYPE_CHECKING:
 
 # ── Helpers ──────────────────────────────────────────────────────────────── #
 
+# Running count of combinations that failed _variants_compat during the
+# current door-generation pass.  The app resets this before each batch's
+# generate_doors call and reads it afterward to populate the
+# `compat_rejects` diagnostic counter.
+_compat_reject_count: int = 0
+
+
+def reset_compat_reject_count() -> None:
+    global _compat_reject_count
+    _compat_reject_count = 0
+
+
+def get_compat_reject_count() -> int:
+    return _compat_reject_count
+
+
 def _variants_compat(combo: list[str]) -> bool:
     """Check that a combination of passives can coexist on a single relic.
 
@@ -36,13 +52,16 @@ def _variants_compat(combo: list[str]) -> bool:
       1. No two passives share a compat group (exclusive categories).
       2. No two passives are tier variants of each other (same base name).
     """
+    global _compat_reject_count
     if not compat_ok(combo):
+        _compat_reject_count += 1
         return False
     # Check for tier-variant collisions (same base name, differ only in +N)
     bases = []
     for p in combo:
         base = re.sub(r'\s*[+\-]?\d+(%?)$', '', p).strip()
         if base in bases:
+            _compat_reject_count += 1
             return False
         bases.append(base)
     return True

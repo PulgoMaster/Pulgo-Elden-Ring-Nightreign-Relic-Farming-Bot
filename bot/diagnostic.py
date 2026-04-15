@@ -1137,6 +1137,16 @@ class DiagnosticLogger:
             return
         self._write(f"  COMPAT_REJECT  door={door_id}  conflicts={conflicting}")
 
+    def bump_compat_rejects(self, n: int = 1) -> None:
+        """Bulk increment for post-hoc counting from the door generator.
+
+        `log_compat_reject` is per-rejection with evidence; during batch
+        generation where 100s of rejections are expected, the bot tallies
+        them in door_generator and calls this once with the total.
+        """
+        if n > 0:
+            self._ev["compat_rejects"] += n
+
     def log_duplicate_skip(self, current_iter: int, idx: int, reason: str) -> None:
         self._ev["duplicate_skips"] += 1
         self._write(f"  DUP_SKIP  iter={current_iter}  idx={idx}  reason={reason}")

@@ -4216,9 +4216,19 @@ class RelicBotApp(tk.Tk):
         criteria_summary = self.relic_builder.get_criteria_summary()
         criteria["allowed_colors"] = self._get_allowed_colors()
         # Pre-compute matching doors from criteria for fast relic comparison.
-        from bot.door_generator import generate_doors, generate_smart_doors
+        from bot.door_generator import (
+            generate_doors, generate_smart_doors,
+            reset_compat_reject_count, get_compat_reject_count,
+        )
         rtype = self.relic_type_var.get()
+        reset_compat_reject_count()
         self._doors = generate_doors(criteria, rtype)
+        _compat_n = get_compat_reject_count()
+        if self._diag and _compat_n > 0:
+            try:
+                self._diag.bump_compat_rejects(_compat_n)
+            except Exception:
+                pass
         _doors_by_size = (
             sum(1 for d in self._doors if len(d[0]) == 3),
             sum(1 for d in self._doors if len(d[0]) == 2),
@@ -4239,13 +4249,17 @@ class RelicBotApp(tk.Tk):
                 pass
         # Smart Analyze doors — only generated when the feature is enabled.
         if self._smart_analyze_var.get():
+            reset_compat_reject_count()
             self._smart_doors = generate_smart_doors(rtype)
+            _smart_compat_n = get_compat_reject_count()
             self._log(f"  [Smart Analyze] {len(self._smart_doors)} synergy door(s) generated")
             if self._diag:
                 try:
                     self._diag.log_door_gen(
                         mode="smart_analyze",
                         door_count=len(self._smart_doors))
+                    if _smart_compat_n > 0:
+                        self._diag.bump_compat_rejects(_smart_compat_n)
                 except Exception:
                     pass
         else:
