@@ -239,7 +239,7 @@ CATEGORY_5_CHARACTER = [
     "[Duchess] Use Character Skill for Brief Invulnerability",
     # Raider
     "Improved Poise Near Totem Stela",
-    "[Raider] Damage taken while using Character Skill",
+    "[Raider] Damage taken while using Character Skill improves attack power and stamina",
     "Defeating enemies near Totem Stela restores HP",
     "[Raider] Duration of Ultimate Art extended",
     # Revenant

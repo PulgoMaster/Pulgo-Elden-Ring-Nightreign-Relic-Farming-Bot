@@ -1982,13 +1982,34 @@ class RelicBuilderFrame(ttk.LabelFrame):
         self._combine_chk.pack(side="left")
 
     def _on_combine_toggle(self):
-        """When Combine is enabled, disable tab selectors. When off, re-enable."""
+        """When Combine is enabled, disable tab selectors and push a unified
+        odds view into BOTH tab panels (exact entries + pool entries + pairings
+        all visible regardless of which tab the user is on).  When off,
+        re-enable tab selectors and restore each tab's single-section view.
+
+        Without this refresh, the panels would show stale content from before
+        the toggle until the user happens to edit a field.
+        """
         if self._combine_var.get():
             self._exact_radio.configure(state="disabled")
             self._pool_radio.configure(state="disabled")
+            # Build unified view immediately so both panels reflect the
+            # combined odds (exact + pool + pairings) with the aggregate total.
+            self._build_combined_odds_view()
+            if self._on_odds_changed is not None:
+                self._on_odds_changed(self._p_per_relic)
         else:
             self._exact_radio.configure(state="normal")
             self._pool_radio.configure(state="normal")
+            # Restore each tab's single-section view.  Refresh the inactive
+            # tab FIRST so its panel text is updated, then the active tab
+            # LAST so its _p_per_relic value wins in the shared state.
+            if self._active_tab_var.get() == 0:  # exact is active
+                self._pool._update_odds()
+                self._exact._update_odds()
+            else:  # pool is active
+                self._exact._update_odds()
+                self._pool._update_odds()
 
     # ── Public API ──────────────────────────────────────────────────── #
 
@@ -2223,8 +2244,13 @@ class RelicBuilderFrame(ttk.LabelFrame):
         else:
             self._p_per_relic = None
 
-        # Push unified text to both tabs
-        text = "\n".join(lines)
+        # Push unified text to both tabs.  If nothing is configured in either
+        # tab, show a helpful prompt instead of blank text.
+        if not lines:
+            text = ("Add entries in either Build Exact Relic or Passive Pool "
+                    "to see combined odds.")
+        else:
+            text = "\n".join(lines)
         self._exact._set_odds_text(text)
         self._pool._set_odds_text(text)
 

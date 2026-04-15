@@ -589,7 +589,7 @@ class RelicBotApp(tk.Tk):
 
         self.withdraw()   # keep window hidden until UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.8.0  |  Made by Pulgo")
+        self.title("Elden Ring Nightreign – Relic Bot v1.8.1  |  Made by Pulgo")
         self.resizable(True, True)
 
         # Input recording
@@ -700,7 +700,8 @@ class RelicBotApp(tk.Tk):
             self._perf_gap_mult      = float(_cal.get("perf_mult", 1.0))
         # Timing data — accumulated real measured timings per mode, persisted across sessions
         self._timing_data: dict       = self._load_timing_data()
-        self._timing_data_lock        = threading.Lock()
+        self._timing_data_lock        = threading.Lock()   # guards dict mutations
+        self._timing_data_disk_lock   = threading.Lock()   # serializes disk I/O only
         self._stop_after_batch      = False   # graceful stop flag
         self._game_hung             = False   # set True by watchdog when game freezes
         self._low_perf_mode_var     = tk.BooleanVar(value=False)
@@ -2726,7 +2727,9 @@ class RelicBotApp(tk.Tk):
         # Character passives (colon → bracket format + content fixes)
         "Wylder: Follow-up attacks possible when using Character Skill (greatsword only)": "[Wylder] Standard attacks enhanced with fiery follow-ups when using Character Skill (greatsword only)",
         "Duchess: Dagger chain attack reprises event upon nearby enemies": "[Duchess] Reprise events upon nearby enemies by landing the final blow of a chain attack with dagger",
-        "Raider: Damage taken while using Character Skill improves attack power and stamina": "[Raider] Damage taken while using Character Skill",
+        "Raider: Damage taken while using Character Skill improves attack power and stamina": "[Raider] Damage taken while using Character Skill improves attack power and stamina",
+        # Raider truncation → full form (old profiles saved the short form)
+        "[Raider] Damage taken while using Character Skill": "[Raider] Damage taken while using Character Skill improves attack power and stamina",
         "Executor: Character Skill Boosts Attack but Attacking Drains HP": "[Executor] Character Skill Boosts Attack but Lowers Damage Negation While Attacking",
         # Spraymist typo fix
         "Poison Sprayment in possession at start of expedition": "Poison Spraymist in possession at start of expedition",
@@ -2812,67 +2815,73 @@ class RelicBotApp(tk.Tk):
         # Input sequences (phase_events) are intentionally NOT loaded from profiles.
         # Sequences are recorded independently and must not be overwritten by profile
         # switches. If a user has recorded sequences they want to keep, they stay as-is.
-        self._loading_profile = True   # suppress stash/restore in _on_relic_type_change
-        self.relic_type_var.set(data.get("relic_type", "night"))
-        self._on_relic_type_change()
-        self._loading_profile = False
-        # ── Per-mode criteria / curses / exclusions ────────────────────── #
-        # New profiles: "mode_data" dict with "normal" and "night" sub-keys.
-        # Old profiles: flat "criteria", "blocked_curses", "excluded_passives"
-        # assigned to the profile's relic_type mode (other mode starts blank).
-        _rtype = self.relic_type_var.get()
+        # Suppress stash/restore in _on_relic_type_change for the ENTIRE load
+        # sequence — from setting relic_type_var through _restore_mode_data.
+        # try/finally guarantees the flag is released even if migration raises,
+        # preventing a stuck flag that would silently break future mode switches.
+        self._loading_profile = True
         try:
-            if "mode_data" in data:
-                # New format — load both modes independently, apply migration.
-                # Each mode gets its own deep-copied data — no shared references.
-                import json as _json
-                for _m in ("normal", "night"):
-                    _md = data["mode_data"].get(_m, {})
-                    _crit = _md.get("criteria", {})
-                    _built = {
-                        "criteria":          self._migrate_criteria(_crit) if _crit else {},
-                        "blocked_curses":    list(_md.get("blocked_curses", [])),
-                        "excluded_passives": [self._migrate_passive(p) for p in _md.get("excluded_passives", []) if p],
+            self.relic_type_var.set(data.get("relic_type", "night"))
+            self._on_relic_type_change()
+            # ── Per-mode criteria / curses / exclusions ────────────────────── #
+            # New profiles: "mode_data" dict with "normal" and "night" sub-keys.
+            # Old profiles: flat "criteria", "blocked_curses", "excluded_passives"
+            # assigned to the profile's relic_type mode (other mode starts blank).
+            _rtype = self.relic_type_var.get()
+            try:
+                if "mode_data" in data:
+                    # New format — load both modes independently, apply migration.
+                    # Each mode gets its own deep-copied data — no shared references.
+                    import json as _json
+                    for _m in ("normal", "night"):
+                        _md = data["mode_data"].get(_m, {})
+                        _crit = _md.get("criteria", {})
+                        _built = {
+                            "criteria":          self._migrate_criteria(_crit) if _crit else {},
+                            "blocked_curses":    list(_md.get("blocked_curses", [])),
+                            "excluded_passives": [self._migrate_passive(p) for p in _md.get("excluded_passives", []) if p],
+                        }
+                        # Deep copy to guarantee independence between modes
+                        self._mode_data[_m] = _json.loads(_json.dumps(_built))
+                else:
+                    # Old format — assign criteria to BOTH modes so the user can
+                    # see their entries in either mode and manually adjust.
+                    _old_curses = data.get("blocked_curses", [])
+                    if isinstance(_old_curses, str):
+                        _old_curses = [s.strip() for s in _old_curses.splitlines() if s.strip()]
+                    _old_excl = [self._migrate_passive(p) for p in data.get("excluded_passives", []) if p]
+                    _old_crit = self._migrate_criteria(data.get("criteria", {})) if data.get("criteria") else {}
+                    _old_data = {
+                        "criteria":          _old_crit,
+                        "blocked_curses":    list(_old_curses),
+                        "excluded_passives": _old_excl,
                     }
-                    # Deep copy to guarantee independence between modes
-                    self._mode_data[_m] = _json.loads(_json.dumps(_built))
-            else:
-                # Old format — assign criteria to BOTH modes so the user can
-                # see their entries in either mode and manually adjust.
-                _old_curses = data.get("blocked_curses", [])
-                if isinstance(_old_curses, str):
-                    _old_curses = [s.strip() for s in _old_curses.splitlines() if s.strip()]
-                _old_excl = [self._migrate_passive(p) for p in data.get("excluded_passives", []) if p]
-                _old_crit = self._migrate_criteria(data.get("criteria", {})) if data.get("criteria") else {}
-                _old_data = {
-                    "criteria":          _old_crit,
-                    "blocked_curses":    list(_old_curses),
-                    "excluded_passives": _old_excl,
+                    import json as _json
+                    # Populate BOTH modes with the old data so nothing is lost
+                    self._mode_data[_rtype] = _json.loads(_json.dumps(_old_data))
+                    _other = "normal" if _rtype == "night" else "night"
+                    self._mode_data[_other] = _json.loads(_json.dumps(_old_data))
+                    self._log(
+                        f"  [Profile] Old format detected — criteria copied to both "
+                        f"Normal and Deep modes. Please review and adjust each mode.")
+            except Exception as _prof_err:
+                self._log(f"WARNING: Profile migration error: {_prof_err} — loading blank criteria.")
+                self._mode_data = {
+                    "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+                    "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
                 }
-                import json as _json
-                # Populate BOTH modes with the old data so nothing is lost
-                self._mode_data[_rtype] = _json.loads(_json.dumps(_old_data))
-                _other = "normal" if _rtype == "night" else "night"
-                self._mode_data[_other] = _json.loads(_json.dumps(_old_data))
-                self._log(
-                    f"  [Profile] Old format detected — criteria copied to both "
-                    f"Normal and Deep modes. Please review and adjust each mode.")
-        except Exception as _prof_err:
-            self._log(f"WARNING: Profile migration error: {_prof_err} — loading blank criteria.")
-            self._mode_data = {
-                "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
-                "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
-            }
-        # Restore the active mode into the UI
-        self._restore_mode_data(_rtype)
-        self._save_exclusion_matches_var.set(data.get("save_exclusion_matches", False))
-        if "allowed_colors" in data:
-            saved = data["allowed_colors"]
-            for color, var in self._color_vars.items():
-                var.set(color in saved)
-        # gem images follow relic_type — sync after relic_type is loaded
-        self._gem_mode_var.set("don" if _rtype == "night" else "normal")
-        self._refresh_gem_images()
+            # Restore the active mode into the UI
+            self._restore_mode_data(_rtype)
+            self._save_exclusion_matches_var.set(data.get("save_exclusion_matches", False))
+            if "allowed_colors" in data:
+                saved = data["allowed_colors"]
+                for color, var in self._color_vars.items():
+                    var.set(color in saved)
+            # gem images follow relic_type — sync after relic_type is loaded
+            self._gem_mode_var.set("don" if _rtype == "night" else "normal")
+            self._refresh_gem_images()
+        finally:
+            self._loading_profile = False
 
     # ── App-level config (not per-profile) ──────────────────────────────── #
 
@@ -2996,11 +3005,20 @@ class RelicBotApp(tk.Tk):
             "ov_show_smart":       self._ov_show_smart_var.get(),
             "ov_show_excl":        self._ov_show_excl_var.get(),
         }
+        _tmp = _APP_CONFIG_FILE + ".tmp"
         try:
-            with open(_APP_CONFIG_FILE, "w", encoding="utf-8") as f:
+            # Atomic write: tmp + fsync + os.replace to survive mid-save crash.
+            with open(_tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(_tmp, _APP_CONFIG_FILE)
         except Exception:
-            pass
+            try:
+                if os.path.exists(_tmp):
+                    os.remove(_tmp)
+            except Exception:
+                pass
 
     def _auto_load_last_profile(self):
         """On startup, silently load the last-used profile if it still exists."""
@@ -3033,17 +3051,23 @@ class RelicBotApp(tk.Tk):
                                    f"A profile named '{name}' already exists.\n"
                                    "Use Save to overwrite it, or choose a different name.")
             return
-        # Reset profile to blank state
-        self._mode_data = {
-            "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
-            "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
-        }
-        self.relic_type_var.set("night")
-        self._on_relic_type_change()
-        for var in self._color_vars.values():
-            var.set(True)
-        self._save_exclusion_matches_var.set(False)
-        self._restore_mode_data("night")
+        # Reset profile to blank state. Guard the mode-type change with
+        # _loading_profile so _on_relic_type_change doesn't stash the stale
+        # pre-reset UI back into _mode_data["normal"], corrupting the blank.
+        self._loading_profile = True
+        try:
+            self._mode_data = {
+                "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+                "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+            }
+            self.relic_type_var.set("night")
+            self._on_relic_type_change()
+            for var in self._color_vars.values():
+                var.set(True)
+            self._save_exclusion_matches_var.set(False)
+            self._restore_mode_data("night")
+        finally:
+            self._loading_profile = False
         self._write_profile(name)
         self._log(f"Created blank profile '{name}'.")
 
@@ -3083,21 +3107,44 @@ class RelicBotApp(tk.Tk):
         if not path:
             return
         name = os.path.splitext(os.path.basename(path))[0]
+        # Declare _tmp above the try so the except's cleanup block can
+        # reference it even if os.makedirs fails before it's assigned.
+        _tmp = path + ".tmp"
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            # Atomic write: tmp file + fsync + os.replace.  If the process
+            # dies between fsync and replace, the target file is untouched;
+            # if it dies before fsync, only the tmp file is partial.
+            with open(_tmp, "w", encoding="utf-8") as f:
                 json.dump(self._profile_to_dict(), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(_tmp, path)
             self._refresh_profile_list()
             self._profile_var.set(name)
             self._log(f"Profile '{name}' saved to {path}.")
         except Exception as e:
+            # Best-effort cleanup of any leftover tmp file
+            try:
+                if os.path.exists(_tmp):
+                    os.remove(_tmp)
+            except Exception:
+                pass
             messagebox.showerror("Save Error", str(e))
 
     def _write_profile(self, name: str):
         os.makedirs(_PROFILES_DIR, exist_ok=True)
+        _target = self._profile_path(name)
+        _tmp = _target + ".tmp"
         try:
-            with open(self._profile_path(name), "w", encoding="utf-8") as f:
+            # Atomic write: tmp file + fsync + os.replace.  Guarantees the
+            # existing profile is never left in a truncated state if the
+            # process dies mid-save (power loss, force-kill, disk full).
+            with open(_tmp, "w", encoding="utf-8") as f:
                 json.dump(self._profile_to_dict(), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(_tmp, _target)
             self._refresh_profile_list()
             self._profile_var.set(name)
             self._log(f"Profile '{name}' saved.")
@@ -3107,6 +3154,12 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
         except Exception as e:
+            # Best-effort cleanup of any leftover tmp file
+            try:
+                if os.path.exists(_tmp):
+                    os.remove(_tmp)
+            except Exception:
+                pass
             messagebox.showerror("Save Error", str(e))
 
     def _delete_profile(self):
@@ -3139,20 +3192,26 @@ class RelicBotApp(tk.Tk):
             "will not be affected.",
         ):
             return
-        # Reset mode data for both modes
-        self._mode_data = {
-            "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
-            "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
-        }
-        # Reset relic type
-        self.relic_type_var.set("night")
-        self._on_relic_type_change()
-        # Reset colors to all enabled
-        for var in self._color_vars.values():
-            var.set(True)
-        self._save_exclusion_matches_var.set(False)
-        # Clear UI
-        self._restore_mode_data("night")
+        # Reset mode data for both modes. Guard with _loading_profile so the
+        # mode-type flip doesn't stash the stale pre-reset UI back into
+        # _mode_data["normal"], which would silently un-reset Normal mode.
+        self._loading_profile = True
+        try:
+            self._mode_data = {
+                "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+                "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
+            }
+            # Reset relic type
+            self.relic_type_var.set("night")
+            self._on_relic_type_change()
+            # Reset colors to all enabled
+            for var in self._color_vars.values():
+                var.set(True)
+            self._save_exclusion_matches_var.set(False)
+            # Clear UI
+            self._restore_mode_data("night")
+        finally:
+            self._loading_profile = False
         self._auto_load_sequences()
         self._log("Profile settings restored to defaults.")
 
@@ -5469,9 +5528,23 @@ class RelicBotApp(tk.Tk):
                             "_run_log_path":    batch_log_path,
                             "criteria":         criteria,
                         }
-                        with open(os.path.join(iter_dir, "backlog_meta.json"),
-                                  "w", encoding="utf-8") as _f:
-                            _json.dump(_bl_meta, _f, indent=2)
+                        # Atomic write: tmp + fsync + os.replace — survives a
+                        # mid-save crash without leaving the meta file truncated.
+                        _bl_meta_path = os.path.join(iter_dir, "backlog_meta.json")
+                        _bl_meta_tmp  = _bl_meta_path + ".tmp"
+                        try:
+                            with open(_bl_meta_tmp, "w", encoding="utf-8") as _f:
+                                _json.dump(_bl_meta, _f, indent=2)
+                                _f.flush()
+                                os.fsync(_f.fileno())
+                            os.replace(_bl_meta_tmp, _bl_meta_path)
+                        except Exception:
+                            try:
+                                if os.path.exists(_bl_meta_tmp):
+                                    os.remove(_bl_meta_tmp)
+                            except Exception:
+                                pass
+                            raise
                         if _bg_gpu_active:
                             self._log(
                                 f"  [Backlog] {len(captures)} screenshot(s) saved "
@@ -11971,14 +12044,43 @@ class RelicBotApp(tk.Tk):
         }
 
     def _save_timing_data(self) -> None:
-        """Persist self._timing_data to disk (best-effort, non-blocking)."""
-        try:
-            import json as _json
+        """Persist self._timing_data to disk (best-effort, non-blocking).
+
+        Split-lock design: snapshot the dict under _timing_data_lock (fast,
+        no I/O), then do the atomic write under _timing_data_disk_lock so
+        other threads can keep mutating _timing_data while fsync runs.
+
+        Atomic write via tmp + fsync + os.replace so a mid-save crash can't
+        leave the timing file truncated (which would make the next launch
+        start from zero calibration data).
+
+        CALLER CONTRACT: this method acquires _timing_data_lock internally,
+        so callers must NOT hold it when calling.  Update the dict inside
+        the lock, release it, THEN call _save_timing_data().
+        """
+        import json as _json
+        import copy as _copy
+        # Snapshot under the data lock — fast, no disk I/O.
+        with self._timing_data_lock:
             self._timing_data["machine_id"] = self._get_machine_id()
-            self._timing_path().write_text(
-                _json.dumps(self._timing_data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+            _snapshot = _copy.deepcopy(self._timing_data)
+        # Disk I/O under a separate lock — doesn't block data mutations.
+        # Still serializes concurrent saves so the tmp file can't collide.
+        _target = self._timing_path()
+        _tmp = _target.with_suffix(_target.suffix + ".tmp")
+        with self._timing_data_disk_lock:
+            try:
+                with open(_tmp, "w", encoding="utf-8") as _f:
+                    _json.dump(_snapshot, _f, indent=2)
+                    _f.flush()
+                    os.fsync(_f.fileno())
+                os.replace(_tmp, _target)
+            except Exception:
+                try:
+                    if _tmp.exists():
+                        _tmp.unlink()
+                except Exception:
+                    pass
 
     def _record_timing_sample(
         self,
@@ -12006,7 +12108,8 @@ class RelicBotApp(tk.Tk):
             if phase2_per_relic is not None and 0.02 < phase2_per_relic < 5.0:
                 _gi["phase2"]["n"]   += 1
                 _gi["phase2"]["sum"] += phase2_per_relic
-            self._save_timing_data()
+        # Release data lock before save — save re-acquires it for the snapshot.
+        self._save_timing_data()
 
     def _record_ocr_timing(self, secs: float, gpu: bool) -> None:
         """Record a single OCR analysis duration (thread-safe)."""
@@ -12019,7 +12122,8 @@ class RelicBotApp(tk.Tk):
                 _key, {"n": 0, "sum": 0.0})
             _entry["n"]   += 1
             _entry["sum"] += secs
-            self._save_timing_data()
+        # Release data lock before save — save re-acquires it for the snapshot.
+        self._save_timing_data()
 
     def _load_calibration(self) -> dict:
         """Return persisted calibration dict, or {} if not found / unreadable."""
@@ -12033,10 +12137,15 @@ class RelicBotApp(tk.Tk):
         return {}
 
     def _save_calibration(self, data: dict) -> None:
-        """Merge *data* into the calibration file (non-blocking, best-effort)."""
+        """Merge *data* into the calibration file (non-blocking, best-effort).
+
+        Atomic write via tmp + fsync + os.replace so a mid-save crash can't
+        leave the calibration file truncated.
+        """
+        import json as _json
+        _p = self._calibration_path()
+        _tmp = _p.with_suffix(_p.suffix + ".tmp")
         try:
-            import json as _json
-            _p = self._calibration_path()
             existing = {}
             if _p.exists():
                 try:
@@ -12044,9 +12153,17 @@ class RelicBotApp(tk.Tk):
                 except Exception:
                     pass
             existing.update(data)
-            _p.write_text(_json.dumps(existing, indent=2), encoding="utf-8")
+            with open(_tmp, "w", encoding="utf-8") as _f:
+                _json.dump(existing, _f, indent=2)
+                _f.flush()
+                os.fsync(_f.fileno())
+            os.replace(_tmp, _p)
         except Exception:
-            pass
+            try:
+                if _tmp.exists():
+                    _tmp.unlink()
+            except Exception:
+                pass
 
     def _calibrate_from_iteration(self) -> None:
         """Adjust _perf_gap_mult based on how the last iteration went.

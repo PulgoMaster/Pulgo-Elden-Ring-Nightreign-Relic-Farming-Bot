@@ -308,7 +308,7 @@ CATEGORIES: "OrderedDict[str, list[str]]" = OrderedDict([
     ]),
 
     ("Character – Raider", [
-        "[Raider] Damage taken while using Character Skill",
+        "[Raider] Damage taken while using Character Skill improves attack power and stamina",
         "[Raider] Duration of Ultimate Art extended",
         "Defeating enemies near Totem Stela restores HP",
         "Improved Poise Near Totem Stela",

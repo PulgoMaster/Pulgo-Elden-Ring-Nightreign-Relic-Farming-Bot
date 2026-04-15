@@ -4,6 +4,32 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.8.1] — 2026-04-15 — PROFILE RELIABILITY + ODDS VIEWER FIXES
+
+### Profile data protection
+
+- Fixed a bug where profile data for one mode (Normal or Deep of Night) could silently overwrite the other mode's data under specific error paths. The `_loading_profile` guard flag is now held in a `try/finally` across the entire profile load sequence, so any exception during load cleanly releases the flag instead of leaving it stuck (which would have caused subsequent mode switches to silently skip their save-to-memory step).
+- Fixed: "Reset to Defaults" and "Create Blank Profile" no longer contaminate the opposite mode's slot with the pre-reset UI state when the user is currently viewing the other mode.
+- Crash-safe profile saves: all profile writes (Save, Save As, Create) now use atomic tmp + fsync + os.replace so a mid-save process kill or power loss can't leave a profile file truncated. The existing file on disk is never touched until the new one is fully written to disk.
+
+### Odds Viewer — Combine mode
+
+- Fixed: toggling "Combine both tabs" now immediately refreshes BOTH tab panels with the unified odds view (Build Exact Relic + My Pool + Pairings, all visible together regardless of which tab is active), instead of showing stale single-tab content until the user edits something.
+- Combined total at the bottom of the unified view now accurately reflects the aggregate probability across exact + pool + pairings via complement product.
+- When Combine is disabled, each tab correctly reverts to its own single-section view. The active tab's value wins in the shared per-relic probability state.
+- Added a helpful prompt when Combine is on but neither tab has criteria configured (instead of a blank panel).
+
+### Passive data
+
+- Raider character passive "Damage taken while using Character Skill" now uses its full in-game text: "Damage taken while using Character Skill improves attack power and stamina". The OCR matcher, probability pool tables, UI dropdowns, and categorization all use the same canonical name. Existing profiles saved with the truncated form auto-migrate on load.
+
+### Reliability / crash-safety (silent improvements)
+
+- App config, calibration data, timing data, and per-iteration backlog metadata all now use atomic writes. Abrupt shutdowns mid-save no longer leave any of these files corrupt.
+- Timing-data recorder now uses a split-lock design: the brief data-lock protects dict mutations, and a separate disk-lock serializes file saves. Analyzer threads no longer block each other during the fsync stage of a timing save.
+
+---
+
 ## [1.8.0] — 2026-04-10 — FIRST PUBLIC RELEASE
 
 This is the first public release of RelicBot. All features listed in the changelog below have been tested and verified. Versions prior to 1.8.0 were pre-release builds used during development and testing.

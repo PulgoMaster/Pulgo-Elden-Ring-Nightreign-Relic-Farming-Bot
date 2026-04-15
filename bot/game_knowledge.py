@@ -1972,7 +1972,7 @@ PASSIVE_CATEGORY: "dict[str, str]" = {
     "[Duchess] Improved Mind and Faith, Reduced Intelligence":        "scaling_stat",
     "[Duchess] Use Character Skill for Brief Invulnerability":        "character_skill",
 
-    "[Raider] Damage taken while using Character Skill":              "character_skill",
+    "[Raider] Damage taken while using Character Skill improves attack power and stamina": "character_skill",
     "[Raider] Duration of Ultimate Art extended":                     "character_skill",
     "Defeating enemies near Totem Stela restores HP":                 "utility",
     "Improved Poise Near Totem Stela":                                "utility",

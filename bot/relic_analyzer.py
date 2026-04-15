@@ -664,15 +664,14 @@ def _match_passive(text: str, known: list, cutoff: float = 0.82) -> str | None:
     hits = difflib.get_close_matches(text, known, n=1, cutoff=cutoff)
     matched = hits[0] if hits else None
 
-    # Substring fallback: when fuzzy match fails, check if any known passive
-    # is a non-trivial substring of the OCR text.  This catches cases where
-    # the in-game passive text is longer than the canonical dictionary entry
-    # (e.g. "[Raider] Damage taken while using Character Skill improves
-    # attack power and stamina" reads in-game on a 2nd line that the dict
-    # entry doesn't include).  We must NOT update the dictionary itself
-    # because the canonical short form is referenced by game_knowledge,
-    # pool_weights, normal_relic_categories and the UI criteria mapping —
-    # changing it would silently break user criteria filtering.
+    # Substring fallback: safety net for future truncation bugs where the
+    # in-game passive text is longer than the canonical dictionary entry and
+    # the fuzzy ratio drops below cutoff.  Matches when a known passive is a
+    # non-trivial substring of the OCR text.
+    #
+    # Direction is one-way (canonical ⊂ OCR) to avoid false positives from
+    # the reverse case (OCR ⊂ canonical), where a short legitimate passive
+    # could be a prefix of a different, longer passive.
     #
     # Constraints to avoid spurious matches:
     #   • Only fires when fuzzy match returned nothing.
