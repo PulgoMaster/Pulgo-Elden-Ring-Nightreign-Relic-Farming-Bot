@@ -235,3 +235,11 @@ If a sequence ever fails on your machine (e.g. due to unusual timing), use the b
 ## Bug Reports
 
 If you encounter a bug, open an issue on the [Issues page](https://github.com/PulgoMaster/Pulgo-Elden-Ring-Nightreign-Relic-Farming-Bot/issues). Include the `run_log.txt` and `diagnostic_*.diag` file from your batch run folder — these contain everything needed to diagnose the problem.
+
+---
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE). See the [NOTICE](NOTICE) file for required attribution.
+
+Copyright © 2026 PulgoMaster. You are free to use, modify, and redistribute this project under the terms of the Apache License 2.0, provided you retain the original copyright notice and the NOTICE file in any redistribution.
