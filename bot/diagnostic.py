@@ -197,6 +197,7 @@ class DiagnosticLogger:
             "buy_qty_corrected_q":   0,
             "buy_qty_corrected_esc": 0,
             "buy_qty_unrecoverable": 0,
+            "buy_qty_shop_depleted": 0,
             "buy_qty_ocr_fail":      0,
             "buy_qty_drift_detected": 0,
             "buy_qty_fallback_murk": 0,
@@ -263,7 +264,6 @@ class DiagnosticLogger:
             "door_gen_calls":        0,
             "door_total_generated":  0,
             "compat_rejects":        0,
-            "duplicate_skips":       0,
 
             # Game state
             "game_launches":         0,
@@ -801,12 +801,18 @@ class DiagnosticLogger:
                     cost: int = 0, attempt: int = 0,
                     note: str = "") -> None:
         """event: verified | corrected_q | corrected_esc | unrecoverable
-                  | ocr_fail | drift_detected | fallback_murk
+                  | shop_depleted | ocr_fail | drift_detected | fallback_murk
 
         verified       — X==expected, no correction needed
         corrected_q    — X != expected, Q-back retry succeeded
         corrected_esc  — Q retries exhausted, ESC reset retry succeeded
-        unrecoverable  — both Q and ESC paths exhausted, abort iteration
+        shop_depleted  — after ESC reset, the buy dialog still did not open
+                         (got/n_cap/cost all zero) — the shop ran out of the
+                         targeted item.  Iteration ends gracefully; relics
+                         scanned in earlier cycles are preserved.  WARN.
+        unrecoverable  — ESC reset returned inconsistent/garbage data (dialog
+                         opened but OCR failed to read it).  Genuine bug or
+                         game bug — warrants investigation.  ERROR.
         ocr_fail       — OCR returned nothing parseable
         drift_detected — X/N and murk-cost cross-check disagreed
         fallback_murk  — X/N OCR uncertain, used murk-derived value instead
@@ -826,6 +832,10 @@ class DiagnosticLogger:
         elif event == "drift_detected":
             self.log_failure(OCR, "buy_qty_drift",
                              {"cycle": cycle, "got": got, "cost": cost},
+                             severity=WARN)
+        elif event == "shop_depleted":
+            self.log_failure(STATE, "shop_depleted_eoi",
+                             {"cycle": cycle, "cycles_done": cycle - 1},
                              severity=WARN)
         elif event == "unrecoverable":
             self.log_failure(STATE, "buy_qty_unrecoverable",
@@ -1147,10 +1157,6 @@ class DiagnosticLogger:
         if n > 0:
             self._ev["compat_rejects"] += n
 
-    def log_duplicate_skip(self, current_iter: int, idx: int, reason: str) -> None:
-        self._ev["duplicate_skips"] += 1
-        self._write(f"  DUP_SKIP  iter={current_iter}  idx={idx}  reason={reason}")
-
     # ── Game state ────────────────────────────────────────────────────────── #
 
     def log_game(self, event: str, attempt: int = 0, note: str = "") -> None:
@@ -1332,8 +1338,7 @@ class DiagnosticLogger:
         lines.append(
             f"Door gen           : calls={e['door_gen_calls']}  "
             f"total_doors={e['door_total_generated']}  "
-            f"compat_rejects={e['compat_rejects']}  "
-            f"dup_skips={e['duplicate_skips']}"
+            f"compat_rejects={e['compat_rejects']}"
         )
 
         lines.append("--- Game state ---")

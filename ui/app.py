@@ -4351,6 +4351,15 @@ class RelicBotApp(tk.Tk):
                     try:
                         import os as _os
                         from bot import relic_analyzer as _ra
+                        # Buy-qty failure dump — writes X/N + cost + total-murk
+                        # crops to buy_qty_fails/ for each ocr_fail / unrecoverable
+                        # / shop_depleted event.  Used for offline triage of
+                        # buy-qty OCR weaknesses.
+                        try:
+                            _ra.set_buyqty_fail_dir(
+                                _os.path.join(run_dir, "buy_qty_fails"))
+                        except Exception:
+                            pass
                         def _curse_miss_diag_hook(slot_idx, raw_text, dump_path):
                             _d = getattr(self, "_diag", None)
                             _ci = getattr(self, "_diag_cur_iter", 0) or 0
@@ -8499,6 +8508,18 @@ class RelicBotApp(tk.Tk):
                                         attempt=_qty_attempt + 1)
                                 except Exception:
                                     pass
+                                # Dump failing crops for offline triage
+                                try:
+                                    relic_analyzer.dump_buyqty_fail(
+                                        image_bytes=_qty_jpeg,
+                                        cycle=_batch_i + 1,
+                                        attempt=_qty_attempt + 1,
+                                        event="ocr_fail",
+                                        x_read=_qty_x, n_read=_qty_n,
+                                        cost_read=_qty_cost,
+                                        conf=_qty_conf)
+                                except Exception:
+                                    pass
                         else:
                             # X != expected → drift / extra-input
                             if self._diag:
@@ -8617,21 +8638,52 @@ class RelicBotApp(tk.Tk):
                                     pass
                             _qty_ok = True
                         else:
-                            self._log(
-                                f"  Cycle {_batch_i + 1}: ESC reset retry"
-                                f" also failed (got {_qty_x}/{_qty_n})"
-                                f" — aborting iteration")
+                            # Distinguish shop-depleted (expected, graceful
+                            # end of iteration when stock runs out) from
+                            # genuine unrecoverable (dialog opened but OCR
+                            # read garbage — real bug or game bug).
+                            _shop_depleted = (
+                                (_qty_x is None or _qty_x == 0)
+                                and (_qty_n is None or _qty_n == 0)
+                                and (not _qty_cost)
+                            )
+                            if _shop_depleted:
+                                self._log(
+                                    f"  Cycle {_batch_i + 1}: shop likely"
+                                    f" empty ({_batch_i} cycles completed)"
+                                    f" — ending iteration gracefully")
+                                _event = "shop_depleted"
+                            else:
+                                self._log(
+                                    f"  Cycle {_batch_i + 1}: ESC reset retry"
+                                    f" also failed (got {_qty_x}/{_qty_n})"
+                                    f" — aborting iteration")
+                                _event = "unrecoverable"
                             if self._diag:
                                 try:
                                     self._diag.log_buy_qty(
-                                        event="unrecoverable",
+                                        event=_event,
                                         cycle=_batch_i + 1,
                                         expected=_batch_size,
                                         got=_qty_x or 0,
                                         n_cap=_qty_n or 0,
-                                        conf=_qty_conf)
+                                        conf=_qty_conf,
+                                        cost=_qty_cost or 0)
                                 except Exception:
                                     pass
+                            # Dump the failing frame for offline triage.
+                            try:
+                                relic_analyzer.dump_buyqty_fail(
+                                    image_bytes=_qty_jpeg,
+                                    cycle=_batch_i + 1,
+                                    attempt=0,
+                                    event=_event,
+                                    x_read=_qty_x, n_read=_qty_n,
+                                    cost_read=_qty_cost,
+                                    conf=_qty_conf,
+                                    note=f"batch_size={_batch_size}")
+                            except Exception:
+                                pass
                             # Best-effort dialog close before aborting (verified
                             # so we don't leave the dialog open in the game).
                             _q_back_with_verify(_qty_jpeg)
@@ -11187,9 +11239,9 @@ class RelicBotApp(tk.Tk):
                     "settle_fallthrough", "buy_fail_in_place"]),
                 ("Phase 1 buy-qty verify", [
                     "buy_qty_verified", "buy_qty_corrected_q",
-                    "buy_qty_corrected_esc", "buy_qty_unrecoverable",
-                    "buy_qty_ocr_fail", "buy_qty_drift_detected",
-                    "buy_qty_fallback_murk"]),
+                    "buy_qty_corrected_esc", "buy_qty_shop_depleted",
+                    "buy_qty_unrecoverable", "buy_qty_ocr_fail",
+                    "buy_qty_drift_detected", "buy_qty_fallback_murk"]),
                 ("Phase 2 advance", [
                     "advance_total", "advance_dup_accepted", "advance_drop",
                     "p2_wraparound_skip", "p2_endwrap_clamp",
@@ -11223,7 +11275,7 @@ class RelicBotApp(tk.Tk):
                     "slot_ocr_curse_hits", "curse_misses"]),
                 ("Doors / matching", [
                     "door_gen_calls", "door_total_generated",
-                    "compat_rejects", "duplicate_skips"]),
+                    "compat_rejects"]),
                 ("Game state", [
                     "game_launches", "game_launch_fails",
                     "save_restores", "perf_recalibrations"]),

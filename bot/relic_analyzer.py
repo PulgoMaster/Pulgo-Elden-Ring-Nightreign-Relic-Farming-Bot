@@ -1031,6 +1031,109 @@ def set_curse_miss_dir(path: "str | None") -> None:
                 pass
 
 
+# ── Buy-qty failure dump (mirrors the curse-miss pattern) ──────────── #
+#
+# When Phase 1 buy-qty OCR returns nothing parseable (`ocr_fail`) or the
+# full retry chain runs out (`unrecoverable` / `shop_depleted`), we dump
+# three crops — BUY_QTY_REGION, BUY_CYCLE_COST_REGION, MURK_TOTAL_REGION
+# — plus a sidecar text file with the raw OCR tokens.  Lets us inspect
+# failing cases offline and tighten the crop regions / preprocessing
+# against real game frames.
+_buyqty_fail_dir: "str | None" = None
+_buyqty_fail_lock = threading.Lock()
+_buyqty_fail_count = 0
+_buyqty_fail_max_per_run = 200   # safety cap so disk doesn't fill up
+
+
+def set_buyqty_fail_dir(path: "str | None") -> None:
+    """app.py calls this when a batch run starts.  Pass None to disable."""
+    global _buyqty_fail_dir, _buyqty_fail_count
+    with _buyqty_fail_lock:
+        _buyqty_fail_dir = path
+        _buyqty_fail_count = 0
+        if path:
+            try:
+                import os as _os
+                _os.makedirs(path, exist_ok=True)
+            except Exception:
+                pass
+
+
+def dump_buyqty_fail(image_bytes: bytes, cycle: int, attempt: int,
+                     event: str, x_read, n_read, cost_read,
+                     conf: float = 0.0, note: str = "") -> "str | None":
+    """Save three region crops + sidecar for a failed buy-qty OCR.
+
+    `event` names the failure (`ocr_fail`, `unrecoverable`, `shop_depleted`).
+    `x_read` / `n_read` / `cost_read` are the parsed values (may be None).
+    Returns the sidecar txt path on success, None otherwise.
+    """
+    global _buyqty_fail_count
+    with _buyqty_fail_lock:
+        if not _buyqty_fail_dir:
+            return None
+        if _buyqty_fail_count >= _buyqty_fail_max_per_run:
+            return None
+        _buyqty_fail_count += 1
+        idx = _buyqty_fail_count
+    try:
+        import os as _os
+        import datetime as _dt
+        img = _to_array(image_bytes, max_width=0)
+        h, w = img.shape[:2]
+
+        def _crop(region):
+            x1 = max(0, int(w * region[0]))
+            y1 = max(0, int(h * region[1]))
+            x2 = min(w, int(w * region[2]))
+            y2 = min(h, int(h * region[3]))
+            return img[y1:y2, x1:x2]
+
+        ts = _dt.datetime.now().strftime("%H%M%S_%f")[:-3]
+        base = f"{idx:03d}_cyc{cycle:02d}_att{attempt}_{event}_{ts}"
+        dirpath = _buyqty_fail_dir
+
+        x_crop    = _crop(BUY_QTY_REGION)
+        cost_crop = _crop(BUY_CYCLE_COST_REGION)
+        murk_crop = _crop(MURK_SHOP_REGION)
+
+        Image.fromarray(x_crop).save(_os.path.join(dirpath, base + "_xn.png"))
+        Image.fromarray(cost_crop).save(_os.path.join(dirpath, base + "_cost.png"))
+        Image.fromarray(murk_crop).save(_os.path.join(dirpath, base + "_murk.png"))
+
+        # Also parse the total-murk counter using the existing read_murk()
+        # path so the sidecar records what the production parser would have
+        # read at this moment — useful for correlating the fail with the
+        # player's remaining murk.
+        _murk_val = None
+        try:
+            _murk_val, _ = read_murk(image_bytes)
+        except Exception:
+            pass
+
+        sidecar = _os.path.join(dirpath, base + ".txt")
+        with open(sidecar, "w", encoding="utf-8") as f:
+            f.write(f"Event:     {event}\n")
+            f.write(f"Cycle:     {cycle}\n")
+            f.write(f"Attempt:   {attempt}\n")
+            f.write(f"Image dim: {w}x{h}\n")
+            f.write(f"\nParsed OCR:\n")
+            f.write(f"  X:    {x_read!r}\n")
+            f.write(f"  N:    {n_read!r}\n")
+            f.write(f"  Cost: {cost_read!r}\n")
+            f.write(f"  Conf: {conf:.3f}\n")
+            f.write(f"\nMurk total (via read_murk): {_murk_val!r}\n")
+            if note:
+                f.write(f"\nNote: {note}\n")
+            f.write(f"\nRegions (as fractions of image dims):\n")
+            f.write(f"  BUY_QTY_REGION       = {BUY_QTY_REGION}\n")
+            f.write(f"  BUY_CYCLE_COST_REGION = {BUY_CYCLE_COST_REGION}\n")
+            f.write(f"  MURK_SHOP_REGION     = {MURK_SHOP_REGION}\n")
+        return sidecar
+    except Exception:
+        return None
+
+
 def _dump_curse_miss(crop: np.ndarray, slot_idx: int, raw_text: str,
                      tokens: list) -> "str | None":
     """Save raw crop + sidecar.  Returns the saved PNG path or None."""
@@ -1389,6 +1492,12 @@ MURK_SHOP_REGION = (0.0, 0.0, 0.45, 0.18)
 # real 1080p + 1440p captures (see crop_preview_phase1/).
 BUY_QTY_REGION       = (0.593, 0.441, 0.658, 0.473)
 BUY_CYCLE_COST_REGION = (0.594, 0.485, 0.664, 0.517)
+
+# The total-murk counter (top-left of shop / relic preview / buy dialog)
+# is read by the existing read_murk() function using MURK_SHOP_REGION
+# (defined later in this file).  The buy-qty fail dump reuses that same
+# region + function so we share the tuning and parsing logic rather than
+# maintaining a parallel crop.
 
 
 def read_buy_quantity(image_bytes: bytes,
