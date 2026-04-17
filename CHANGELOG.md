@@ -4,6 +4,35 @@ All notable changes to this project are documented here.
 
 ---
 
+## [Big-Batch CE] — 2026-04-16 — UNCAPPED PER BUY (CE SCRIPT REQUIRED)
+
+This is a **separate build flavor** from the mainline RelicBot. It requires a third-party Cheat Engine script that:
+  • Allows buying relic batches of any size from 1 to 1950 (the game's inventory cap)
+  • Freezes the murk total so the buy quantity is not bounded by available murk
+
+**Anti-cheat note:** running CE scripts requires bypassing Easy Anti-Cheat. This build is **not safe to use with EAC enabled** — the requirement is on the user's CE setup, not on this bot.
+
+### What changed vs mainline
+- **One mega-cycle per iteration** instead of N cycles of <=10 relics. The bot does a single buy of up to 1950 relics, then walks the entire row in one pass.
+- **Standard mode locked.** Async / Backlog / Hybrid GPU+CPU / GPU Always Analyze / multi-worker all disabled and hidden from the UI. At N=1900 these modes either desync or burn unnecessary memory.
+- **Hotbar glow verifier** between every RIGHT press. Each input is confirmed by sampling per-slot color signatures + glow position from the top relic bar — pre-press snapshot vs post-press snapshot. One retry on miss; iteration aborts on second miss (cannot risk a silent doubled / dropped input in a 1900-relic nav).
+- **No spam-RIGHT-until-new-relic** logic. The mainline crop-history wraparound check is O(N^2) per cycle (3.6M comparisons at N=1900) and was originally tuned for <=10 relics. Replaced by the hotbar verifier above.
+- **`read_buy_quantity` bounds bumped** from <=99 to <=1950 to accept 4-digit X/N reads. `BUY_QTY_REGION` widened horizontally to fit "1900/1900" text.
+- **Window title** distinguishes this build from the mainline EAC-safe build.
+
+### What's identical
+- Same OCR pipeline, same hit logging, same Smart Analyze, same overlay HUD
+- Same probability engine, same datamine data, same Build Advisor
+- Same save-restore + game lifecycle + diagnostic logger
+- No sell logic (mainline has never had one — keepers are flagged in logs, user disposes manually)
+
+### Implementation notes
+- Single `_BUILD_IS_GIGA = True` constant at the top of `ui/app.py` toggles all giga behavior in one place. Set to `False` to revert to mainline.
+- New helpers `capture_hotbar_signature` + `hotbar_advanced` in `bot/screen_capture.py`.
+- All giga branches in `_run_iteration_phases` are guarded by a local `_GIGA_MODE = _BUILD_IS_GIGA`.
+
+---
+
 ## [1.8.2] — 2026-04-15 — PHASE 3 TOOLTIP RETRY HARDENING + DIAGNOSTIC COUNTER WIRING
 
 ### Phase 3 tooltip retry

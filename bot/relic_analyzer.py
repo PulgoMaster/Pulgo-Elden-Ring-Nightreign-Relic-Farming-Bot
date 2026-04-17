@@ -1490,7 +1490,7 @@ MURK_SHOP_REGION = (0.0, 0.0, 0.45, 0.18)
 #   • a "Required Murk: K" line directly below it
 # Both regions are tuned for the centred buy dialog and verified against
 # real 1080p + 1440p captures (see crop_preview_phase1/).
-BUY_QTY_REGION       = (0.593, 0.441, 0.658, 0.473)
+BUY_QTY_REGION       = (0.560, 0.441, 0.730, 0.473)
 BUY_CYCLE_COST_REGION = (0.594, 0.485, 0.664, 0.517)
 
 # The total-murk counter (top-left of shop / relic preview / buy dialog)
@@ -1549,7 +1549,7 @@ def read_buy_quantity(image_bytes: bytes,
             parts = tok.split("/")
             if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
                 x_val = int(parts[0]); n_val = int(parts[1])
-                if 1 <= x_val <= 99 and 1 <= n_val <= 99 and x_val <= n_val:
+                if 1 <= x_val <= 1950 and 1 <= n_val <= 1950 and x_val <= n_val:
                     return x_val, n_val, conf
 
     # Try: two adjacent tokens, first ends with "/", second is a digit
@@ -1557,14 +1557,14 @@ def read_buy_quantity(image_bytes: bytes,
         a, ca = tokens[i]; b, cb = tokens[i + 1]
         if a.endswith("/") and a[:-1].isdigit() and b.isdigit():
             x_val = int(a[:-1]); n_val = int(b)
-            if 1 <= x_val <= 99 and 1 <= n_val <= 99 and x_val <= n_val:
+            if 1 <= x_val <= 1950 and 1 <= n_val <= 1950 and x_val <= n_val:
                 return x_val, n_val, min(ca, cb)
 
     # Try: exactly two pure-int tokens
     int_toks = [(int(t), c) for t, c in tokens if t.isdigit()]
     if len(int_toks) == 2:
         x_val, ca = int_toks[0]; n_val, cb = int_toks[1]
-        if 1 <= x_val <= 99 and 1 <= n_val <= 99 and x_val <= n_val:
+        if 1 <= x_val <= 1950 and 1 <= n_val <= 1950 and x_val <= n_val:
             return x_val, n_val, min(ca, cb)
 
     return None, None, 0.0

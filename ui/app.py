@@ -32,6 +32,18 @@ from bot.diagnostic import DiagnosticLogger
 from ui import theme, relic_images
 from ui.relic_builder import RelicBuilderFrame
 
+# ── Build flavor flag ───────────────────────────────────────────────────
+# This build is the GIGA / big-batch variant (Cheat Engine script required).
+# When True:
+#   • _run_iteration_phases switches to mega-cycle behavior (1 buy of N relics
+#     per iteration instead of N cycles of <=10).
+#   • Async / Backlog / Hybrid / GPU Always Analyze / multi-worker UI
+#     controls are hidden — those modes are unsupported in giga mode and
+#     would silently desync at scale.
+# Set to False to revert to mainline behavior (UI shows everything, no
+# giga branches).  Both runtime + UI checks key off this single flag.
+_BUILD_IS_GIGA = True
+
 
 def _app_root() -> str:
     """Working root: folder containing the EXE when frozen, repo root in dev."""
@@ -589,7 +601,11 @@ class RelicBotApp(tk.Tk):
 
         self.withdraw()   # keep window hidden until UI is built; prevents flash
 
-        self.title("Elden Ring Nightreign – Relic Bot v1.8.2  |  Made by Pulgo")
+        self.title(
+            "Elden Ring Nightreign – Relic Bot — UNCAPPED PER BUY (CE Script Required)  |  Made by Pulgo"
+            if _BUILD_IS_GIGA else
+            "Elden Ring Nightreign – Relic Bot v1.8.2  |  Made by Pulgo"
+        )
         self.resizable(True, True)
 
         # Input recording
@@ -1248,13 +1264,17 @@ class RelicBotApp(tk.Tk):
                  " 32 GB+  →  6–8 workers\n\n"
                  "Workers automatically pause if RAM drops critically low.\n"
                  "Leave OFF if you notice crashes, freezes, or system slowdowns.")
-        ttk.Label(self.batch_frame, text="Workers:").grid(row=4, column=2, **pad)
+        _workers_lbl = ttk.Label(self.batch_frame, text="Workers:")
+        _workers_lbl.grid(row=4, column=2, **pad)
         _worker_max = min(8, max(1, self._hw_cpu_cores or 8))
         self._parallel_spin = ttk.Spinbox(
             self.batch_frame, from_=1, to=_worker_max, width=4,
             textvariable=self._parallel_workers_var, state="disabled",
         )
         self._parallel_spin.grid(row=4, column=3, sticky="w", **pad)
+        if _BUILD_IS_GIGA:
+            _workers_lbl.grid_remove()
+            self._parallel_spin.grid_remove()
         _Tooltip(self._parallel_spin,
                  f"Number of parallel CPU workers (2–{_worker_max}).\n"
                  "Each worker uses ~200 MB RAM and ~1 CPU core for OCR inference.\n\n"
@@ -1270,6 +1290,8 @@ class RelicBotApp(tk.Tk):
         self._ram_label = ttk.Label(self.batch_frame, textvariable=self._ram_label_var,
                                     foreground=theme.TEXT_MUTED)
         self._ram_label.grid(row=4, column=4, sticky="w", **pad)
+        if _BUILD_IS_GIGA:
+            self._ram_label.grid_remove()
         _Tooltip(self._ram_label,
                  "Shows estimated RAM usage and CPU core allocation for the current worker count.\n\n"
                  "Using all cores is not recommended — the bot and the game will fight for core\n"
@@ -1283,6 +1305,8 @@ class RelicBotApp(tk.Tk):
             variable=self._async_enabled_var,
         )
         async_chk.grid(row=5, column=0, columnspan=2, sticky="w", **pad)
+        if _BUILD_IS_GIGA:
+            async_chk.grid_remove()
         _Tooltip(async_chk,
                  "Decouples screenshot capture from OCR analysis.\n"
                  "The bot captures all relics first, then analyzes them in the\n"
@@ -1299,6 +1323,8 @@ class RelicBotApp(tk.Tk):
             variable=self._smart_throttle_var,
         )
         st_chk.grid(row=5, column=2, sticky="w", **pad)
+        if _BUILD_IS_GIGA:
+            st_chk.grid_remove()
         _Tooltip(st_chk,
                  "Only throttle OCR workers during input phases when the system\n"
                  "is actually under stress (CPU > 70% or perf multiplier > 1.15×).\n\n"
@@ -1345,6 +1371,8 @@ class RelicBotApp(tk.Tk):
         )
         _ebp_chk.grid(row=6, column=0, columnspan=3, sticky="w",
                       padx=(24, 4), pady=(0, 2))
+        if _BUILD_IS_GIGA:
+            _ebp_chk.grid_remove()
         _Tooltip(_ebp_chk,
                  "Keeps all async workers paused from the moment the bot starts\n"
                  "buying until every relic screenshot has been captured.\n\n"
@@ -1364,6 +1392,8 @@ class RelicBotApp(tk.Tk):
             variable=self._hybrid_var,
         )
         _hyb_chk.grid(row=1, column=0, columnspan=3, sticky="w", **pad)
+        if _BUILD_IS_GIGA:
+            _hyb_chk.grid_remove()
         _Tooltip(_hyb_chk,
                  "Runs one dedicated GPU worker alongside CPU workers.\n"
                  "Both pull from the same queue in parallel — throughput ≈ GPU + CPU speed.\n\n"
@@ -1380,6 +1410,8 @@ class RelicBotApp(tk.Tk):
             variable=self._gpu_always_analyze_var,
         )
         _gpu_aa_chk.grid(row=1, column=3, columnspan=4, sticky="w", **pad)
+        if _BUILD_IS_GIGA:
+            _gpu_aa_chk.grid_remove()
 
         _Tooltip(_gpu_aa_chk,
                  "Allows the GPU worker to keep analyzing relics even while CPU workers are paused for game inputs.\n"
@@ -1597,6 +1629,8 @@ class RelicBotApp(tk.Tk):
             variable=self._backlog_mode_var,
         )
         backlog_chk.grid(row=7, column=0, columnspan=5, sticky="w", **pad)
+        if _BUILD_IS_GIGA:
+            backlog_chk.grid_remove()
         _Tooltip(backlog_chk,
                  "Defers all OCR analysis until after the entire batch is complete.\n\n"
                  "During the run:\n"
@@ -1651,6 +1685,8 @@ class RelicBotApp(tk.Tk):
         _ibl_frame = ttk.Frame(self.batch_frame)
         _ibl_frame.grid(row=8, column=0, columnspan=6, sticky="w",
                         padx=(28, 0), pady=(0, 2))
+        if _BUILD_IS_GIGA:
+            _ibl_frame.grid_remove()
 
         _ibl_chk = ttk.Checkbutton(
             _ibl_frame,
@@ -7920,6 +7956,33 @@ class RelicBotApp(tk.Tk):
         Each dict has the usual analyze() keys plus a private '_image_bytes' entry.
         Returns None on fatal error.
         """
+        # ── GIGA MODE (CE-enabled big-batch build) ──────────────────────────
+        # When True, the iteration runs ONE giant cycle instead of N small
+        # cycles of <=10. Requires the user's CE script to bypass the per-buy
+        # quantity cap and freeze murk.  Three behavioral changes vs mainline:
+        #   1. _buy_count forced to 1 (one cycle per iteration)
+        #   2. _batch_size = full _p3_count (no min(10, ...) cap)
+        #   3. Phase 2 uses single-press + hotbar glow verifier per RIGHT
+        #      press instead of spam-RIGHT-with-crop-history
+        # Async/backlog/hybrid/GPU AA modes are also force-disabled regardless
+        # of UI state to prevent unsupported combinations.
+        _GIGA_MODE = _BUILD_IS_GIGA
+        if _GIGA_MODE:
+            # Force all incompatible modes off at runtime, regardless of any
+            # stale config values left over from the mainline bot.
+            try:
+                self._async_enabled_var.set(False)
+                self._backlog_mode_var.set(False)
+                self._intermittent_backlog_var.set(False)
+                self._hybrid_var.set(False)
+                self._gpu_always_analyze_var.set(False)
+                self._smart_throttle_var.set(False)
+                self._exclude_buy_phase_var.set(False)
+                self._parallel_enabled_var.set(False)
+                self._parallel_workers_var.set(1)
+            except Exception:
+                pass
+
         p1_stop   = self.phase_stop_text_vars[1].get().strip()
         _P1_FAILSAFE = 500          # internal only — never shown in UI
         p1_settle = float(self.phase_settle_vars[1].get() or "0")
@@ -8253,12 +8316,29 @@ class RelicBotApp(tk.Tk):
         # Batch count is driven by murk read; falls back to failsafe if unknown.
         if self.phase_events[1]:
             if _p3_count is not None:
-                _MAX_BUY_BATCHES = math.ceil(1950 / 10)
-                _buy_count = min(math.ceil(_p3_count / 10), _MAX_BUY_BATCHES)
-                self._log(f"  {_p3_count} relic(s) available → {_buy_count} cycle(s).")
+                if _GIGA_MODE:
+                    # One giant cycle per iteration (CE script handles the buy
+                    # quantity ceiling at the dialog).  Cap at 1950 — the game's
+                    # hard inventory limit — to avoid asking for more than the
+                    # buy dialog can ever show.
+                    _buy_count = 1
+                    if _p3_count > 1950:
+                        _p3_count = 1950
+                    self._log(f"  [GIGA] {_p3_count} relic(s) available → 1 mega-cycle.")
+                else:
+                    _MAX_BUY_BATCHES = math.ceil(1950 / 10)
+                    _buy_count = min(math.ceil(_p3_count / 10), _MAX_BUY_BATCHES)
+                    self._log(f"  {_p3_count} relic(s) available → {_buy_count} cycle(s).")
             else:
-                _buy_count  = _P1_FAILSAFE
-                _p3_count   = _buy_count * 10   # upper-bound estimate for overlay
+                if _GIGA_MODE:
+                    # Murk read failed but giga still runs one cycle — the buy
+                    # dialog X/N OCR will determine actual size after Down press.
+                    _buy_count = 1
+                    _p3_count  = 1950   # upper-bound estimate for overlay
+                    self._log("  [GIGA] Murk unknown — giga mega-cycle, size from dialog OCR.")
+                else:
+                    _buy_count  = _P1_FAILSAFE
+                    _p3_count   = _buy_count * 10   # upper-bound estimate for overlay
                 self._log("  Murk unknown — running in failsafe mode.")
 
             _relics_scanned = 0
@@ -8316,8 +8396,14 @@ class RelicBotApp(tk.Tk):
                     return relic_results
 
                 # How many relics will this batch buy?
-                _remaining        = (_p3_count - _batch_i * 10) if _p3_count else 10
-                _batch_size       = min(10, _remaining)
+                if _GIGA_MODE:
+                    # One giant cycle: take the entire affordable count, no
+                    # 10-cap.  Bounded by 1950 (game inventory cap) above.
+                    _remaining        = _p3_count if _p3_count else 1950
+                    _batch_size       = _remaining
+                else:
+                    _remaining        = (_p3_count - _batch_i * 10) if _p3_count else 10
+                    _batch_size       = min(10, _remaining)
                 _advance_presses  = max(0, _batch_size - 1)
 
                 # ── Phase 1: Buy + enter relic preview (with retry on miss) ── #
@@ -9133,7 +9219,14 @@ class RelicBotApp(tk.Tk):
                     # cursor has revisited an already-scanned position.
                     _p2_crop_history: list = []
                     _p2_attempts        = 0
-                    _P2_MAX_ATTEMPTS    = _batch_size * 3  # two full extra passes for recovery
+                    if _GIGA_MODE:
+                        # Giga mode: hotbar verifier guarantees each RIGHT advances
+                        # exactly once. No extra-pass recovery needed (and would be
+                        # impractical at N=1900). Loop bound becomes _batch_size + a
+                        # small slack for the verifier's own retries.
+                        _P2_MAX_ATTEMPTS = _batch_size + 4
+                    else:
+                        _P2_MAX_ATTEMPTS    = _batch_size * 3  # two full extra passes for recovery
                     _p2_wraparound_hits = 0
                     _p2_input_drop_hits = 0
 
@@ -9148,29 +9241,66 @@ class RelicBotApp(tk.Tk):
                         # Advance RIGHT for every attempt after the first.
                         # The first attempt reuses the settle image (cursor at slot 0).
                         if _p2_attempts > 0:
-                            # GPU yield: drain any in-flight readtext before pressing RIGHT
-                            # so the game's input poll doesn't get dropped during a GPU stall.
-                            # No-op in CPU mode.
-                            _yield_t0 = time.perf_counter()
-                            with relic_analyzer.input_gpu_yield():
-                                _yield_wait_ms = (time.perf_counter() - _yield_t0) * 1000.0
-                                if self._diag:
+                            if _GIGA_MODE:
+                                # Hotbar-verified RIGHT press: snapshot the
+                                # top-bar glow/slot signatures pre + post,
+                                # confirm the cursor actually advanced. One
+                                # retry on miss; abort iteration on second miss
+                                # (we cannot risk a doubled / dropped input
+                                # silently desyncing in a 1900-relic nav).
+                                _gv_max_tries = 2
+                                _gv_ok = False
+                                for _gv_try in range(_gv_max_tries):
                                     try:
-                                        self._diag.log_input_yield(
-                                            phase="Phase 2 advance",
-                                            key="right",
-                                            wait_ms=_yield_wait_ms)
+                                        _gv_pre_full = screen_capture.capture(region)
+                                        _gv_pre_sig  = screen_capture.capture_hotbar_signature(_gv_pre_full)
                                     except Exception:
-                                        pass
-                                # hold=0.02 (was 0.05): with the high-res timer fix in main.py
-                                # making time.sleep accurate to ~1ms, a 20ms hold spans ~1.2 game
-                                # frames at 60fps — long enough for the game to register the key-down
-                                # edge, short enough that the key is released before the next frame
-                                # can re-sample it. Phase 2 only — other tap sites are unaffected by
-                                # the doubling problem because they're not in tight GPU-contended loops.
-                                self.player.tap("Key.right", hold=0.02)
-                            _p2_advance_settle = 0.20 * max(1.0, self._perf_gap_mult)
-                            time.sleep(_p2_advance_settle)
+                                        _gv_pre_sig = None
+                                    with relic_analyzer.input_gpu_yield():
+                                        self.player.tap("Key.right", hold=0.02)
+                                    time.sleep(0.20 * max(1.0, self._perf_gap_mult))
+                                    try:
+                                        _gv_post_full = screen_capture.capture(region)
+                                        _gv_post_sig  = screen_capture.capture_hotbar_signature(_gv_post_full)
+                                    except Exception:
+                                        _gv_post_sig = None
+                                    if screen_capture.hotbar_advanced(_gv_pre_sig, _gv_post_sig):
+                                        _gv_ok = True
+                                        break
+                                    self._log(
+                                        f"  [GIGA] Hotbar did not advance after RIGHT"
+                                        f" (relic {_relics_scanned + 1}, try"
+                                        f" {_gv_try + 1}/{_gv_max_tries})")
+                                if not _gv_ok:
+                                    self._log(
+                                        f"  [GIGA] ABORT iteration — RIGHT not registering"
+                                        f" at relic {_relics_scanned + 1}/{_batch_size}")
+                                    self._set_ocr_throttle(False)
+                                    return relic_results
+                            else:
+                                # GPU yield: drain any in-flight readtext before pressing RIGHT
+                                # so the game's input poll doesn't get dropped during a GPU stall.
+                                # No-op in CPU mode.
+                                _yield_t0 = time.perf_counter()
+                                with relic_analyzer.input_gpu_yield():
+                                    _yield_wait_ms = (time.perf_counter() - _yield_t0) * 1000.0
+                                    if self._diag:
+                                        try:
+                                            self._diag.log_input_yield(
+                                                phase="Phase 2 advance",
+                                                key="right",
+                                                wait_ms=_yield_wait_ms)
+                                        except Exception:
+                                            pass
+                                    # hold=0.02 (was 0.05): with the high-res timer fix in main.py
+                                    # making time.sleep accurate to ~1ms, a 20ms hold spans ~1.2 game
+                                    # frames at 60fps — long enough for the game to register the key-down
+                                    # edge, short enough that the key is released before the next frame
+                                    # can re-sample it. Phase 2 only — other tap sites are unaffected by
+                                    # the doubling problem because they're not in tight GPU-contended loops.
+                                    self.player.tap("Key.right", hold=0.02)
+                                _p2_advance_settle = 0.20 * max(1.0, self._perf_gap_mult)
+                                time.sleep(_p2_advance_settle)
                             if not self.bot_running or self._reset_iter_requested:
                                 self._set_ocr_throttle(False)
                                 if not self.bot_running and capture_only and not _p2_async:
@@ -9237,8 +9367,14 @@ class RelicBotApp(tk.Tk):
                         # Either case: do NOT increment _p2_confirmed.  The outer
                         # loop is bounded by _P2_MAX_ATTEMPTS = 2*_batch_size, so
                         # one full extra pass is allowed for recovery.
+                        #
+                        # GIGA MODE: this whole block is bypassed — the hotbar
+                        # glow verifier above already confirmed each RIGHT
+                        # registered, so every capture here is treated as a
+                        # genuinely new relic.  The crop-history compare is
+                        # also O(N²) at scale (3.6M comparisons at N=1900).
                         _matched_idx = None
-                        if _p2_cur_crop is not None and _p2_crop_history:
+                        if not _GIGA_MODE and _p2_cur_crop is not None and _p2_crop_history:
                             for _hist_i, _hist_crop in enumerate(_p2_crop_history):
                                 try:
                                     if not screen_capture.crops_differ(

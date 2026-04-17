@@ -333,3 +333,124 @@ def is_black_frame(image_bytes: bytes, threshold: int = 15, dark_ratio: float = 
         return float(dark_pixels.mean()) >= dark_ratio
     except Exception:
         return False
+
+
+# ── Hotbar (relic preview top-bar) glow + per-slot signature verifier ──
+# Used in giga mode (CE-enabled big-batch build) to confirm each RIGHT
+# press actually moved the cursor.  At N=1900 the legacy spam-RIGHT-with-
+# crop-history approach is impractical, so each input must be verified
+# individually and tightly.
+#
+# The bar contains 6 visible relic slots in a row.  A bright white border
+# highlights the cursor's current slot.  Two phases of motion exist:
+#   • Walk phase — glow moves left→right across slots 1..6 as RIGHT is pressed
+#   • Scroll phase — glow pins on slot 6, the row contents shift left under it
+#
+# Either phase produces detectable per-slot color signature changes, so a
+# single check (any slot signature differs OR glow position moved) covers both.
+HOTBAR_REGION = (0.18, 0.18, 0.80, 0.38)   # fractional (l,t,r,b) of full screen
+HOTBAR_NUM_SLOTS = 6
+_HOTBAR_GLOW_MIN_BRIGHT = 200       # RGB threshold for "white border" pixels
+_HOTBAR_SLOT_DIFF_THRESHOLD = 24    # min sum-of-abs-diffs (R+G+B) to call a slot changed
+
+
+def capture_hotbar_signature(image_bytes: bytes,
+                             region: tuple | None = None
+                             ) -> tuple | None:
+    """Sample the relic hotbar from a full-screen capture.
+
+    Returns (slot_means, glow_slot) where:
+        slot_means: list of HOTBAR_NUM_SLOTS (R,G,B) int tuples — mean color
+                    of each slot's central icon area
+        glow_slot:  int 0..HOTBAR_NUM_SLOTS-1 indicating which slot has the
+                    brightest white border, or -1 if no clear glow detected
+    Returns None if the input could not be decoded.
+
+    The signature is intentionally lightweight — per-slot mean RGB is enough
+    to detect both walk-phase glow movement (slots gain/lose the white border
+    contribution) and scroll-phase content change (entire icon changes).
+    """
+    try:
+        import numpy as np
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        w, h = img.size
+        rgn = region or HOTBAR_REGION
+        x1 = int(w * rgn[0]); y1 = int(h * rgn[1])
+        x2 = int(w * rgn[2]); y2 = int(h * rgn[3])
+        if x2 <= x1 or y2 <= y1:
+            return None
+        bar = np.array(img.crop((x1, y1, x2, y2)))
+        bh, bw = bar.shape[:2]
+        if bw < HOTBAR_NUM_SLOTS or bh < 4:
+            return None
+
+        slot_w = bw / HOTBAR_NUM_SLOTS
+        slot_means = []
+        glow_scores = []
+        for i in range(HOTBAR_NUM_SLOTS):
+            sx1 = int(i * slot_w)
+            sx2 = int((i + 1) * slot_w)
+            slot = bar[:, sx1:sx2]
+            # Inner area for color signature (avoid edges where glow border lives)
+            inner_pad_x = max(2, (sx2 - sx1) // 6)
+            inner_pad_y = max(2, bh // 6)
+            inner = slot[inner_pad_y:bh - inner_pad_y, inner_pad_x:(sx2 - sx1) - inner_pad_x]
+            if inner.size == 0:
+                inner = slot
+            mean_rgb = tuple(int(c) for c in inner.reshape(-1, 3).mean(axis=0))
+            slot_means.append(mean_rgb)
+            # Glow score: count near-white pixels along the slot's perimeter
+            border = np.concatenate([
+                slot[0:2, :].reshape(-1, 3),
+                slot[-2:, :].reshape(-1, 3),
+                slot[:, 0:2].reshape(-1, 3),
+                slot[:, -2:].reshape(-1, 3),
+            ], axis=0)
+            white = np.all(border >= _HOTBAR_GLOW_MIN_BRIGHT, axis=1)
+            glow_scores.append(int(white.sum()))
+
+        # Pick the slot with the highest glow score, but only if it clearly
+        # dominates (>1.5× the next-highest) — otherwise no clear glow.
+        sorted_idx = sorted(range(HOTBAR_NUM_SLOTS),
+                            key=lambda i: glow_scores[i], reverse=True)
+        top_i = sorted_idx[0]
+        top_score = glow_scores[top_i]
+        runner_score = glow_scores[sorted_idx[1]] if len(sorted_idx) > 1 else 0
+        if top_score < 8 or top_score < runner_score * 1.5:
+            glow_slot = -1
+        else:
+            glow_slot = top_i
+
+        return (slot_means, glow_slot)
+    except Exception:
+        return None
+
+
+def hotbar_advanced(sig_before: tuple | None,
+                    sig_after: tuple | None) -> bool:
+    """Compare two hotbar signatures. Returns True if cursor appears advanced.
+
+    Pass condition (input registered):
+        • Glow slot index changed (walk phase), OR
+        • Any slot's mean color differs by more than _HOTBAR_SLOT_DIFF_THRESHOLD
+          (scroll phase — row contents shifted)
+
+    Returns False if either signature is None/invalid (caller should treat
+    as "could not verify" — typically retry once then abort).
+    """
+    if not sig_before or not sig_after:
+        return False
+    means_before, glow_before = sig_before
+    means_after,  glow_after  = sig_after
+
+    # Glow position changed and both reads were confident → input registered.
+    if (glow_before != -1 and glow_after != -1 and glow_before != glow_after):
+        return True
+
+    # Any slot's color signature shifted significantly → input registered
+    # (this covers scroll phase where glow position stays at slot 6 but the
+    # icons under all slots shift left).
+    for (r1, g1, b1), (r2, g2, b2) in zip(means_before, means_after):
+        if abs(r1 - r2) + abs(g1 - g2) + abs(b1 - b2) >= _HOTBAR_SLOT_DIFF_THRESHOLD:
+            return True
+    return False
