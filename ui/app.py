@@ -8557,7 +8557,33 @@ class RelicBotApp(tk.Tk):
                         _qty_expected = (
                             min(_batch_size, _qty_n) if _qty_n is not None
                             else _batch_size)
-                        if (_qty_x is not None and _qty_n is not None
+                        if _GIGA_MODE:
+                            # GIGA: trust X as authoritative.  CE script + frozen
+                            # murk lets the game allow buying far more than the
+                            # mainline murk math would predict, so the equality
+                            # check against _qty_expected would always fail.
+                            # Accept any sane X (1..1950) and adopt it as the
+                            # batch size for the Phase 2 nav.
+                            if _qty_x is not None and 1 <= _qty_x <= 1950:
+                                _accepted = True
+                                _actual_batch_size = _qty_x
+                                if self._diag:
+                                    try:
+                                        self._diag.log_buy_qty(
+                                            event="giga_accept_x",
+                                            cycle=_batch_i + 1,
+                                            expected=_batch_size,
+                                            got=_qty_x,
+                                            n_cap=_qty_n or 0,
+                                            conf=_qty_conf,
+                                            cost=_qty_cost or 0,
+                                            attempt=_qty_attempt + 1)
+                                    except Exception:
+                                        pass
+                                self._log(
+                                    f"  [GIGA] Cycle {_batch_i + 1}: accepted X={_qty_x}"
+                                    f" (N={_qty_n}, conf={_qty_conf:.2f})")
+                        elif (_qty_x is not None and _qty_n is not None
                                 and _qty_x == _qty_expected):
                             # Primary path: X/N OCR matches the achievable quantity
                             _accepted = True
@@ -8701,7 +8727,10 @@ class RelicBotApp(tk.Tk):
 
                         _qty_jpeg, _qty_x, _qty_n, _qty_conf, _qty_cost = _ocr_buy_dialog()
                         if (_qty_x is not None and _qty_n is not None
-                                and _qty_x == _batch_size):
+                                and (
+                                    _qty_x == _batch_size
+                                    or (_GIGA_MODE and 1 <= _qty_x <= 1950)
+                                )):
                             with relic_analyzer.input_gpu_yield():
                                 self.player.tap("f", hold=_p1_hold)
                             _actual_batch_size = _qty_x
@@ -8713,7 +8742,7 @@ class RelicBotApp(tk.Tk):
                             if self._diag:
                                 try:
                                     self._diag.log_buy_qty(
-                                        event="corrected_esc",
+                                        event=("giga_corrected_esc" if _GIGA_MODE else "corrected_esc"),
                                         cycle=_batch_i + 1,
                                         expected=_batch_size,
                                         got=_actual_batch_size,
@@ -9250,6 +9279,8 @@ class RelicBotApp(tk.Tk):
                                 # silently desyncing in a 1900-relic nav).
                                 _gv_max_tries = 2
                                 _gv_ok = False
+                                _gv_pre_full = _gv_post_full = None
+                                _gv_pre_sig  = _gv_post_sig  = None
                                 for _gv_try in range(_gv_max_tries):
                                     try:
                                         _gv_pre_full = screen_capture.capture(region)
@@ -9267,10 +9298,41 @@ class RelicBotApp(tk.Tk):
                                     if screen_capture.hotbar_advanced(_gv_pre_sig, _gv_post_sig):
                                         _gv_ok = True
                                         break
+                                    # Miss diagnostics: log signature details + dump
+                                    # pre/post hotbar crops so you can visually inspect
+                                    # what the verifier saw and tune thresholds.
+                                    _gv_pre_glow  = _gv_pre_sig[1]  if _gv_pre_sig  else "?"
+                                    _gv_post_glow = _gv_post_sig[1] if _gv_post_sig else "?"
+                                    _gv_diffs = []
+                                    if _gv_pre_sig and _gv_post_sig:
+                                        for (r1, g1, b1), (r2, g2, b2) in zip(
+                                                _gv_pre_sig[0], _gv_post_sig[0]):
+                                            _gv_diffs.append(
+                                                abs(r1 - r2) + abs(g1 - g2) + abs(b1 - b2))
+                                    _gv_diffs_str = " ".join(str(d) for d in _gv_diffs)
                                     self._log(
                                         f"  [GIGA] Hotbar did not advance after RIGHT"
                                         f" (relic {_relics_scanned + 1}, try"
-                                        f" {_gv_try + 1}/{_gv_max_tries})")
+                                        f" {_gv_try + 1}/{_gv_max_tries}):"
+                                        f" glow {_gv_pre_glow}->{_gv_post_glow}"
+                                        f" slot_diffs=[{_gv_diffs_str}]")
+                                    # Dump miss frames for offline triage
+                                    if iter_dir:
+                                        try:
+                                            _miss_dir = os.path.join(iter_dir, "hotbar_misses")
+                                            os.makedirs(_miss_dir, exist_ok=True)
+                                            _stamp = (f"r{_relics_scanned + 1:04d}"
+                                                      f"_t{_gv_try + 1}")
+                                            if _gv_pre_full is not None:
+                                                with open(os.path.join(
+                                                        _miss_dir, f"{_stamp}_pre.jpg"), "wb") as _f:
+                                                    _f.write(_gv_pre_full)
+                                            if _gv_post_full is not None:
+                                                with open(os.path.join(
+                                                        _miss_dir, f"{_stamp}_post.jpg"), "wb") as _f:
+                                                    _f.write(_gv_post_full)
+                                        except Exception:
+                                            pass
                                 if not _gv_ok:
                                     self._log(
                                         f"  [GIGA] ABORT iteration — RIGHT not registering"
