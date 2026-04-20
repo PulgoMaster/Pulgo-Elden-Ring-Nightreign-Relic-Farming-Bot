@@ -69,8 +69,11 @@ See [INSTALLATION.md](INSTALLATION.md) for detailed first-time setup.
   If you play a run after setting up the bot, make a fresh save at Roundtable Hold and update the path in the bot.
   Running from an outdated save risks being flagged by Nightreign's anti-cheat system.
 
-- **Run the bot offline.**
-  Disconnect your PC from the internet before starting a batch. The bot ships with all dependencies bundled (including OCR models) and never needs to phone home. Offline operation prevents any telemetry / cloud-save sync from happening during automation, which is the safest posture against anti-cheat detection.
+- **Game language must be English.**
+  The OCR pipeline is trained on the English in-game text only. Other languages are not supported — the bot will fail to read relic names, passives, and curses correctly. Switch the game's language to English in Steam (right-click Nightreign → Properties → Language) before running.
+
+- **Run with Steam or Nightreign in offline mode.**
+  Set Steam to Offline Mode (Steam menu → Go Offline) or launch Nightreign in offline mode before starting a batch. The bot ships with all dependencies bundled (including OCR models) and never needs to phone home — running offline prevents any telemetry / cloud-save sync from happening during automation, which is the safest posture against anti-cheat detection. You can switch back online between batches if needed.
 
 ---
 
@@ -78,6 +81,7 @@ See [INSTALLATION.md](INSTALLATION.md) for detailed first-time setup.
 
 - **Windows 10 or 11**
 - **Elden Ring Nightreign** installed via Steam
+- **Game language: English.** The OCR pipeline is trained on the English in-game text only. Other languages are not supported and the bot will fail to read relics correctly.
 - **16:9 display** (any resolution — 1080p, 1440p, 4K all work)
 - No Python or other software required — everything is bundled in the EXE
 

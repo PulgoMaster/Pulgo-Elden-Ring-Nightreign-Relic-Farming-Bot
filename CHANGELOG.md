@@ -48,7 +48,10 @@ All notable changes to this project are documented here.
 - The diagnostic log header now includes the actual app version (e.g. `Version : v1.8.3`) instead of the stale "input-test build" placeholder. Single source of truth via `APP_VERSION` constant in `ui/app.py`. Bug reports from users now identify their build immediately.
 
 ### README + GUIDE: offline mode strongly recommended
-- Updated README and GUIDE to RECOMMEND running the bot with the PC disconnected from the internet (previously messaging only said "works offline" as a feature, not as a recommendation). Added a new "RUN OFFLINE" entry to the GUIDE's CRITICAL WARNINGS section explaining the safety reasoning. The bot ships with all OCR models bundled, so offline operation is a no-friction default.
+- Updated README and GUIDE to RECOMMEND running with Steam or Nightreign in offline mode for best and safest results. The bot ships with all OCR models bundled and never needs to phone home, so offline operation is a no-friction default. Offline operation prevents background telemetry / cloud-save sync from happening during automation, which is the safest posture against anti-cheat detection.
+
+### README + GUIDE: clarified English-language requirement
+- Added explicit "game language must be English" requirement to README's Requirements + Important warnings sections, and to GUIDE's CRITICAL WARNINGS section. The OCR pipeline has always been trained on English in-game text only — this requirement was implicit before and is now stated up-front so non-English-language users don't waste time trying to use the bot before realizing the constraint.
 
 ---
 

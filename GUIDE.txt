@@ -53,21 +53,30 @@ ALWAYS USE A CURRENT SAVE
   Hold before running the bot. Running from an outdated save risks being
   flagged by Nightreign's anti-cheat system.
 
+GAME LANGUAGE MUST BE ENGLISH
+  The OCR pipeline is trained on the English in-game text only. Other
+  languages (Japanese, Spanish, French, etc.) are NOT supported — the bot
+  will fail to read relic names, passives, and curses correctly.
+  To switch: right-click Nightreign in Steam → Properties → Language →
+  set to English. Restart the game after changing.
+
 RUN OFFLINE  (RECOMMENDED — strongly preferred)
-  Before starting a batch, disconnect your PC from the internet.
-  The bot ships with all OCR models bundled and never needs to phone home,
-  so it runs perfectly fine offline. Running offline ensures:
+  Set Steam to Offline Mode (Steam menu → Go Offline) or launch Nightreign
+  in offline mode before starting a batch. The bot ships with all OCR
+  models bundled and never needs to phone home, so it runs perfectly fine
+  offline. Running offline ensures:
     - No game telemetry / cloud-save sync happens while automation is active
     - No background app traffic competes with the bot for system resources
     - The safest posture against anti-cheat detection
-  You can re-connect to the internet between batches if needed (e.g. to
-  upload screenshots or update the bot). Just disconnect again before
-  starting another run.
+  You can switch back online between batches if needed (e.g. to upload
+  screenshots or update the bot). Just go offline again before starting
+  another run.
 
 GAME SETTINGS
   - Run the game in BORDERLESS WINDOWED mode (not Fullscreen)
   - 16:9 aspect ratio required (any resolution: 1080p, 1440p, 4K)
   - Ultrawide (21:9) is NOT supported
+  - Game language must be ENGLISH (see above)
 
 
 ================================================================================
