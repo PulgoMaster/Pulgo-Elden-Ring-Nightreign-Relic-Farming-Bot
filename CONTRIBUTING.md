@@ -19,8 +19,6 @@ Thanks for your interest. This project is a hobby bot maintained by one person. 
 
 - **Drive-by PRs are unlikely to be merged.** This is a specialized automation bot. Most changes require knowledge of the OCR pipeline, iteration loop, or game-specific quirks.
 - If you want to contribute code, **open an issue first** to discuss the approach. You'll get early feedback on whether it's something I'd merge.
-- Keep each PR small and focused. One concern per PR.
-- Match the surrounding code style. No reformatting passes.
 - No AI-authorship attribution in commits or code. The project is human-authored.
 
 ## Operational scope

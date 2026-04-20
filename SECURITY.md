@@ -34,7 +34,7 @@ Please **do not open a public issue** for security problems. Use one of these pr
 **Out-of-scope**
 - Issues requiring prior root access or physical access to the machine.
 - Anti-cheat (EAC) or Steam / Elden Ring / Nightreign behavior — those are vendor concerns.
-- Multiplayer or co-op misuse — RelicBot is a single-player tool; weaponizing it in co-op is not a security issue for this project.
+- Misuse unrelated to the bot's actual attack surface (e.g. how users play the game after farming) — not a security issue for this project.
 - Third-party dependency CVEs without a realistic exploit path through this project.
 
 ## Not a Security Issue
