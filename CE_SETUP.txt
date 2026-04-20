@@ -1,0 +1,149 @@
+================================================================================
+  RELIC BOT — BIG-BATCH CE SETUP GUIDE
+================================================================================
+
+This is the CE (Cheat Engine) variant of RelicBot. It's designed to work alongside
+a Cheat Engine table that lets you buy up to ~2000 relics in a single purchase
+and freezes your murk total so it doesn't drain.
+
+> ⚠️ NOT EAC-SAFE.
+> The CE table requires Easy Anti-Cheat to be bypassed before you launch the
+> game. Use this on a separate Steam account or in offline mode. Do NOT use it
+> in multiplayer / co-op sessions.
+>
+> If you want the EAC-safe version of RelicBot, get the mainline release from
+> the GitHub releases page (or from Nexus Mods).
+
+================================================================================
+  WHAT'S BUNDLED IN THIS ZIP
+================================================================================
+
+  RelicBot.exe                          The bot itself (CE flavor).
+  GUIDE.txt                             Full bot user guide.
+  CE_SETUP.txt                          THIS FILE — CE workflow instructions.
+  Relic_Bot_Uncapped_by_FrCynda.CT      The Cheat Engine table by FrCynda.
+  LICENSE / NOTICE                      Apache 2.0 + attribution.
+  Update.bat / Update.ps1               Bundled updater scripts.
+
+================================================================================
+  CREDIT
+================================================================================
+
+  The Cheat Engine table bundled here (Relic_Bot_Uncapped_by_FrCynda.CT) was
+  written by FrCynda (Discord / Nexus user @cynda4467) and is included with
+  permission for use alongside this bot. All credit for the CE side of the
+  workflow goes to them.
+
+================================================================================
+  WHAT YOU NEED BEFORE STARTING
+================================================================================
+
+  1. Cheat Engine installed (https://cheatengine.org)
+  2. An EAC-bypass setup for Nightreign — typically a "launch.bat" or similar
+     file from FrCynda or another modding source that starts the game with EAC
+     stripped out. THIS IS NOT BUNDLED HERE — you need to get it separately
+     from the CE author or modding community.
+  3. This RelicBot CE build (you already have it).
+
+================================================================================
+  ONE-TIME SETUP
+================================================================================
+
+  Step 1 — Verify you have the EAC-bypass launcher
+    The CE table will refuse to run if Easy Anti-Cheat is detected. You need to
+    launch Nightreign WITHOUT EAC. This is typically done via a special .bat
+    file the modding community provides. If you don't have one, ask in the
+    relevant Discord/Nexus channels for FrCynda's CE table.
+
+  Step 2 — Configure RelicBot's Custom Launcher to point at that .bat
+    Open RelicBot.exe.
+    In the Save File & Game Configuration panel, tick "Add Custom Game
+    Executable Path:" — a new field will appear.
+    Click Browse and select your EAC-bypass .bat file.
+    The bot will now launch the game via that file every iteration, which is
+    necessary for the CE workflow.
+
+  Step 3 — Open Cheat Engine and load the CT table
+    Launch Cheat Engine.
+    File -> Load -> select Relic_Bot_Uncapped_by_FrCynda.CT
+    Click the small computer icon at the top-left to attach to the game
+    process (nightreign.exe). The CT auto-attach script will run and verify
+    EAC is NOT active.
+
+  Step 4 — Enable the required CE scripts
+    In the cheat table window:
+      a. Tick "[ Enable Currency Scripts ]" (parent entry)
+      b. Under it, tick "Freeze Murk"
+      c. Tick "[ Enable Relics Script ]" (parent entry — this sets the buy
+         quantity max from 10 to 2000)
+
+    The other entries in the table (HP / FP / position / etc.) are NOT needed
+    for relic farming. Leave them unchecked.
+
+================================================================================
+  NORMAL RUN WORKFLOW
+================================================================================
+
+  Once setup is done, every time you want to run a batch:
+
+  1. Open Cheat Engine, load the CT, attach to nightreign (or have CE running
+     and reattach if needed).
+  2. Make sure "Freeze Murk" and "Enable Relics Script" are both ON.
+  3. Open RelicBot.exe.
+  4. Configure your relic criteria (Build Exact Relic / Passive Pool tab) like
+     normal.
+  5. Click Start Batch Mode.
+
+  RelicBot will launch the game via your EAC-bypass .bat, attach to it,
+  navigate to the Small Jar Bazaar, and buy up to 1950 relics per iteration.
+  Each iteration scans them all and reports matches as usual.
+
+================================================================================
+  IMPORTANT NOTES
+================================================================================
+
+  • RelicBot CE caps buy quantity at 1950 (game inventory cap). The CE table
+    sets the dialog max to 2000 — RelicBot's lower cap is the binding limit.
+
+  • Murk freeze means the bot's "estimated murk after" displays will be
+    misleading. The bot reads murk via OCR and computes how many relics it
+    can afford — with murk frozen, the displayed value stays constant so the
+    bot will think it can keep buying forever. This is intentional.
+
+  • Branching Mode (a feature of the mainline EAC-safe build) is HIDDEN and
+    DISABLED in this CE build. Branching's "exit early on match" semantics
+    conflict with the mega-cycle approach of buying ~1950 relics in one shot.
+
+  • If the CE table refuses to load with an EAC error, your game launched with
+    EAC active. You need to use the EAC-bypass .bat — not the normal Steam
+    launch path.
+
+================================================================================
+  TROUBLESHOOTING
+================================================================================
+
+  "Easy Anti-Cheat is still running" error from the CE table
+    -> Game launched with EAC. Close the game, launch via your EAC-bypass .bat,
+       then try the CE table again.
+
+  Bot's buy dialog OCR fails with the CE setup
+    -> The bundled GUIDE.txt covers OCR tuning. The CE build has a slightly
+       widened BUY_QTY_REGION crop and accepts 4-digit X/N values up to 1950.
+       If you see persistent buy-qty-OCR-fail events in your diagnostic log,
+       grab a screenshot of the buy dialog at high N and share it via GitHub
+       issues so the region can be re-tuned.
+
+  Bot stops with "ERROR: Custom launcher failed to spawn the game"
+    -> The path you set for Custom Launcher isn't successfully starting the
+       game. Verify the .bat works when you double-click it directly. If it
+       does, RelicBot's launcher hand-off should also work.
+
+  Hotbar verifier misfires (cursor advance not detected)
+    -> The bot dumps screenshots to <iter_dir>/hotbar_misses/ on every miss.
+       Open a few of those and check whether the cursor actually advanced
+       between the pre and post images. If thresholds are off for your
+       resolution, share the dumps via GitHub issues.
+
+================================================================================
+  END OF FILE
+================================================================================

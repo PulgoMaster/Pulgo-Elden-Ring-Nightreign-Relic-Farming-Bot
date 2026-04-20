@@ -225,7 +225,10 @@ try:
         _shutil.move(_exe_src, _exe_dst)
         print(f"[Spec] Moved EXE to {_exe_dst}")
     # Sidecar files that ship alongside the EXE for end users.
-    for _sidecar in ('GUIDE.txt', 'Update.ps1', 'Update.bat'):
+    # CE build includes the Cheat Engine table from FrCynda + CE_SETUP.txt
+    # workflow doc; mainline build doesn't ship these.
+    for _sidecar in ('GUIDE.txt', 'Update.ps1', 'Update.bat',
+                      'CE_SETUP.txt', 'Relic_Bot_Uncapped_by_FrCynda.CT'):
         if _os.path.exists(_sidecar):
             _shutil.copy2(_sidecar, _os.path.join(_dist_dir, _sidecar))
 except Exception as _e:

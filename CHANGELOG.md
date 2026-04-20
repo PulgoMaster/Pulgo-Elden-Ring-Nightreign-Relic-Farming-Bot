@@ -31,6 +31,9 @@ This is a **separate build flavor** from the mainline RelicBot. It requires a th
 - New helpers `capture_hotbar_signature` + `hotbar_advanced` in `bot/screen_capture.py`.
 - All giga branches in `_run_iteration_phases` are guarded by a local `_GIGA_MODE = _BUILD_IS_GIGA`.
 
+### CE table bundled in the release ZIP (credit: FrCynda / @cynda4467)
+The Cheat Engine table required to use this build (`Relic_Bot_Uncapped_by_FrCynda.CT`) is now bundled directly in the release ZIP, alongside a new `CE_SETUP.txt` workflow document. Users still need to supply their own EAC-bypass launcher (typically a `.bat` distributed by FrCynda separately) — the CT itself refuses to run if Easy Anti-Cheat is detected. All credit for the CE-side scripts and workflow goes to FrCynda.
+
 ### Inherited from mainline v1.8.3 (this CE build is based on master @ ce21022)
 This CE build now includes the v1.8.3 mainline features below, with Branching Mode hidden+disabled (it conflicts with the CE mega-cycle approach):
 
