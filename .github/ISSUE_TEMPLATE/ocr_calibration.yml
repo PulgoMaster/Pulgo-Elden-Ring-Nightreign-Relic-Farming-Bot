@@ -1,0 +1,68 @@
+name: OCR / Calibration Problem
+description: Bot misreads relic stats, murk, buy quantities, or other on-screen text.
+title: "[OCR]: "
+labels: ["bug", "ocr"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        OCR issues almost always come down to display, language, or resolution mismatch. Please fill out every field.
+  - type: input
+    id: version
+    attributes:
+      label: RelicBot version
+      placeholder: "v1.8.3"
+    validations:
+      required: true
+  - type: input
+    id: resolution
+    attributes:
+      label: Monitor resolution + DPI scaling
+      description: The bot is tuned for 1920x1080 at 100% DPI scaling. Other setups may need calibration tweaks.
+      placeholder: "1920x1080 @ 100% DPI"
+    validations:
+      required: true
+  - type: dropdown
+    id: language
+    attributes:
+      label: Is the game language set to English?
+      description: The bot only works with English text.
+      options:
+        - "Yes, English"
+        - "No (explain below)"
+    validations:
+      required: true
+  - type: dropdown
+    id: window-mode
+    attributes:
+      label: Game window mode
+      options:
+        - "Borderless Fullscreen"
+        - "Fullscreen"
+        - "Windowed"
+    validations:
+      required: true
+  - type: textarea
+    id: what-misread
+    attributes:
+      label: What is the bot misreading?
+      description: Be specific. Relic name, passive text, murk amount, buy quantity, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot of the misread region
+      description: |
+        A screenshot of the in-game region the bot is misreading is essential.
+        Drag and drop an image into this field.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostic
+    attributes:
+      label: Diagnostic output
+      description: |
+        Use Export Diagnostics from the profile row, or attach the relevant `last_run_diag.json`.
+    validations:
+      required: false

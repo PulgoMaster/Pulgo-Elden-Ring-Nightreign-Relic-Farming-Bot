@@ -1,0 +1,67 @@
+name: Bug Report
+description: Report a bug that isn't OCR or calibration specific.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please fill out the fields below so triage is fast.
+
+        Before submitting: confirm you're on the latest release. Older versions don't receive fixes.
+  - type: input
+    id: version
+    attributes:
+      label: RelicBot version
+      description: Shown in the window title.
+      placeholder: "v1.8.3"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11 Pro 10.0.26200"
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and GPU Acceleration state
+      description: NVIDIA card model if applicable; whether GPU Acceleration is enabled in the bot.
+      placeholder: "RTX 3070, GPU Accel ON"
+    validations:
+      required: false
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Clear description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch the bot
+        2. Configure profile X
+        3. Press Start
+        4. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostic
+    attributes:
+      label: Diagnostic output (optional)
+      description: |
+        Attach `last_run_diag.json` from the bot folder, or paste relevant log snippets.
+        Scrub personal info before posting.
+    validations:
+      required: false

@@ -1,0 +1,37 @@
+name: Feature Request
+description: Propose a new feature or enhancement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. This is a hobby project maintained by one person. Ideas are read, many are appreciated, not all will ship.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What's the current pain point? What are you trying to achieve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This feature is for single-player use only.
+          required: true
+        - label: I understand multiplayer, co-op, or competitive features won't be considered.
+          required: true
