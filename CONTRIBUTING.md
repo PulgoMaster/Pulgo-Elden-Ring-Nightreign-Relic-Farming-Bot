@@ -23,9 +23,17 @@ Thanks for your interest. This project is a hobby bot maintained by one person. 
 - Match the surrounding code style. No reformatting passes.
 - No AI-authorship attribution in commits or code. The project is human-authored.
 
-## Multiplayer and competitive use
+## Operational scope
 
-This tool is **single-player only**. Features that would facilitate multiplayer disruption, EAC evasion beyond what's already documented, or competitive advantage in co-op will not be accepted.
+The bot is designed to run **single-player, with Steam or Nightreign set to offline mode**. It automates the tedious save-scum cycle for relic farming — a workaround for how Nightreign's relic system works, not a cheat or exploit.
+
+The bot **does not evade EAC** because it doesn't do anything EAC cares about: no DLL injection, no memory editing, no in-process hooks. It's screen-capture OCR plus keyboard/mouse input, with `.sl2` save backup/restore happening while the game is at a menu or closed.
+
+Contributions that change that stance are out of scope and will not be merged:
+- Features that act *during live multiplayer or co-op sessions*, or that affect other players in any way.
+- Features that actually attempt to bypass, tamper with, or hook into EAC or the game's memory.
+
+What users do with the relics they farm — including taking them into co-op afterwards — is their own choice, not something this project tries to police.
 
 ## License
 

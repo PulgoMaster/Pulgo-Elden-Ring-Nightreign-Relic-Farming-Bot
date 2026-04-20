@@ -31,7 +31,7 @@ body:
     attributes:
       label: Scope check
       options:
-        - label: This feature is for single-player use only.
+        - label: This feature fits the bot's offline save-scum scope (no live multiplayer/co-op interaction).
           required: true
-        - label: I understand multiplayer, co-op, or competitive features won't be considered.
+        - label: I've read the Operational scope section of CONTRIBUTING.md.
           required: true
