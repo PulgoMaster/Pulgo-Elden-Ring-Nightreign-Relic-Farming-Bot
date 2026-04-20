@@ -146,6 +146,50 @@ GPU mode reduces OCR time from ~3 seconds per relic to ~0.3 seconds.
 
 ---
 
+## Custom Launcher — Use With Mods (Seamless Co-op, me3) — Optional, Advanced
+
+Skip this section if you play vanilla Nightreign. The default Steam launch is faster and more reliable for unmodded play.
+
+If you need the bot to launch the game via something other than the standard Steam protocol — for example, **Nightreign Seamless Co-op** or **Mod Engine 3 (me3)** — enable the Custom Launcher feature in the Save File & Game Configuration panel.
+
+### How to enable
+
+1. Tick **"Add Custom Game Executable Path:"** (under Steam executable in the main config)
+2. A new **"Custom executable:"** field appears
+3. Click **Browse** and select your launcher path
+
+The bot accepts any of these path types and dispatches via Windows shell:
+- `.exe` — runs directly (e.g. Seamless Co-op standalone launcher `launch_nrsc.exe`)
+- `.bat` — runs through `cmd.exe` (use this for any CLI-style launcher that needs arguments)
+- `.url` — Steam desktop shortcut, routes through Steam (recommended for me3 — see below)
+
+### Recommended setup for Mod Engine 3 (me3) — via Steam shortcut
+
+This is the cleanest method because the game gets launched through Steam, which keeps the **Steam Overlay** working inside your modded session (chat, recording, screenshots, etc.).
+
+**One-time setup:**
+
+1. Open the **Mod Engine 3 Manager** (the GUI). Open your **Nightreign profile**.
+2. Click the **"Add profile to Steam"** button. Restart Steam if it asks.
+3. Open Steam → Library. Find the new non-Steam shortcut — by default it's named something like `Nightreign (nightreign-default)`.
+4. Right-click that shortcut in Steam → **Manage** → **Add desktop shortcut**.
+5. Steam creates a `.url` file on your Desktop. You can rename or move it anywhere you like (a dedicated `Launchers/` folder is fine).
+6. Back in RelicBot: tick the Custom Launcher checkbox, click Browse, select that `.url` file.
+
+That's it. The bot now launches the modded game via Steam every iteration. To switch me3 profiles later, repeat steps 1–5 with the new profile and point the bot at the new `.url`.
+
+### Important notes
+
+- **The Custom Launcher checkbox is the source of truth.** Untick it and the bot reverts to the normal Steam launch immediately, even if a custom path is still saved in the field.
+- **The "Game executable" field (above) MUST still point at the actual game executable** (`nightreign.exe`). The bot uses that to detect when the game is running and to focus its window — regardless of how it was launched.
+- **If the custom launcher fails to spawn the game after 3 attempts, the bot aborts the batch with a clear error** (Steam-reset failsafe doesn't apply in custom-launcher mode since restarting Steam wouldn't fix a misconfigured custom path).
+- **Custom launchers (especially me3 + heavy mods) take longer to spawn the game** than vanilla Steam. The bot automatically extends its per-attempt grace from 10s base to 30s base when this option is on.
+- **Steam still needs to be running in the background** regardless of which launcher you use — Nightreign requires Steam for licensing.
+
+For the full step-by-step including alternative methods (standalone Seamless Co-op `.exe`, custom `.bat` wrappers for raw CLI launchers), see `GUIDE.txt → Section 1A. CUSTOM LAUNCHER`.
+
+---
+
 ## Bot In Action
 
 Once configured, the bot runs the entire farming loop autonomously. It launches the game, navigates to the Small Jar Bazaar, buys relics in batches of 10, and scans each one for matches:
