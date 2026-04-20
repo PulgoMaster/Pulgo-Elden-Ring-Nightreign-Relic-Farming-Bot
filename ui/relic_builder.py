@@ -259,10 +259,23 @@ class _ExactRelicTab(ttk.Frame):
     # ── construction ─────────────────────────────────────────────────── #
 
     def _set_odds_text(self, text: str) -> None:
-        """Update the read-only odds display."""
+        """Update the read-only odds display.
+
+        Auto-fits the widget height to content (min 8, max 30 lines) so the
+        combined-tabs view (which can be 15-30 lines) isn't truncated to the
+        single-tab default of 8 rows. Single-tab content stays at 8 rows
+        when its content is short.
+        """
         self._odds_txt.config(state="normal")
         self._odds_txt.delete("1.0", "end")
         self._odds_txt.insert("1.0", text)
+        _n_lines = max(1, text.count("\n") + 1)
+        _new_height = max(8, min(30, _n_lines + 1))   # +1 for breathing room
+        try:
+            if int(self._odds_txt.cget("height")) != _new_height:
+                self._odds_txt.config(height=_new_height)
+        except Exception:
+            pass
         self._odds_txt.config(state="disabled")
 
     @staticmethod
@@ -1159,10 +1172,23 @@ class _PassivePoolTab(ttk.Frame):
         self._build()
 
     def _set_odds_text(self, text: str) -> None:
-        """Update the read-only odds display."""
+        """Update the read-only odds display.
+
+        Auto-fits the widget height to content (min 8, max 30 lines) so the
+        combined-tabs view (which can be 15-30 lines) isn't truncated to the
+        single-tab default of 8 rows. Single-tab content stays at 8 rows
+        when its content is short.
+        """
         self._odds_txt.config(state="normal")
         self._odds_txt.delete("1.0", "end")
         self._odds_txt.insert("1.0", text)
+        _n_lines = max(1, text.count("\n") + 1)
+        _new_height = max(8, min(30, _n_lines + 1))   # +1 for breathing room
+        try:
+            if int(self._odds_txt.cget("height")) != _new_height:
+                self._odds_txt.config(height=_new_height)
+        except Exception:
+            pass
         self._odds_txt.config(state="disabled")
 
     def _build(self):

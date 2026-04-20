@@ -57,6 +57,10 @@ _PROFILES_DIR       = os.path.join(_REPO_ROOT, "profiles")
 _LAST_PROFILE_FILE  = os.path.join(_PROFILES_DIR, ".last_profile")
 _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
+# Single source of truth for the app version. Used in the window title and
+# embedded in diagnostic log headers so bug reports identify their build.
+APP_VERSION = "1.8.3"
+
 
 def _detect_steam_exe(game_exe: str = "") -> str:
     """Try to find steam.exe automatically.
@@ -602,9 +606,9 @@ class RelicBotApp(tk.Tk):
         self.withdraw()   # keep window hidden until UI is built; prevents flash
 
         self.title(
-            "Elden Ring Nightreign – Relic Bot — UNCAPPED PER BUY (CE Script Required)  |  Made by Pulgo"
+            f"Elden Ring Nightreign – Relic Bot — UNCAPPED PER BUY (CE Script Required)  |  Made by Pulgo"
             if _BUILD_IS_GIGA else
-            "Elden Ring Nightreign – Relic Bot v1.8.2  |  Made by Pulgo"
+            f"Elden Ring Nightreign – Relic Bot v{APP_VERSION}  |  Made by Pulgo"
         )
         self.resizable(True, True)
 
@@ -726,6 +730,27 @@ class RelicBotApp(tk.Tk):
         self._intermittent_every_n_var   = tk.IntVar(value=5)
         self._hybrid_var                 = tk.BooleanVar(value=False)
         self._gpu_always_analyze_var     = tk.BooleanVar(value=False)
+        # Branching Mode (standard-mode exclusive). Mutually exclusive with
+        # async / backlog / hybrid because branching needs sync analysis to
+        # react to a match BEFORE the next cycle's inputs are sent.
+        self._branching_mode_var         = tk.BooleanVar(value=False)
+
+        # Branching Mode runtime state (reset at batch start; mutated per-iter)
+        # current_branch_index: 0 = pre-branch (uses '#'), 1 = A, 2 = B, ..., 27 = AA, ...
+        # position_in_branch: position of current iter within its branch (0 = first)
+        # branch_creator_pending: True if current iter found a HIT/GOD ROLL and
+        #                        should trigger a branch transition after it ends
+        # current_reset_source_path: live path to the .sl2 used for next iter's reset
+        # latest_branch_creator_dir: tracks current BEST folder so we can drop
+        #                            the BEST marker when creating a newer one,
+        #                            AND serves as the chain-copy source for
+        #                            the next branch creator's folder
+        self._branch_current_index            = 0
+        self._branch_position                 = 0
+        self._branch_creator_pending          = False
+        self._branch_current_reset_path: str  = ""
+        self._branch_latest_creator_dir: str  = ""
+        self._branch_double_letter_active     = False  # True after 26-branch rename pass
         self._iter_input_drop_count      = 0
         self._iter_gpu_aa_suppressed     = False
         self._clean_cycles_since_suppress = 0
@@ -922,10 +947,48 @@ class RelicBotApp(tk.Tk):
                  "launch — if Steam's session gets stuck, the run will abort.\n\n"
                  "Only set manually if Steam is in a non-standard location.")
 
+        # ── Custom launcher (advanced, opt-in) ─────────────────────────── #
+        self.custom_launcher_enabled_var = tk.BooleanVar(value=False)
+        self.custom_launcher_path_var    = tk.StringVar(value="")
+        _cl_chk_row = ttk.Frame(save_frame)
+        _cl_chk_row.grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            _cl_chk_row,
+            text="Add Custom Game Executable Path:",
+            variable=self.custom_launcher_enabled_var,
+            command=self._toggle_custom_launcher,
+        ).pack(side="left")
+        ttk.Label(
+            _cl_chk_row,
+            text="\u26a0  Advanced — only for advanced users.",
+            foreground="#d4a843",
+        ).pack(side="left", padx=(8, 0))
+
+        self._custom_launcher_frame = ttk.Frame(save_frame)
+        self._custom_launcher_frame.grid(row=6, column=0, columnspan=3, sticky="ew", **pad)
+        ttk.Label(self._custom_launcher_frame, text="Custom executable:").grid(
+            row=0, column=0, sticky="w", **pad)
+        ttk.Entry(self._custom_launcher_frame, textvariable=self.custom_launcher_path_var,
+                  width=52).grid(row=0, column=1, sticky="ew", **pad)
+        _cl_browse_btn = ttk.Button(self._custom_launcher_frame, text="Browse",
+                                    command=self._browse_custom_launcher)
+        _cl_browse_btn.grid(row=0, column=2, **pad)
+        self._custom_launcher_frame.columnconfigure(1, weight=1)
+        _Tooltip(_cl_browse_btn,
+                 "Path to a launcher .exe, .bat, or .url file.\n\n"
+                 "RECOMMENDED for me3: in the me3 Manager click 'Add profile\n"
+                 "to Steam'. In Steam, right-click the new shortcut → Manage\n"
+                 "→ Add desktop shortcut. Browse here to that .url file.\n"
+                 "(Steam Overlay works inside the modded game with this method.)\n\n"
+                 "For Seamless Co-op standalone: browse to launch_nrsc.exe.\n\n"
+                 "See GUIDE.txt for the full step-by-step.")
+        # Hidden by default — only revealed when the checkbox is ticked.
+        self._custom_launcher_frame.grid_remove()
+
         ttk.Label(
             save_frame,
             text="\u26a0  The bot requires default in-game keybinds — F must be your confirm/interact key.",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        ).grid(row=7, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Choose Relic Type + Color Filter ────────────────────────── #
         type_color_frame = ttk.LabelFrame(inner, text="Choose Relic Type")
@@ -1386,7 +1449,9 @@ class RelicBotApp(tk.Tk):
         _gpu_lf = ttk.LabelFrame(self.batch_frame, text="GPU Settings")
         _gpu_lf.grid(row=10, column=0, columnspan=8, sticky="ew", **pad)
 
-        # Unified Hybrid GPU+CPU — works with Async and Backlog modes
+        # Unified Hybrid GPU+CPU — works with Async and Backlog modes.
+        # Mutex with Branching Mode is enforced via graystate in
+        # _update_mode_mutex_state below (which traces all 4 mode vars).
         _hyb_chk = ttk.Checkbutton(
             _gpu_lf, text="⚡ Hybrid GPU+CPU Analysis",
             variable=self._hybrid_var,
@@ -1468,8 +1533,11 @@ class RelicBotApp(tk.Tk):
                 # Excl.Ops is async-only
                 _ebp_chk.config(state="normal" if _on else "disabled")
 
-                # Unified Hybrid: requires GPU Accel only — CPU workers default to 1 when toggle is off
-                _hyb_ok = self._gpu_accel_var.get()
+                # Unified Hybrid: requires GPU Accel AND branching mode off.
+                # Hybrid uses async-family analysis which is incompatible with
+                # branching mode's sync requirement.
+                _br_on = self._branching_mode_var.get()
+                _hyb_ok = self._gpu_accel_var.get() and not _br_on
                 _hyb_chk.config(state="normal" if _hyb_ok else "disabled")
                 if not _hyb_ok:
                     self._hybrid_var.set(False)
@@ -1498,6 +1566,9 @@ class RelicBotApp(tk.Tk):
         self._hybrid_var.trace_add("write", _update_async_sub_state)
         self._gpu_always_analyze_var.trace_add("write", _update_async_sub_state)
         self._smart_throttle_var.trace_add("write", _update_async_sub_state)
+        # Branching toggling needs to re-run this so hybrid eligibility
+        # picks up the new branching state (branching=on forces hybrid off).
+        self._branching_mode_var.trace_add("write", _update_async_sub_state)
         _update_async_sub_state()
 
         # ── Overlay Elements sub-section ────────────────────────────── #
@@ -1631,6 +1702,32 @@ class RelicBotApp(tk.Tk):
         backlog_chk.grid(row=7, column=0, columnspan=5, sticky="w", **pad)
         if _BUILD_IS_GIGA:
             backlog_chk.grid_remove()
+
+        # Branching Mode (standard-mode exclusive — bot live-reacts to matches)
+        branching_chk = ttk.Checkbutton(
+            self.batch_frame,
+            text="🌿 Branching Mode (Standard Mode Only)",
+            variable=self._branching_mode_var,
+        )
+        branching_chk.grid(row=9, column=0, columnspan=5, sticky="w", **pad)
+        _Tooltip(branching_chk,
+                 "Standard mode only — mutually exclusive with Async / Backlog / Hybrid.\n\n"
+                 "When the bot finds a HIT or GOD ROLL during a buy cycle, it finishes\n"
+                 "analyzing that cycle, cancels remaining cycles for the iteration, and\n"
+                 "the next iteration starts from THAT iteration's save (not the original).\n\n"
+                 "Each match creates a 'branch' — A, B, C, D… — and the run accumulates\n"
+                 "matches across branches into one final save. The latest branch's iteration\n"
+                 "folder is marked BEST and contains the cumulative view of every relic\n"
+                 "found across all branches.\n\n"
+                 "Run ends when iteration count is hit OR you run out of murk for the\n"
+                 "selected relic type, whichever comes first.\n\n"
+                 "Smart Hits, Excluded Hits, and Near Misses do NOT trigger branches —\n"
+                 "they're documented in their iteration folders as normal.\n\n"
+                 "See GUIDE.txt → Branching Mode for the full walkthrough.")
+        # Hide in CE build — branching mode's early-exit-on-HIT semantics
+        # conflict with the CE mega-cycle (buy 1900 in one shot) approach.
+        if _BUILD_IS_GIGA:
+            branching_chk.grid_remove()
         _Tooltip(backlog_chk,
                  "Defers all OCR analysis until after the entire batch is complete.\n\n"
                  "During the run:\n"
@@ -1666,20 +1763,44 @@ class RelicBotApp(tk.Tk):
             ).pack(ipadx=8, ipady=5)
             tip.after(5000, tip.destroy)
 
-        def _on_async_toggle():
-            if self._async_enabled_var.get() and self._backlog_mode_var.get():
-                self._async_enabled_var.set(False)
-                _conflict_tip(async_chk,
-                               "Backlog Analysis is enabled — disable it to use Async Analysis.")
+        # ── Mode mutex via graystate ─────────────────────────────────── #
+        # Async / Backlog / Hybrid / Branching are mutually exclusive in
+        # specific combinations:
+        #   - Async ↔ Backlog: incompatible
+        #   - Branching ↔ {Async, Backlog, Hybrid}: branching needs sync analysis
+        # When one mode is enabled, the conflicting checkboxes are disabled
+        # (grayed out) so the user can't even click them. This replaces the
+        # earlier conflict-tip pattern with explicit visual feedback.
+        # Hybrid's GPU-availability gating is still managed by _update_async_sub_state.
+        _mutex_updating = [False]
 
-        def _on_backlog_toggle():
-            if self._backlog_mode_var.get() and self._async_enabled_var.get():
-                self._backlog_mode_var.set(False)
-                _conflict_tip(backlog_chk,
-                               "Async Analysis is enabled — disable it to use Backlog Analysis.")
+        def _update_mode_mutex_state(*_):
+            if _mutex_updating[0]:
+                return
+            _mutex_updating[0] = True
+            try:
+                _a  = self._async_enabled_var.get()
+                _b  = self._backlog_mode_var.get()
+                _h  = self._hybrid_var.get()
+                _br = self._branching_mode_var.get()
+                # Async: disabled when backlog or branching is on
+                async_chk.config(state="disabled" if (_b or _br) else "normal")
+                # Backlog: disabled when async or branching is on
+                backlog_chk.config(state="disabled" if (_a or _br) else "normal")
+                # Branching: disabled when any of async/backlog/hybrid is on
+                branching_chk.config(state="disabled" if (_a or _b or _h) else "normal")
+                # Hybrid's enable/disable state is fully handled by
+                # _update_async_sub_state (which now traces branching too)
+                # — no duplicate handling needed here.
+            finally:
+                _mutex_updating[0] = False
 
-        async_chk.config(command=_on_async_toggle)
-        backlog_chk.config(command=_on_backlog_toggle)
+        self._async_enabled_var.trace_add("write", _update_mode_mutex_state)
+        self._backlog_mode_var.trace_add("write", _update_mode_mutex_state)
+        self._hybrid_var.trace_add("write", _update_mode_mutex_state)
+        self._branching_mode_var.trace_add("write", _update_mode_mutex_state)
+        # Initial state computed after UI is fully built (deferred).
+        self.after(0, _update_mode_mutex_state)
 
         # Intermittent Backlog Analysis — sub-setting of Backlog Mode
         _ibl_frame = ttk.Frame(self.batch_frame)
@@ -1745,6 +1866,19 @@ class RelicBotApp(tk.Tk):
             command=_on_gpu_toggle,
         )
         gpu_chk.grid(row=0, column=0, columnspan=2, sticky="w", **pad)
+        # Gray out GPU Acceleration toggle (and via downstream cascade in
+        # _update_async_sub_state, the Hybrid + GPU AA settings) when CUDA
+        # isn't actually available on this machine. Prevents users from
+        # toggling features that have no effect without a working CUDA setup.
+        # The "Install GPU Acceleration" button below stays clickable so users
+        # CAN install CUDA torch when their hardware is eligible.
+        if not self._hw_cuda_available:
+            gpu_chk.configure(state="disabled")
+            # Force the var to False so the existing trace cascade grays
+            # _hyb_chk and _gpu_aa_chk too (and so persisted state from a
+            # prior CUDA-enabled install on a different machine doesn't
+            # leak GPU mode in unintentionally).
+            self._gpu_accel_var.set(False)
         _Tooltip(gpu_chk,
                  "Offloads OCR inference to your NVIDIA GPU (CUDA) instead of the CPU.\n"
                  "Adds exactly 1 dedicated GPU worker — CUDA inference does not benefit\n"
@@ -2698,6 +2832,234 @@ class RelicBotApp(tk.Tk):
             self._steam_exe_path = path
             self._save_app_config()
 
+    # ── Branching Mode helpers ───────────────────────────────────────── #
+    @staticmethod
+    def _branch_letter_for_index(idx: int, force_double: bool = False) -> str:
+        """Return the prefix letter(s) for a given branch index.
+
+        idx == 0 → '#' (the pre-branch state, sorts before A alphabetically)
+        idx >= 1, single-letter mode → 'A', 'B', ..., 'Z' (valid for idx 1..26)
+        idx >= 1, double-letter mode → 'AA', 'AB', ..., 'AZ', 'BA', ..., 'ZZ'
+
+        Double-letter mode is activated either explicitly via `force_double=True`
+        (used during the 27th-branch rename pass to reformat ALL existing
+        single-letter prefixes), or implicitly as a safety net if idx > 26 is
+        passed without force_double set (shouldn't happen in normal operation
+        because the rename should have been triggered first).
+        """
+        if idx == 0:
+            return "#"
+        if force_double or idx > 26:
+            # Spreadsheet-style two-letter mapping:
+            #   idx=1  → AA   (n=0 → first=0, second=0)
+            #   idx=26 → AZ   (n=25 → first=0, second=25)
+            #   idx=27 → BA   (n=26 → first=1, second=0)
+            #   idx=702 → ZZ  (n=701 → first=25, second=25)
+            n = idx - 1
+            first = n // 26
+            second = n % 26
+            return chr(ord("A") + first) + chr(ord("A") + second)
+        return chr(ord("A") + idx - 1)
+
+    @staticmethod
+    def _branch_iter_folder_name(branch_letter: str, position: int,
+                                  iter_num: int, is_branch_creator: bool,
+                                  match_suffix: str = "",
+                                  is_best: bool = False) -> str:
+        """Format a branching-mode iteration folder name.
+
+        Examples:
+          (#, 0, 1, False)                       → '#00_Iter_001'
+          (#, 4, 5, True)                        → '#04_Branch_Split_Iter_005'
+          (A, 0, 6, False)                       → 'A00_Iter_006'
+          (A, 3, 9, False, 'SMART_HIT')          → 'A03_Iter_009_SMART_HIT'
+          (B, 0, 16, True)                       → 'B00_Branch_Split_Iter_016'
+          (B, 0, 16, True, is_best=True)         → 'B00_BEST_Branch_Split_Iter_016'
+
+        Position is zero-padded to 2 digits. iter_num is zero-padded to 3.
+        Branch creators drop HIT/GOD_ROLL match suffixes (the 'Branch_Split'
+        marker tells you all you need); other suffixes (smart hit, near miss,
+        excluded hit) ARE preserved on non-creator iterations.
+        is_best applies only to branch creators — marks the LATEST creator
+        as the save with the most accumulated matches.
+        """
+        pos_str = f"{position:02d}"
+        iter_str = f"{iter_num:03d}"
+        if is_branch_creator:
+            best_part = "_BEST" if is_best else ""
+            return f"{branch_letter}{pos_str}{best_part}_Branch_Split_Iter_{iter_str}"
+        if match_suffix:
+            return f"{branch_letter}{pos_str}_Iter_{iter_str}_{match_suffix}"
+        return f"{branch_letter}{pos_str}_Iter_{iter_str}"
+
+    @staticmethod
+    def _branch_strip_best_marker(folder_name: str) -> str:
+        """Remove the '_BEST' marker from a branch creator folder name.
+
+        Used when a NEW branch is being created — the previous branch creator
+        loses the BEST marker so only the latest creator carries it.
+        """
+        return folder_name.replace("_BEST_Branch_Split_", "_Branch_Split_", 1)
+
+    @staticmethod
+    def _branch_screenshot_prefix(branch_letter: str, position: int) -> str:
+        """Return the screenshot filename prefix for an iteration.
+
+        Example: ('A', 4) → 'A04'. Used to rename relic / hit / smart hit /
+        near miss / excluded hit screenshot files so the cumulative chain-copy
+        view shows where each relic came from.
+        """
+        return f"{branch_letter}{position:02d}"
+
+    def _branch_reset_state(self):
+        """Reset all branching runtime state. Called at batch start."""
+        self._branch_current_index            = 0
+        self._branch_position                 = 0
+        self._branch_creator_pending          = False
+        self._branch_current_reset_path       = ""
+        self._branch_latest_creator_dir       = ""
+        self._branch_double_letter_active     = False
+        # Set True when Phase 0 reads murk and finds it < per-relic cost.
+        # Checked by the outer batch loop to abort the run cleanly.
+        self._branch_out_of_murk              = False
+
+    def _branch_current_letter(self) -> str:
+        """Convenience: current branch's letter, accounting for double-letter rename."""
+        return self._branch_letter_for_index(
+            self._branch_current_index,
+            force_double=self._branch_double_letter_active,
+        )
+
+    def _branch_27th_rename_pass(self, run_dir: str, iter_dir: str) -> str:
+        """Triggered just before creating the 27th branch (which would
+        produce the first multi-letter ID). Walks all existing iter folders
+        in `run_dir` and renames any single-letter prefix (A-Z) to its
+        double-letter equivalent (A→AA, B→AB, ..., Z→AZ). Same for relic
+        screenshots inside each folder.
+
+        Atomic-on-failure: tracks every successful rename in a list; if any
+        step raises, attempts to roll back all prior renames before raising.
+        Caller is expected to abort the batch if the rollback also fails.
+
+        Returns the (possibly updated) `iter_dir` path so the caller can
+        keep using the right folder reference. Also updates
+        `_branch_latest_creator_dir` if it was renamed.
+
+        Performance: pure metadata operations on Windows MFT — ~1s per 5000
+        files on SSD. Logs the elapsed time; emits WARN if >5s.
+        """
+        import re
+        _t0 = time.perf_counter()
+        # Pattern: starts with single uppercase letter, then digits, then anything.
+        # Matches both regular iter folders (`A04_Iter_*`) and branch creators
+        # (`A04_Branch_Split_Iter_*` and `A04_BEST_Branch_Split_Iter_*`).
+        _folder_re = re.compile(r"^([A-Z])(\d+_.*)$")
+        _file_re   = re.compile(r"^([A-Z])(\d+_.*\.(?:jpg|jpeg|png))$",
+                                re.IGNORECASE)
+        _renames_done: list = []   # for rollback: [(old, new), ...]
+        _new_iter_dir = iter_dir
+        try:
+            # First pass: collect folders to rename. Don't rename yet (would
+            # confuse the iteration). Sort in REVERSE so 'Z*' renames before
+            # 'A*' — prevents 'B' folder from being temporarily named 'AB'
+            # which collides with the actual 'AB' that B will become. (Not
+            # really needed since old names start single-letter and new ones
+            # are double-letter — no collisions possible. But sort for
+            # determinism.)
+            _folder_jobs = []
+            for _entry in os.listdir(run_dir):
+                _src = os.path.join(run_dir, _entry)
+                if not os.path.isdir(_src):
+                    continue
+                _m = _folder_re.match(_entry)
+                if not _m:
+                    continue
+                _new_name = "A" + _m.group(1) + _m.group(2)
+                _folder_jobs.append((_entry, _new_name, _src))
+            _folder_jobs.sort()
+            # Rename folders + their screenshots
+            for _old_name, _new_name, _old_path in _folder_jobs:
+                _new_path = os.path.join(run_dir, _new_name)
+                os.rename(_old_path, _new_path)
+                _renames_done.append((_old_path, _new_path))
+                # Update iter_dir reference if this was the current iter's folder
+                if _old_path == iter_dir:
+                    _new_iter_dir = _new_path
+                # Update latest_creator_dir reference if it was this folder
+                if self._branch_latest_creator_dir == _old_path:
+                    self._branch_latest_creator_dir = _new_path
+                # Walk the folder for screenshots that need renaming too
+                for _f_entry in os.listdir(_new_path):
+                    _f_match = _file_re.match(_f_entry)
+                    if not _f_match:
+                        continue
+                    _f_old = os.path.join(_new_path, _f_entry)
+                    _f_new_name = "A" + _f_match.group(1) + _f_match.group(2)
+                    _f_new = os.path.join(_new_path, _f_new_name)
+                    os.rename(_f_old, _f_new)
+                    _renames_done.append((_f_old, _f_new))
+        except Exception as e:
+            # Rollback all renames in reverse order
+            self._log(
+                f"  [Branching] WARNING: 26-branch rename pass failed at "
+                f"{len(_renames_done)} renames in: {e}. Rolling back…")
+            for _old, _new in reversed(_renames_done):
+                try:
+                    os.rename(_new, _old)
+                except Exception:
+                    self._log(
+                        f"  [Branching] CRITICAL: rollback failed for {_new}"
+                        f" → {_old}. Folder state may be inconsistent.")
+            raise
+        _elapsed = time.perf_counter() - _t0
+        self._log(
+            f"  [Branching] 26-branch rename pass done — "
+            f"{len(_folder_jobs)} folders + nested screenshots renamed "
+            f"in {_elapsed:.2f}s.")
+        if _elapsed > 5.0:
+            self._log(
+                f"  [Branching] WARN: rename pass took {_elapsed:.2f}s "
+                f"(>5s threshold). Consider deferring to end-of-batch in a "
+                f"future release.")
+        if self._diag:
+            try:
+                self._diag.log_game(
+                    event="branch_renames_triggered",
+                    note=f"{len(_folder_jobs)} folders + screenshots, "
+                         f"{_elapsed:.2f}s")
+            except Exception:
+                pass
+        return _new_iter_dir
+
+    # ── Custom launcher helpers ───────────────────────────────────────── #
+    def _toggle_custom_launcher(self):
+        """Show or hide the custom launcher path row when the checkbox toggles."""
+        if self.custom_launcher_enabled_var.get():
+            self._custom_launcher_frame.grid()
+            self._log("[Custom Launcher] Enabled — bot will launch via custom path.")
+        else:
+            self._custom_launcher_frame.grid_remove()
+            self._log("[Custom Launcher] Disabled — bot will launch via Steam.")
+        self._save_app_config()
+        # Refresh odds viewer so the timing disclaimer appears/disappears.
+        try:
+            self._update_odds_viewer()
+        except Exception:
+            pass
+
+    def _browse_custom_launcher(self):
+        """Browse for a custom launcher. Accepts .exe, .bat, or .url (Steam
+        desktop shortcut). The bot just hands the picked path to Windows
+        via os.startfile when it launches — no parsing or transformation."""
+        path = filedialog.askopenfilename(
+            title="Select custom launcher (.exe, .bat, or .url)",
+            filetypes=[("Launcher", "*.exe;*.bat;*.url"), ("All", "*.*")]
+        )
+        if not path:
+            return
+        self.custom_launcher_path_var.set(path)
+        self._save_app_config()
+
     # ------------------------------------------------------------------ #
     #  PROFILE MANAGEMENT
     # ------------------------------------------------------------------ #
@@ -2951,6 +3313,14 @@ class RelicBotApp(tk.Tk):
         else:
             self._steam_exe_path = _detect_steam_exe(self.game_exe_var.get())
         self._steam_exe_var.set(self._steam_exe_path)
+        # Custom launcher (advanced opt-in). Toggle is the source of truth —
+        # the stored path is preserved across toggles but ignored when off.
+        self.custom_launcher_enabled_var.set(data.get("custom_launcher_enabled", False))
+        self.custom_launcher_path_var.set(data.get("custom_launcher_path", ""))
+        if self.custom_launcher_enabled_var.get():
+            self._custom_launcher_frame.grid()
+        else:
+            self._custom_launcher_frame.grid_remove()
         # Batch settings
         self.batch_limit_type.set(data.get("batch_limit_type", "loops"))
         self.batch_limit_var.set(str(data.get("batch_limit", "20")))
@@ -2967,6 +3337,7 @@ class RelicBotApp(tk.Tk):
         self._intermittent_every_n_var.set(data.get("intermittent_every_n", 5))
         self._hybrid_var.set(data.get("hybrid", False))
         self._gpu_always_analyze_var.set(data.get("gpu_always_analyze", False))
+        self._branching_mode_var.set(data.get("branching_mode", False))
         self._on_parallel_toggle()
         from bot import relic_analyzer as _ra
         _ra.set_gpu_mode(self._gpu_accel_var.get())
@@ -3007,6 +3378,10 @@ class RelicBotApp(tk.Tk):
             "batch_output":     self.batch_output_var.get(),
             "game_executable":  self.game_exe_var.get(),
             "steam_exe_path":   getattr(self, "_steam_exe_path", ""),
+            "custom_launcher_enabled": self.custom_launcher_enabled_var.get()
+                if hasattr(self, "custom_launcher_enabled_var") else False,
+            "custom_launcher_path":    self.custom_launcher_path_var.get()
+                if hasattr(self, "custom_launcher_path_var") else "",
             # Batch settings
             "batch_limit_type": self.batch_limit_type.get(),
             "batch_limit":      self.batch_limit_var.get(),
@@ -3023,6 +3398,7 @@ class RelicBotApp(tk.Tk):
             "intermittent_every_n":  self._intermittent_every_n_var.get(),
             "hybrid":             self._hybrid_var.get(),
             "gpu_always_analyze": self._gpu_always_analyze_var.get(),
+            "branching_mode":     self._branching_mode_var.get(),
             # Hotkeys
             "hotkey_str":       self._hotkey_str,
             "hotkey_display":   self._hotkey_display,
@@ -3516,6 +3892,28 @@ class RelicBotApp(tk.Tk):
                                  f"Could not locate:\n{path}")
 
     def _launch_game(self):
+        # Custom launcher path overrides Steam URL when the checkbox is on.
+        # Toggle is the source of truth: if the checkbox is off, the stored
+        # path is ignored even if it's still set in the config.
+        if getattr(self, "custom_launcher_enabled_var", None) and \
+                self.custom_launcher_enabled_var.get():
+            _custom = self.custom_launcher_path_var.get().strip()
+            if _custom and os.path.isfile(_custom):
+                self._log(f"Launching via custom launcher: {_custom}")
+                try:
+                    # os.startfile uses the registered Windows handler for
+                    # the file type, so this works uniformly for:
+                    #   .exe → runs the executable
+                    #   .bat → runs via cmd.exe
+                    #   .url → routes to Steam (steam:// protocol handler)
+                    os.startfile(_custom)
+                    return
+                except Exception as e:
+                    self._log(f"  [Custom Launcher] Failed to launch ({e}) — "
+                              f"falling back to Steam URL.")
+            else:
+                self._log("  [Custom Launcher] Path is empty or missing — "
+                          "falling back to Steam URL.")
         self._log(f"Launching via Steam (App ID: {self._STEAM_APP_ID})…")
         subprocess.Popen(
             ["explorer.exe", f"steam://rungameid/{self._STEAM_APP_ID}"],
@@ -4248,6 +4646,14 @@ class RelicBotApp(tk.Tk):
         _backup_dir  = save_manager.make_backup_dir(_backup_folder, batch_id)
         backup_path  = os.path.join(_backup_dir, os.path.basename(save_path))
         self._run_backup_path = backup_path   # accessible to _run_iteration_phases
+
+        # Branching Mode runtime state — reset at batch start. Initial reset
+        # source = the pristine pre-bot backup just created. Branch trigger
+        # logic (Phase 4) updates this pointer when a HIT/GOD ROLL is found.
+        # Pristine backup file at backup_path is NEVER overwritten by the bot.
+        self._branch_reset_state()
+        if self._branching_mode_var.get():
+            self._branch_current_reset_path = backup_path
         criteria = self.relic_builder.get_criteria_dict()
         criteria_summary = self.relic_builder.get_criteria_summary()
         criteria["allowed_colors"] = self._get_allowed_colors()
@@ -4366,7 +4772,7 @@ class RelicBotApp(tk.Tk):
                 except Exception:
                     pass
                 self._log(f"Batch output folder: {run_dir}")
-                # ── Diagnostic logger (input-test build) ──────────────────
+                # ── Diagnostic logger ─────────────────────────────────────
                 try:
                     # Wipe any prior persisted snapshot — a new batch run is
                     # starting, the previous run's data is now stale.
@@ -4375,7 +4781,7 @@ class RelicBotApp(tk.Tk):
                         clear_persisted_run_state()
                     except Exception:
                         pass
-                    self._diag = DiagnosticLogger(run_dir)
+                    self._diag = DiagnosticLogger(run_dir, app_version=APP_VERSION)
                     self._diag.log_hardware()
                     self._diag.log_settings(self)
                     self._diag.start_interference_monitor()
@@ -4924,6 +5330,23 @@ class RelicBotApp(tk.Tk):
             if limit_type == "loops" and iteration >= int(limit_value):
                 break
 
+            # Branching Mode: out-of-murk on the current branch's save means
+            # no more relics can be bought — terminate the batch.
+            if self._branching_mode_var.get() and self._branch_out_of_murk:
+                self._log(
+                    f"[Branching] Out of murk on branch "
+                    f"{self._branch_current_letter()} after iteration "
+                    f"{iteration}. Ending batch.")
+                if self._diag:
+                    try:
+                        self._diag.log_game(
+                            event="branch_aborted_no_murk",
+                            attempt=iteration,
+                            note=f"branch={self._branch_current_letter()}")
+                    except Exception:
+                        pass
+                break
+
             if not _is_restart:
                 iteration += 1
                 _iter_restart_count   = 0   # fresh iteration resets the hung counter
@@ -4965,7 +5388,21 @@ class RelicBotApp(tk.Tk):
                 self._diag.iteration_start(iteration)
                 self.player._diag_iter = iteration
 
-            folder_name = f"{iteration:03d}"
+            # Branching Mode: override folder naming with the branch+position
+            # prefix scheme. State (`_branch_current_index`, `_branch_position`)
+            # was set at the END of the previous iteration; for iter 1 it
+            # remains at the init value (0, 0) which produces the '#00' prefix.
+            # If this iter turns out to be a branch creator (HIT/GOD ROLL
+            # found), Phase 5 renames the folder to add the 'Branch_Split'
+            # marker at iteration end.
+            if self._branching_mode_var.get():
+                _bl = self._branch_current_letter()
+                folder_name = self._branch_iter_folder_name(
+                    _bl, self._branch_position, iteration,
+                    is_branch_creator=False,
+                )
+            else:
+                folder_name = f"{iteration:03d}"
             iter_dir = os.path.join(run_dir, folder_name)
             os.makedirs(iter_dir, exist_ok=True)
 
@@ -5011,8 +5448,19 @@ class RelicBotApp(tk.Tk):
                 except Exception as e:
                     self._log(f"WARNING: could not copy save to {_copy_dir}: {e}")
                 _prev_save_dir = None
+            # Branching Mode: restore source can be the pristine backup OR
+            # the .sl2 from the last branch creator's iter folder, depending
+            # on how many branches have been created so far. Pristine backup
+            # is never touched; we COPY from whichever pointer is live.
+            _restore_source = backup_path
+            if self._branching_mode_var.get() \
+                    and self._branch_current_reset_path \
+                    and os.path.isfile(self._branch_current_reset_path):
+                _restore_source = self._branch_current_reset_path
+                self._log(f"  [Branching] Restoring from branch save: "
+                          f"{os.path.basename(os.path.dirname(_restore_source))}")
             try:
-                save_manager.restore(save_path, backup_path)
+                save_manager.restore(save_path, _restore_source)
                 self._log("Save restored.")
                 if self._diag:
                     try:
@@ -5046,13 +5494,30 @@ class RelicBotApp(tk.Tk):
             #                                case the process just hasn't spawned yet
             #                                before deciding to relaunch
             #
-            # Launch strategy:
-            #   Attempts 1-3: steam://rungameid/ via explorer (10s grace each)
+            # Launch strategy (default Steam mode):
+            #   Attempts 1-3: steam://rungameid/ via explorer (10s base grace each)
             #   Attempt  4  : Steam reset — shutdown Steam, launch exe directly
             #   If attempt 4 fails → abort batch.
+            #
+            # Launch strategy (custom launcher mode):
+            #   Attempts 1-3: os.startfile(custom_path) (30s base grace each)
+            #   If all 3 fail → abort batch with launcher-specific guidance
+            #   (Steam reset is skipped — restarting Steam wouldn't fix a
+            #   misconfigured custom launcher path).
             _m = max(1.0, self._perf_gap_mult)
-            _FOCUS_POLL_INTERVAL  = int(10 * _m)    # s between "check process / window" cycles
-            _PROCESS_GRACE        = int(10 * _m)    # s to wait for process to appear before relaunch
+            # Custom launchers (Seamless Co-op, me3 + mods, etc.) typically
+            # take longer to spawn the game process than vanilla Steam. Bump
+            # the per-attempt grace to 30s base when custom launcher is on so
+            # we don't prematurely abandon a slow launch on iteration 1
+            # (before the adaptive multiplier has had time to grow).
+            _is_custom_launch = (
+                getattr(self, "custom_launcher_enabled_var", None)
+                and self.custom_launcher_enabled_var.get()
+                and self.custom_launcher_path_var.get().strip()
+            )
+            _grace_base = 30 if _is_custom_launch else 10
+            _FOCUS_POLL_INTERVAL  = int(_grace_base * _m)    # s between "check process / window" cycles
+            _PROCESS_GRACE        = int(_grace_base * _m)    # s to wait for process to appear before relaunch
             _STEAM_LAUNCH_ATTEMPTS = 3
             _NO_WINDOW_MAX        = 180              # s before assuming crashed process with no window
 
@@ -5065,6 +5530,36 @@ class RelicBotApp(tk.Tk):
                 # Only fire the launch command if the process is not already running.
                 # This prevents double-launching when the game is just slow to start.
                 if not self._is_game_running(exe_name):
+                    # Custom launcher mode: Steam reset is irrelevant (the
+                    # custom path is what's failing, not Steam). After N
+                    # failed attempts, abort with launcher-specific guidance
+                    # rather than wasting a Steam reset cycle.
+                    if _launch_attempts >= _STEAM_LAUNCH_ATTEMPTS and _is_custom_launch:
+                        self._log(
+                            f"ERROR: Custom launcher failed to spawn the game after "
+                            f"{_STEAM_LAUNCH_ATTEMPTS} attempts. Common causes:")
+                        self._log(
+                            "  • The 'Custom executable' path doesn't actually launch the game")
+                        self._log(
+                            "  • The 'Game executable' path doesn't match the process the launcher spawns")
+                        self._log(
+                            "  • Steam isn't running (Nightreign requires Steam regardless of launcher)")
+                        self._log(
+                            "Aborting batch. Untick 'Add Custom Game Executable Path' to fall back "
+                            "to the normal Steam launch.")
+                        if self._diag:
+                            try:
+                                self._diag.log_game(
+                                    event="launch_fail",
+                                    attempt=_launch_attempts,
+                                    note="Custom launcher did not spawn game exe")
+                            except Exception:
+                                pass
+                        if _async_mode and _async_relic_q is not None:
+                            _shutdown_async_workers()
+                            _async_join_timed()
+                        self.after(0, self._reset_controls)
+                        return
                     # After 3 failed Steam protocol launches, do a Steam reset
                     # and launch the exe directly — clears any stale session.
                     if _launch_attempts >= _STEAM_LAUNCH_ATTEMPTS and not _steam_reset_done:
@@ -5903,28 +6398,150 @@ class RelicBotApp(tk.Tk):
             # Rename folder: GOD ROLL > HIT > SMART > EXCLUDED.
             # Near-miss iterations keep plain NNN — the Near Miss aggregation
             # folder + screenshots + Info.txt provide the visibility.
-            if num_matched >= 3:
-                tier_name = f"GOD ROLL {iteration:03d}"
-            elif num_matched >= 1:
-                tier_name = f"HIT {iteration:03d}"
-            elif iteration in self._smart_gr_iterations:
-                tier_name = f"SMART GOD ROLL {iteration:03d}"
-            elif iteration in self._smart_iterations:
-                tier_name = f"SMART {iteration:03d}"
-            elif _excl_match_results:
-                tier_name = f"EXCLUDED {iteration:03d}"
-            else:
-                tier_name = None
+            if self._branching_mode_var.get():
+                # Branching Mode rename: branch creators get a Branch_Split
+                # marker (HIT/GOD_ROLL suffix dropped — the marker conveys it).
+                # The LATEST branch creator also gets a _BEST marker, with the
+                # PREVIOUS BEST creator's marker dropped at the same time.
+                # Non-creators with smart_hit / excluded / near_miss keep
+                # those suffixes appended to the existing branch+position
+                # prefix. Pure non-match iters keep their initial name.
+                _bl = self._branch_current_letter()
+                _is_creator = self._branch_creator_pending  # set during this iter's analysis
 
-            if tier_name:
-                tier_dir = os.path.join(run_dir, tier_name)
+                # Phase 7: prefix all screenshots in this iter's folder with
+                # the iter's branch+position. Skip files already prefixed
+                # (e.g. chain-copied from previous branches — those start
+                # with a letter+digits pattern, not bare 'Iter_').
+                _ss_prefix = self._branch_screenshot_prefix(_bl, self._branch_position)
                 try:
-                    os.rename(iter_dir, tier_dir)
-                    iter_dir = tier_dir
-                    folder_name = tier_name
-                    self._log(f"Folder renamed to: {tier_name}")
+                    for _entry in os.listdir(iter_dir):
+                        if not _entry.lower().endswith((".jpg", ".jpeg", ".png")):
+                            continue
+                        if not _entry.startswith("Iter_"):
+                            continue   # already prefixed (chain-copied), skip
+                        _src_p = os.path.join(iter_dir, _entry)
+                        _dst_p = os.path.join(iter_dir, f"{_ss_prefix}_{_entry}")
+                        if os.path.exists(_dst_p):
+                            continue
+                        try:
+                            os.rename(_src_p, _dst_p)
+                        except Exception:
+                            pass
                 except Exception as e:
-                    self._log(f"WARNING: could not rename folder: {e}")
+                    self._log(
+                        f"  [Branching] WARNING: screenshot prefix rename "
+                        f"failed: {e}")
+                _bm_suffix = ""
+                if not _is_creator:
+                    if iteration in self._smart_gr_iterations:
+                        _bm_suffix = "SMART_GOD_ROLL"
+                    elif iteration in self._smart_iterations:
+                        _bm_suffix = "SMART"
+                    elif _excl_match_results:
+                        _bm_suffix = "EXCLUDED"
+                    elif iteration in self._nearmiss_iterations:
+                        _bm_suffix = "NEAR_MISS"
+                # Phase 6: drop _BEST from the previous branch creator (if any)
+                # BEFORE renaming this iter's folder — keeps the marker uniquely
+                # on the latest creator at all times.
+                if _is_creator and self._branch_latest_creator_dir \
+                        and os.path.isdir(self._branch_latest_creator_dir):
+                    _prev_basename = os.path.basename(
+                        self._branch_latest_creator_dir)
+                    _prev_no_best = self._branch_strip_best_marker(_prev_basename)
+                    if _prev_no_best != _prev_basename:
+                        _prev_no_best_path = os.path.join(run_dir, _prev_no_best)
+                        try:
+                            os.rename(self._branch_latest_creator_dir,
+                                      _prev_no_best_path)
+                            # Update the live ref so the chain-copy block
+                            # below (which uses _branch_latest_creator_dir as
+                            # its source) reads from the just-renamed path
+                            # instead of the now-stale pre-rename path.
+                            self._branch_latest_creator_dir = _prev_no_best_path
+                            self._log(
+                                f"  [Branching] Dropped BEST marker from "
+                                f"previous creator: {_prev_no_best}")
+                        except Exception as e:
+                            self._log(
+                                f"  [Branching] WARNING: could not drop BEST "
+                                f"from previous creator: {e}")
+                _new_name = self._branch_iter_folder_name(
+                    _bl, self._branch_position, iteration,
+                    is_branch_creator=_is_creator,
+                    match_suffix=_bm_suffix,
+                    is_best=_is_creator,   # latest creator is always BEST
+                )
+                if _new_name != folder_name:
+                    _new_dir = os.path.join(run_dir, _new_name)
+                    try:
+                        os.rename(iter_dir, _new_dir)
+                        iter_dir = _new_dir
+                        folder_name = _new_name
+                        self._log(f"Folder renamed to: {_new_name}")
+                    except Exception as e:
+                        self._log(f"WARNING: could not rename folder: {e}")
+                # Phase 5 chain-copy: branch creators copy from previous
+                # branch creator's folder (everything except .sl2 saves) so
+                # the new creator's folder shows the cumulative view of all
+                # HIT/GOD_ROLL findings across all branches up to this point.
+                # Source = `_branch_latest_creator_dir` which still points at
+                # the PREVIOUS creator at this point (Phase 4 mutation below
+                # overwrites it with the current iter's path AFTER chain-copy).
+                if _is_creator and self._branch_latest_creator_dir \
+                        and os.path.isdir(self._branch_latest_creator_dir) \
+                        and self._branch_latest_creator_dir != iter_dir:
+                    try:
+                        _src = self._branch_latest_creator_dir
+                        _copied = 0
+                        _save_basename = os.path.basename(save_filename).lower()
+                        for _entry in os.listdir(_src):
+                            _src_path = os.path.join(_src, _entry)
+                            # Skip the save file (.sl2) — branch saves are
+                            # tracked via the reset pointer, not duplicated.
+                            if not os.path.isfile(_src_path):
+                                continue
+                            if _entry.lower().endswith(".sl2"):
+                                continue
+                            if _entry.lower() == _save_basename:
+                                continue
+                            _dst_path = os.path.join(iter_dir, _entry)
+                            if os.path.exists(_dst_path):
+                                continue   # don't overwrite this iter's own files
+                            shutil.copy2(_src_path, _dst_path)
+                            _copied += 1
+                        if _copied:
+                            self._log(
+                                f"  [Branching] Chain-copied {_copied} file(s) "
+                                f"from {os.path.basename(_src)} into new branch "
+                                f"creator's folder.")
+                    except Exception as e:
+                        self._log(
+                            f"  [Branching] WARNING: chain-copy failed: {e}")
+            else:
+                # Standard mode: existing rename pipeline.
+                if num_matched >= 3:
+                    tier_name = f"GOD ROLL {iteration:03d}"
+                elif num_matched >= 1:
+                    tier_name = f"HIT {iteration:03d}"
+                elif iteration in self._smart_gr_iterations:
+                    tier_name = f"SMART GOD ROLL {iteration:03d}"
+                elif iteration in self._smart_iterations:
+                    tier_name = f"SMART {iteration:03d}"
+                elif _excl_match_results:
+                    tier_name = f"EXCLUDED {iteration:03d}"
+                else:
+                    tier_name = None
+                if tier_name:
+                    tier_dir = os.path.join(run_dir, tier_name)
+                    try:
+                        os.rename(iter_dir, tier_dir)
+                        iter_dir = tier_dir
+                        folder_name = tier_name
+                        self._log(f"Folder renamed to: {tier_name}")
+                    except Exception as e:
+                        self._log(f"WARNING: could not rename folder: {e}")
 
             # ── All Hits + All God Rolls folders ─────────────────────── #
             # Only non-excluded matches go here. Excluded relics go to Excluded Hits only.
@@ -6116,6 +6733,59 @@ class RelicBotApp(tk.Tk):
             # Deferred save copy — set AFTER any rename so the path is always valid
             _prev_save_dir = iter_dir
             _diag_end("ok")
+
+            # Branching Mode: advance state for the NEXT iteration. The Phase 5
+            # rename block earlier in this iter's wrap-up already used the OLD
+            # `_branch_latest_creator_dir` as chain-copy source if this iter
+            # was a creator. Now we update it to point at THIS iter's folder
+            # (which Phase 5 also renamed to include Branch_Split / BEST).
+            if self._branching_mode_var.get():
+                if self._branch_creator_pending:
+                    # Phase 9: if this is the 27th branch about to be created
+                    # (current index 26 → next 27), trigger the multi-letter
+                    # rename pass FIRST so all existing single-letter A-Z
+                    # folders become AA-AZ. The new branch we're about to
+                    # create then becomes BA in the new scheme.
+                    if (self._branch_current_index == 26
+                            and not self._branch_double_letter_active):
+                        try:
+                            iter_dir = self._branch_27th_rename_pass(
+                                run_dir, iter_dir)
+                            self._branch_double_letter_active = True
+                            # Re-derive folder_name from the new path so any
+                            # later code that uses folder_name sees the
+                            # double-letter version.
+                            folder_name = os.path.basename(iter_dir)
+                        except Exception as e:
+                            self._log(
+                                f"[Branching] FATAL: 26-branch rename pass "
+                                f"failed and could not be rolled back ({e}). "
+                                f"Aborting batch.")
+                            self.after(0, self._reset_controls)
+                            return
+                    self._branch_latest_creator_dir = iter_dir
+                    self._branch_current_index += 1
+                    self._branch_position = 0
+                    # Reset pointer = the .sl2 that will be copied into iter_dir
+                    # at the start of the NEXT iteration (line 5249). Phase 3's
+                    # restore branch checks os.path.isfile(...) before using.
+                    self._branch_current_reset_path = os.path.join(
+                        iter_dir, save_filename)
+                    self._branch_creator_pending = False
+                    self._log(
+                        f"  [Branching] Iter {iteration} is the new branch "
+                        f"{self._branch_current_letter()} creator. Reset source "
+                        f"updated for next iter.")
+                    if self._diag:
+                        try:
+                            self._diag.log_game(
+                                event="branch_created",
+                                attempt=iteration,
+                                note=f"branch={self._branch_current_letter()}")
+                        except Exception:
+                            pass
+                else:
+                    self._branch_position += 1
 
             results.append({
                 "iteration": iteration,
@@ -7980,6 +8650,9 @@ class RelicBotApp(tk.Tk):
                 self._exclude_buy_phase_var.set(False)
                 self._parallel_enabled_var.set(False)
                 self._parallel_workers_var.set(1)
+                # Branching mode is incompatible with the CE mega-cycle
+                # approach (early-exit-on-HIT vs buy-1900-in-one-shot).
+                self._branching_mode_var.set(False)
             except Exception:
                 pass
 
@@ -8293,6 +8966,13 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             f"  Murk is below relic cost ({murk_cost:,} each) — "
                             "no relics available to buy. Ending iteration.")
+                        # Branching Mode: murk floor reached on the current
+                        # branch's save. Set the abort flag so the outer
+                        # batch loop ends the run cleanly (no point trying
+                        # more iters — every iter on this save will see the
+                        # same murk total and immediately end).
+                        if self._branching_mode_var.get():
+                            self._branch_out_of_murk = True
                         return relic_results
                     else:
                         self._log(
@@ -9747,6 +10427,26 @@ class RelicBotApp(tk.Tk):
                                 _cat_s = "DUD"
                             result["_category"] = _cat_s
 
+                            # ── Branching Mode trigger ──────────────────── #
+                            # HIT or GOD ROLL during a cycle finalizes the
+                            # current iteration as the new branch creator.
+                            # Smart hits / excluded hits / near misses don't
+                            # qualify (per design — only "real" matches
+                            # branch). Set the pending flag + signal the
+                            # outer cycle loop to stop after this cycle
+                            # completes; the iteration-end logic (Phase 5)
+                            # commits the branch state change.
+                            if self._branching_mode_var.get() \
+                                    and _cat_s in ("GOD_ROLL", "HIT") \
+                                    and not self._branch_creator_pending:
+                                self._branch_creator_pending = True
+                                _buy_loop_done = True
+                                self._log(
+                                    f"  [Branching] {_cat_s} found in cycle "
+                                    f"{_batch_i + 1}/{_buy_count} — finishing "
+                                    f"current cycle then exiting iteration "
+                                    f"to start new branch.")
+
                             # Save screenshot based on category
                             _saved_fname = ""
                             _tag_map = {
@@ -11017,6 +11717,15 @@ class RelicBotApp(tk.Tk):
             result_lines.append(
                 f"  Backlog OCR tail:  ~{format_duration(loops * n * sec_analyze)}"
                 f" after run ends (game not running — full CPU)"
+            )
+        # Custom launcher (mods, Seamless Co-op, etc.) can shift load and
+        # gameplay timings unpredictably — surface a disclaimer so users
+        # don't take the time estimates as gospel in that mode.
+        if getattr(self, "custom_launcher_enabled_var", None) \
+                and self.custom_launcher_enabled_var.get():
+            result_lines.append(
+                "  \u26a0  Time estimates may be inaccurate when using Custom Launcher\n"
+                "       (mods or alternate launch paths can affect load and gameplay timing)."
             )
 
         # ── Update Odds Viewer text (selectable) ──────────────────────────── #

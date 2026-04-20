@@ -1,5 +1,5 @@
 """
-RelicBot Diagnostic Logger — input-test build only.
+RelicBot Diagnostic Logger.
 
 Collects and writes a structured .diag file alongside each batch run covering:
   - Full hardware profile (OS, CPU, RAM, GPU, CUDA, display)
@@ -21,7 +21,7 @@ Collects and writes a structured .diag file alongside each batch run covering:
 Usage (from app.py):
     from bot.diagnostic import DiagnosticLogger
 
-    diag = DiagnosticLogger(run_dir)
+    diag = DiagnosticLogger(run_dir, app_version="1.8.3")
     diag.log_hardware()
     diag.log_settings(app_instance)
     diag.start_interference_monitor()
@@ -132,13 +132,14 @@ def clear_persisted_run_state() -> None:
 
 
 class DiagnosticLogger:
-    """Thread-safe diagnostic file logger for the input-test build."""
+    """Thread-safe diagnostic file logger."""
 
     # ── construction ──────────────────────────────────────────────────────── #
 
-    def __init__(self, run_dir: str):
+    def __init__(self, run_dir: str, app_version: str = ""):
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
         self._path = os.path.join(run_dir, f"diagnostic_{ts}.diag")
+        self._app_version = app_version or "unknown"
         self._lock = threading.Lock()
         self._session_start = time.time()
 
@@ -270,13 +271,19 @@ class DiagnosticLogger:
             "game_launch_fails":     0,
             "save_restores":         0,
             "perf_recalibrations":   0,
+
+            # Branching Mode (v1.8.3)
+            "branches_created":          0,
+            "branch_renames_triggered":  0,   # 26-branch retroactive double-letter pass
+            "branch_out_of_murk_aborts": 0,
         }
 
         # Open file, write header
         with open(self._path, "w", encoding="utf-8") as f:
             f.write(f"RelicBot Diagnostic Log\n")
             f.write(f"Generated : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Build     : input-test (ctypes SendInput + scan codes)\n")
+            f.write(f"Version   : v{self._app_version}\n")
+            f.write(f"Input API : ctypes SendInput (KEYEVENTF_SCANCODE)\n")
             f.write("=" * 72 + "\n\n")
 
     # ── internal write helpers ────────────────────────────────────────────── #
@@ -1161,14 +1168,22 @@ class DiagnosticLogger:
 
     def log_game(self, event: str, attempt: int = 0, note: str = "") -> None:
         """event: launch_start | launch_ok | launch_fail | focus_ok |
-                  close | save_restore | steam_reset"""
+                  close | save_restore | steam_reset |
+                  branch_created | branch_aborted_no_murk |
+                  branch_renames_triggered"""
         if event == "launch_start":
             self._ev["game_launches"] += 1
         elif event == "launch_fail":
             self._ev["game_launch_fails"] += 1
         elif event == "save_restore":
             self._ev["save_restores"] += 1
-        self._write(f"  GAME  {event:14s}  attempt={attempt}"
+        elif event == "branch_created":
+            self._ev["branches_created"] += 1
+        elif event == "branch_renames_triggered":
+            self._ev["branch_renames_triggered"] += 1
+        elif event == "branch_aborted_no_murk":
+            self._ev["branch_out_of_murk_aborts"] += 1
+        self._write(f"  GAME  {event:24s}  attempt={attempt}"
                     + (f"  {note}" if note else ""))
         if event == "launch_fail":
             self.log_failure(SYSTEM, "game_launch_fail",

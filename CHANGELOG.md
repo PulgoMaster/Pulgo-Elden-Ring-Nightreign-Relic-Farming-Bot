@@ -31,6 +31,57 @@ This is a **separate build flavor** from the mainline RelicBot. It requires a th
 - New helpers `capture_hotbar_signature` + `hotbar_advanced` in `bot/screen_capture.py`.
 - All giga branches in `_run_iteration_phases` are guarded by a local `_GIGA_MODE = _BUILD_IS_GIGA`.
 
+### Inherited from mainline v1.8.3 (this CE build is based on master @ ce21022)
+This CE build now includes the v1.8.3 mainline features below, with Branching Mode hidden+disabled (it conflicts with the CE mega-cycle approach):
+
+---
+
+## [1.8.3] — 2026-04-19 — CUSTOM LAUNCHER + BRANCHING MODE + UI POLISH
+
+### Custom launcher (advanced, opt-in)
+- New "Add Custom Game Executable Path:" checkbox in the Save File & Game Configuration panel. When ticked, a new field appears for any launcher path — the bot uses that to start the game instead of the normal Steam protocol URL.
+- Accepts `.exe`, `.bat`, or `.url` (Steam desktop shortcut). Launch goes through `os.startfile()` so Windows routes each extension to its registered handler — `.url` shortcuts route through Steam (preserving Steam Overlay support inside modded sessions).
+- Designed for users who need to launch via Nightreign Seamless Co-op, Mod Engine 3 (me3) via a Steam shortcut, or any other launcher that wraps the game start.
+- The checkbox is the source of truth: when unchecked, the bot always uses the normal Steam launch even if a custom path is still saved in the field.
+- The bot does NO detection, NO auto-generation, NO profile parsing. You provide a launchable path; the bot launches it. Setup of the launcher itself is the user's responsibility (full instructions for the recommended me3 + Steam-shortcut flow are in GUIDE.txt).
+
+### Custom launcher safety abort
+- When the custom launcher is enabled and the game executable fails to spawn after 3 attempts, the bot now aborts cleanly with launcher-specific guidance (likely causes, how to disable). The Steam-reset failsafe is bypassed in custom-launcher mode since restarting Steam wouldn't fix a misconfigured custom path.
+
+### Launch grace period extended for custom launchers
+- When the custom launcher checkbox is on, the per-attempt grace period for the game window to appear bumps from 10s base to 30s base (still scaled by the adaptive performance multiplier). This prevents the bot from prematurely abandoning a slow me3 + heavy-mods launch on iteration 1, before the adaptive multiplier has had time to grow. Gameplay timing is unaffected.
+
+### Odds Viewer disclaimer
+- The Odds Viewer now shows a warning line below the time estimates when the custom launcher checkbox is on, since mods or alternate launch paths can shift per-iteration timing in ways the baseline estimates don't account for.
+
+### Branching Mode (standard-mode exclusive, opt-in)
+- New "🌿 Branching Mode (Standard Mode Only)" checkbox in the Batch settings panel. When a HIT or GOD ROLL is found mid-cycle, the bot finishes analyzing that cycle, exits the iteration cleanly, and the next iteration starts from THAT iteration's save instead of the original pristine backup. Each match creates a new "branch" — letters A, B, C, ... — and the run accumulates matches across branches into one final save.
+- Mutually exclusive with Async Analysis / Backlog Analysis / Hybrid GPU+CPU Analysis (which all run analysis off the input loop and can't react to a match before the next cycle's inputs fire). Mutex is enforced via graystate — incompatible mode checkboxes are visibly disabled when one mode is on, so users can't accidentally enable a conflicting combination.
+- Folder naming overhaul when active: pre-branch iters use `#NN_Iter_NNN`, on-branch iters use `<letter>NN_Iter_NNN`, branch creators get a `Branch_Split` marker (e.g. `A04_Branch_Split_Iter_005`) and the LATEST creator carries a `_BEST` marker for at-a-glance "this is the save with the most matches" identification.
+- Cumulative chain-copy: when a new branch is created, all non-save files from the previous branch creator's folder are copied into the new creator's folder. The latest BEST folder always shows the cumulative state of every match across the run.
+- Smart hits / Excluded hits / Near misses do NOT trigger branches — they're documented in their iteration folders as normal with their respective suffixes.
+- Murk floor abort: when Phase 0 reads murk and finds it's below the per-relic cost (600 normal / 1800 deep) on the current branch's save, the batch terminates cleanly with a clear "out of murk on branch X" message. Run ends when iter limit is hit OR murk runs out, whichever comes first.
+- 26-branch retroactive rename: in the unlikely event a run produces 27+ branches (would exceed single-letter scheme), the bot retroactively renames every existing folder + screenshot from single-letter to double-letter (A→AA, B→AB, ..., Z→AZ) so alphabetic sort order stays correct. Wrapped in atomic try/except + rollback. Times the rename and warns if >5s.
+- Original pristine save backup is never overwritten — the bot maintains a runtime pointer to the current branch's reset source instead. User can always recover the original.
+- Screenshot files inside iter folders get the iter's branch+position prefix (e.g. `A04_Iter_005_Relic_3_HIT.jpg`) so the cumulative folder view shows where each relic came from.
+- New diagnostic events: `branch_created`, `branch_renames_triggered`, `branch_aborted_no_murk`. Counters: `branches_created`, `branch_renames_triggered`, `branch_out_of_murk_aborts`.
+
+### UI mutex via graystate (replaces conflict-tip pattern)
+- Async ↔ Backlog mutex (existing) and the new Branching ↔ {Async, Backlog, Hybrid} mutex are now enforced via real `state="disabled"` (grayed-out) checkboxes instead of the older click-and-revert-with-tooltip pattern. When a mode is on, conflicting mode checkboxes are visibly disabled — users can see at a glance which combinations are valid without trial-and-error.
+- Hybrid checkbox correctly re-enables when branching is toggled off (assuming GPU Acceleration is also enabled).
+
+### GPU Settings graystate when CUDA not available
+- The GPU Acceleration checkbox is now disabled when no CUDA-capable GPU is detected on the machine. Previously it was clickable but had no effect (the bot would silently fall back to CPU mode). Now it's clearly grayed, and the dependent settings (Hybrid, GPU Always Analyze) cascade-disable through the existing state chain. The Install GPU Acceleration button stays clickable for users with eligible hardware that hasn't yet had CUDA torch installed.
+
+### Odds Viewer auto-fits widget height
+- Both the Build Exact Relic and Passive Pool tabs' odds display now auto-resize their text widget height to fit the content (min 8 rows, max 30). Previously the widget was hardcoded at 8 rows, which silently truncated longer outputs — most visibly the Combine-both-tabs view, which can produce 15-30 lines (Build Exact + My Pool + Pairings + subtotals + aggregate) and was getting cut off.
+
+### Diagnostic header version
+- The diagnostic log header now includes the actual app version (e.g. `Version : v1.8.3`) instead of the stale "input-test build" placeholder. Single source of truth via `APP_VERSION` constant in `ui/app.py`. Bug reports from users now identify their build immediately.
+
+### README + GUIDE: offline mode strongly recommended
+- Updated README and GUIDE to RECOMMEND running the bot with the PC disconnected from the internet (previously messaging only said "works offline" as a feature, not as a recommendation). Added a new "RUN OFFLINE" entry to the GUIDE's CRITICAL WARNINGS section explaining the safety reasoning. The bot ships with all OCR models bundled, so offline operation is a no-friction default.
+
 ---
 
 ## [1.8.2] — 2026-04-15 — PHASE 3 TOOLTIP RETRY HARDENING + DIAGNOSTIC COUNTER WIRING
