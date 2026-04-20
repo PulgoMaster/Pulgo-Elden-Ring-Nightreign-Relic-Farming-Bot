@@ -1,5 +1,5 @@
 ================================================================================
-  RELIC BOT v1.8.2
+  RELIC BOT v1.8.3
   Elden Ring Nightreign Relic Farming Bot
   Made by Pulgo
 ================================================================================
@@ -16,11 +16,15 @@ FEATURES
   • GPU Acceleration for NVIDIA GPUs (optional, ~10x OCR speedup)
   • Async Analysis — OCR runs in background while farming continues
   • Built-in updater preserves all settings between versions
-  • Works fully offline after first launch
+  • Ships with OCR models bundled — works fully offline from first launch
+    (RECOMMENDED: run your PC disconnected from the internet — see safety
+    section below)
 
 Automates relic farming in Elden Ring Nightreign using on-device OCR to
-analyze relics and match them against your criteria. Works fully offline
-after the first launch.
+analyze relics and match them against your criteria. All required models
+ship inside the EXE — no download needed at any point. The bot is
+designed to run with your PC OFFLINE, which is the safest mode of
+operation (see CRITICAL WARNINGS below).
 
 Each iteration the bot:
   1. Restores a clean save file and relaunches the game
@@ -49,6 +53,17 @@ ALWAYS USE A CURRENT SAVE
   Hold before running the bot. Running from an outdated save risks being
   flagged by Nightreign's anti-cheat system.
 
+RUN OFFLINE  (RECOMMENDED — strongly preferred)
+  Before starting a batch, disconnect your PC from the internet.
+  The bot ships with all OCR models bundled and never needs to phone home,
+  so it runs perfectly fine offline. Running offline ensures:
+    - No game telemetry / cloud-save sync happens while automation is active
+    - No background app traffic competes with the bot for system resources
+    - The safest posture against anti-cheat detection
+  You can re-connect to the internet between batches if needed (e.g. to
+  upload screenshots or update the bot). Just disconnect again before
+  starting another run.
+
 GAME SETTINGS
   - Run the game in BORDERLESS WINDOWED mode (not Fullscreen)
   - 16:9 aspect ratio required (any resolution: 1080p, 1440p, 4K)
@@ -62,8 +77,10 @@ GAME SETTINGS
 1. Extract the ZIP -- you will get a "RelicBot" folder
 2. Place the folder anywhere you like (Desktop, Documents, etc.)
 3. Run "RelicBot.exe" inside the folder
-4. On first launch, the bot downloads its OCR model (~100 MB)
-   This is a one-time download -- after that it works fully offline
+4. The bot ships with OCR models BUNDLED -- no download is ever needed.
+   It works fully offline from first launch.
+   RECOMMENDED: disconnect your PC from the internet before running batches
+   (see CRITICAL WARNINGS above for the safety reasoning).
 
 SETTING UP PATHS
 
@@ -81,6 +98,237 @@ SETTING UP PATHS
   Output Folder
     Where batch results go. The default "batch_output" folder inside
     RelicBot works fine.
+
+
+================================================================================
+  1A. CUSTOM LAUNCHER (ADVANCED — OPTIONAL)
+================================================================================
+
+NORMAL USERS: SKIP THIS SECTION. The default Steam launch is faster and more
+reliable for vanilla play.
+
+This is for users who need to launch the game via something other than the
+normal Steam protocol — for example:
+  - Nightreign Seamless Co-op (standalone launch_nrsc.exe)
+  - Mod Engine 3 (me3) with mod profiles
+  - Any other mod manager or launcher that wraps the game start
+
+The bot does no detection, no .bat generation, no profile parsing. You give
+it ANY launchable path (.exe / .bat / .url) and it just runs it. Setup of
+the launcher itself is your responsibility — these instructions cover the
+common cases below.
+
+──────────────────────────────────────────────────────────────────────────
+HOW TO ENABLE
+──────────────────────────────────────────────────────────────────────────
+  1. Tick "Add Custom Game Executable Path:" (under Steam executable)
+  2. A new "Custom executable:" field will appear
+  3. Browse to your launcher path (.exe / .bat / .url) and you're done
+
+The bot uses Windows' default file handler (os.startfile) to launch the
+path you give it, so:
+  .exe  → runs directly
+  .bat  → runs through cmd.exe
+  .url  → routes through the registered URL handler (e.g. Steam for
+          steam:// URLs)
+
+──────────────────────────────────────────────────────────────────────────
+RECOMMENDED METHOD FOR MOD ENGINE 3 (me3) — Steam shortcut
+──────────────────────────────────────────────────────────────────────────
+This is the cleanest option because the game is launched via Steam, which
+keeps the Steam Overlay working inside the modded game (in-game chat,
+screenshots, recording, etc.) and avoids any direct hand-off to me3.
+
+Setup (one-time):
+
+  1. Open the me3 (Mod Engine 3) Manager.
+
+  2. Open your Nightreign profile, then click the "Add profile to Steam"
+     button. Restart Steam if it asks.
+
+  3. Open Steam → Library. Find the new non-Steam shortcut. By default
+     it's called something like:
+       Nightreign (nightreign-default)
+
+  4. Right-click that shortcut in Steam → Manage → Add desktop shortcut.
+     Steam creates a .url file on your Desktop that, when opened, fires
+     the Steam shortcut (which in turn runs me3 with the right profile).
+
+  5. (Optional) Rename or move that .url file anywhere — Desktop, a
+     dedicated launchers folder, doesn't matter.
+
+  6. In the bot: tick the checkbox, click Browse, select the .url file.
+
+That's it. The bot now launches the modded game via Steam every iteration.
+If you want to switch me3 profiles, repeat steps 1–5 with the new profile
+and point the bot at the new .url.
+
+──────────────────────────────────────────────────────────────────────────
+ALTERNATIVE: Standalone launchers (Seamless Co-op, etc.)
+──────────────────────────────────────────────────────────────────────────
+If your launcher is a standalone .exe with no arguments needed, just browse
+to it directly. Example: Nightreign Seamless Co-op typically ships with a
+launch_nrsc.exe (or similar) that you can run by itself.
+
+Steam Overlay generally won't work with these launchers (the game wasn't
+started by Steam) but the bot itself works the same.
+
+──────────────────────────────────────────────────────────────────────────
+ALTERNATIVE: Custom .bat wrapper for CLI launchers
+──────────────────────────────────────────────────────────────────────────
+If your launcher is a CLI tool that needs arguments (like raw `me3 launch
+--game nightreign -p <profile>` if you don't use the Steam-shortcut method
+above), wrap it in a one-line .bat:
+
+    @echo off
+    "C:\path\to\me3.exe" launch --game nightreign -p "C:\path\to\your_profile.me3"
+
+Save as launch_nightreign.bat anywhere, then point the bot at it.
+
+──────────────────────────────────────────────────────────────────────────
+IMPORTANT NOTES
+──────────────────────────────────────────────────────────────────────────
+  - The checkbox is the source of truth. Uncheck it and the bot reverts
+    to the normal Steam launch immediately, even if a custom path is
+    still saved in the field.
+
+  - "Game executable" path (the field above) MUST still point at the
+    actual game executable (nightreign.exe). The bot uses that to detect
+    when the game is running and to bring its window into focus, no
+    matter how the game was launched.
+
+  - If your custom launcher fails to spawn the game executable after 3
+    attempts, the bot aborts the batch with a clear error (Steam-reset
+    failsafe doesn't apply in custom-launcher mode, since restarting
+    Steam wouldn't fix a misconfigured custom path).
+
+  - Custom launchers (especially me3 + heavy mods) take longer to spawn
+    the game than vanilla Steam. The bot automatically extends its
+    per-attempt grace from 10s base to 30s base when the checkbox is on,
+    so it doesn't prematurely abandon a slow first launch.
+
+  - The Odds Viewer's time-per-iteration estimates may be off when the
+    custom launcher is enabled — mods can change load and gameplay timing
+    in ways the baseline estimates don't account for. The Odds Viewer
+    will show a warning when this option is on.
+
+  - Steam still needs to be running in the background regardless of
+    launcher — Nightreign requires Steam for licensing.
+
+
+================================================================================
+  1B. BRANCHING MODE (ADVANCED — STANDARD MODE ONLY)
+================================================================================
+
+NORMAL USERS: This is optional. The default behavior (resetting the save to
+your original pre-bot state every iteration) is fine for most use cases.
+
+Branching Mode is for users running long batches who want to ACCUMULATE
+multiple matches into a single save instead of "winning" only the last one.
+
+──────────────────────────────────────────────────────────────────────────
+HOW IT WORKS
+──────────────────────────────────────────────────────────────────────────
+Default behavior (Branching Mode OFF):
+  - Every iteration starts from your pristine pre-bot save
+  - If iter 5 finds a HIT and iter 12 finds another HIT, you can only KEEP
+    one of them (whichever iter's save you copy back to your game)
+
+With Branching Mode ON:
+  - When the bot finds a HIT or GOD ROLL during a buy cycle, it finishes
+    analyzing that cycle and exits the iteration cleanly
+  - The save from THAT iteration becomes the reset source for the next iter
+  - The next iter starts with the matched relic ALREADY in your inventory
+  - As more matches are found, they accumulate into one save
+  - Each match creates a "branch" — A, B, C, etc.
+  - Run ends when iteration limit is hit OR you run out of murk
+
+──────────────────────────────────────────────────────────────────────────
+OUTPUT FOLDER NAMING
+──────────────────────────────────────────────────────────────────────────
+With branching mode on, iter folders are named with a prefix scheme that
+makes the branch lineage clear:
+
+  Pre-branch iters (before first match):
+    #00_Iter_001     ← position 0 (first iter, pre-branch state)
+    #01_Iter_002
+    #02_Iter_003
+    #03_Iter_004
+
+  Iter that finds a match (creates Branch A):
+    #04_Branch_Split_Iter_005   ← position 4, marked as branch creator
+
+  On-branch iters (after first match, on Branch A's save):
+    A00_Iter_006     ← position 0 of Branch A
+    A01_Iter_007
+    ...
+    A09_Iter_015
+
+  Iter that finds another match (creates Branch B):
+    A10_Branch_Split_Iter_016
+
+  And so on through Branches B, C, D, ...
+
+The LATEST branch creator folder also carries a `_BEST` marker:
+
+    H00_BEST_Branch_Split_Iter_094
+
+→ This is the save with the MOST accumulated matches AND the most leftover
+  murk. Copy this iter's `.sl2` to your game's save location to keep the
+  full accumulated state.
+
+──────────────────────────────────────────────────────────────────────────
+WHAT GETS DOCUMENTED IN EACH FOLDER
+──────────────────────────────────────────────────────────────────────────
+Branch creator folders (the iters with `Branch_Split` marker) accumulate
+the full picture from prior branches. Specifically, when a new branch is
+created, all non-save files from the previous branch creator's folder are
+chain-copied into the new one. So:
+
+  Branch A creator folder (#04_Branch_Split_Iter_005):
+    - That iter's relic screenshots
+    - The HIT/GOD ROLL match info
+
+  Branch B creator folder (A10_Branch_Split_Iter_016):
+    - Everything from Branch A's creator folder
+    - PLUS that iter's new findings
+
+  Branch C creator folder (B07_Branch_Split_Iter_023):
+    - Everything from Branch A + Branch B's creators
+    - PLUS that iter's new findings
+
+This way, the LATEST BEST folder always has the cumulative view.
+
+Smart Hits / Excluded Hits / Near Misses on non-creator iters keep their
+respective suffixes (`SMART_HIT`, `EXCLUDED`, `NEAR_MISS`) and are
+documented in the iter folder where they were found, but they DON'T
+propagate forward via chain-copy. They also don't create branches.
+
+──────────────────────────────────────────────────────────────────────────
+WHEN BRANCHING MODE STOPS THE RUN
+──────────────────────────────────────────────────────────────────────────
+The batch ends when EITHER:
+  - Your configured iteration limit is hit (e.g. 100 iters)
+  - Available murk drops below the per-relic cost (600 for Normal, 1800
+    for Deep) on the current branch's save — at that point no more relics
+    can be bought, and the bot logs "Out of murk on branch X" and exits
+
+If the run ends mid-batch due to out-of-murk, the BEST marker still
+identifies your final save folder.
+
+──────────────────────────────────────────────────────────────────────────
+LIMITATIONS
+──────────────────────────────────────────────────────────────────────────
+  - Standard mode only — Async / Backlog / Hybrid are disabled when
+    Branching is on (the bot needs to react to a match BEFORE the next
+    cycle's inputs are sent, which requires synchronous analysis).
+  - In the unlikely event you accumulate 27+ branches in a single run, the
+    bot retroactively renames all existing folders from single-letter
+    (A-Z) to double-letter (AA-AZ) format and continues with BA, BB, ...
+    This rename runs during the inter-iteration transition and is fast on
+    SSDs (~1 second).
+  - The Odds Viewer's time-per-iteration estimates may be slightly off
+    (later iters on a branch have less murk to spend → faster cycles).
 
 
 ================================================================================

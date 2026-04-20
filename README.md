@@ -34,7 +34,7 @@ Each iteration the bot:
 5. Resets back to the buy screen with a single F press (Phase 3), then repeats from Phase 1
 6. Saves every iteration — folders renamed to HIT or GOD ROLL when a relic matches your criteria
 
-Works fully offline. No internet connection required after initial setup.
+**Recommended: run the bot with your PC disconnected from the internet.** The bot ships with OCR models bundled — no download needed at any point — so it works fully offline. Running offline minimizes any anti-cheat risk by ensuring no game telemetry leaves your machine while the bot is active.
 
 ---
 
@@ -68,6 +68,9 @@ See [INSTALLATION.md](INSTALLATION.md) for detailed first-time setup.
   The bot restores that save before every iteration — it must be from before any run you have played.
   If you play a run after setting up the bot, make a fresh save at Roundtable Hold and update the path in the bot.
   Running from an outdated save risks being flagged by Nightreign's anti-cheat system.
+
+- **Run the bot offline.**
+  Disconnect your PC from the internet before starting a batch. The bot ships with all dependencies bundled (including OCR models) and never needs to phone home. Offline operation prevents any telemetry / cloud-save sync from happening during automation, which is the safest posture against anti-cheat detection.
 
 ---
 
