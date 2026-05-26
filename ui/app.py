@@ -5066,6 +5066,32 @@ class RelicBotApp(tk.Tk):
                     f"  Run config: {int(limit_value)} iteration(s) | "
                     f"{_rtype_label} | {' + '.join(_mode_parts)}"
                     + (f" | Custom launcher" if _custom else ""))
+                # ── Resolution compatibility check ────────────────────────
+                try:
+                    from bot.screen_capture import get_screen_size
+                    _sw, _sh = get_screen_size()
+                    self._log(f"  Display: {_sw}x{_sh}")
+                    _is_16_9 = abs(_sw / _sh - 16 / 9) < 0.02
+                    _standard = {
+                        (1280, 720), (1366, 768), (1600, 900),
+                        (1920, 1080), (2560, 1440), (3840, 2160),
+                    }
+                    if not _is_16_9:
+                        self._log(
+                            f"  NOTE: Display aspect ratio ({_sw}:{_sh}) is not "
+                            f"16:9. The bot's screen detection is calibrated for "
+                            f"16:9 displays. Non-16:9 setups may cause detection "
+                            f"issues. If the bot gets stuck, try setting your game "
+                            f"to a standard 16:9 resolution (1920x1080 recommended) "
+                            f"in Fullscreen or Borderless Fullscreen mode.")
+                    elif (_sw, _sh) not in _standard:
+                        self._log(
+                            f"  NOTE: Display resolution {_sw}x{_sh} is close to "
+                            f"16:9 but not a standard resolution. If the bot has "
+                            f"trouble detecting menus, try 1920x1080 in Fullscreen "
+                            f"or Borderless Fullscreen mode.")
+                except Exception:
+                    pass
                 # ── Diagnostic logger ─────────────────────────────────────
                 try:
                     # Wipe any prior persisted snapshot — a new batch run is
