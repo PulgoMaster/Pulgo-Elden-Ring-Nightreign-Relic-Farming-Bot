@@ -4372,15 +4372,43 @@ class RelicBotApp(tk.Tk):
             try:
                 _img = screen_capture.capture(region)
                 if screen_capture.is_black_frame(_img):
-                    _game_rendered = False
+                    if not _game_rendered:
+                        # Still in initial loading — extend timeout as before.
+                        _ext_remaining = _BLACK_FRAME_CEILING_S - _black_frame_total_extended_s
+                        if _ext_remaining > 0:
+                            _new_start = max(_start, time.time() - _MAX_WAIT + 30)
+                            _ext_added = max(0.0, _new_start - _start)
+                            _black_frame_total_extended_s += _ext_added
+                            _start = _new_start
+                        if _cycle == 1 or _cycle % 5 == 0:
+                            self._log(
+                                "[Phase -0.5] Black frame detected — "
+                                "monitor may be off. Waiting for signal…")
+                    # Once game has been seen (_game_rendered=True), brief
+                    # black frames from menu transitions are normal — do NOT
+                    # revert to State A (would trigger F-spam on loaded game).
                     time.sleep(2.0)
                     continue
                 _equip_found = relic_analyzer.check_text_visible(
                     _img, "equipment", top_fraction=0.15)
+                # Fallback: if OCR can't find "equipment" text, check whether
+                # any menu highlight is visible. A detectable highlight after
+                # ESC proves a menu is open, which proves we're in-game.
+                if not _equip_found and _game_rendered:
+                    try:
+                        _hl_item, _hl_br, _ = screen_capture.find_highlighted_item(region)
+                        if _hl_item is not None:
+                            _equip_found = True
+                            self._log(
+                                f"[Phase -0.5] Menu highlight detected "
+                                f"({_hl_item}) — confirming in-game via "
+                                f"highlight fallback.")
+                    except Exception:
+                        pass
                 if _equip_found:
                     _elapsed = time.time() - _start
                     self._log(
-                        f"[Phase -0.5] Equipment menu detected — in-game confirmed "
+                        f"[Phase -0.5] In-game confirmed "
                         f"({_elapsed:.1f} s after window focus).")
                     if self._diag:
                         try:
@@ -4404,10 +4432,6 @@ class RelicBotApp(tk.Tk):
                         "[Phase -0.5] Game world detected — switching to gentle ESC probing.")
                     time.sleep(3.0)
                 elif _game_rendered and _cycle > 5:
-                    # State B but equipment not found after 5+ attempts.
-                    # ESC might be closing a dialog instead of opening menu.
-                    # Press ESC once more to clear whatever's open, then the
-                    # next cycle's ESC should open the Equipment menu cleanly.
                     self.player.tap("Key.esc")
                     time.sleep(1.5)
             except Exception as _ce:
