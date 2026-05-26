@@ -50,7 +50,7 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.6"
 
 # Cross-flavor flag. Mainline = False, CE branch flips this to True.
 # Drives title string + support-link routing so the CE build deep-links to
