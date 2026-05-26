@@ -4272,6 +4272,8 @@ class RelicBotApp(tk.Tk):
         _black_frame_total_extended_s = 0.0
         _BLACK_FRAME_CEILING_S = 600.0
         _game_rendered = False
+        _consecutive_black = 0
+        _BLACK_SUSTAINED_THRESHOLD = 3
 
         self._log("[Phase -0.5] Adaptive load wait — watching for in-game state…")
 
@@ -4296,49 +4298,32 @@ class RelicBotApp(tk.Tk):
 
             if not _game_rendered:
                 # ── State A: Loading/splash phase ─────────────────────── #
-                # Check if screen is still black BEFORE pressing anything.
-                # If black, just wait — no point spamming keys at a loading
-                # screen that can't accept input.
+                # Check if screen is sustained-black BEFORE pressing anything.
+                # Brief single-frame blacks (transitions) are ignored — only
+                # react when N consecutive captures are all black.
                 try:
                     _pre_img = screen_capture.capture(region)
                     if screen_capture.is_black_frame(_pre_img):
-                        if _cycle == 1 or _cycle % 5 == 0:
-                            self._log(
-                                "[Phase -0.5] Black frame detected — monitor may be off. "
-                                "Waiting for signal…")
-                            if self._diag:
-                                try:
-                                    self._diag.log_load(
-                                        event="black_frame_detected",
-                                        total_extended_s=_black_frame_total_extended_s)
-                                except Exception:
-                                    pass
-                        _ext_remaining = _BLACK_FRAME_CEILING_S - _black_frame_total_extended_s
-                        if _ext_remaining <= 0:
-                            self._log(
-                                "[Phase -0.5] Black frame extension ceiling reached"
-                                " (10 min) — aborting load wait")
-                            if self._diag:
-                                try:
-                                    self._diag.log_load(
-                                        event="ceiling_reached",
-                                        total_extended_s=_black_frame_total_extended_s)
-                                except Exception:
-                                    pass
-                            return False, 0.0
-                        _new_start = max(_start, time.time() - _MAX_WAIT + 30)
-                        _ext_added = max(0.0, _new_start - _start)
-                        _black_frame_total_extended_s += _ext_added
-                        if _ext_added > 0 and self._diag:
-                            try:
-                                self._diag.log_load(
-                                    event="black_frame_extend",
-                                    total_extended_s=_black_frame_total_extended_s)
-                            except Exception:
-                                pass
-                        _start = _new_start
+                        _consecutive_black += 1
+                        if _consecutive_black >= _BLACK_SUSTAINED_THRESHOLD:
+                            if _consecutive_black == _BLACK_SUSTAINED_THRESHOLD or _cycle % 5 == 0:
+                                self._log(
+                                    "[Phase -0.5] Sustained black screen detected — "
+                                    "waiting for game to render…")
+                            _ext_remaining = _BLACK_FRAME_CEILING_S - _black_frame_total_extended_s
+                            if _ext_remaining <= 0:
+                                self._log(
+                                    "[Phase -0.5] Black frame extension ceiling reached"
+                                    " (10 min) — aborting load wait")
+                                return False, 0.0
+                            _new_start = max(_start, time.time() - _MAX_WAIT + 30)
+                            _ext_added = max(0.0, _new_start - _start)
+                            _black_frame_total_extended_s += _ext_added
+                            _start = _new_start
                         time.sleep(2.0)
                         continue
+                    else:
+                        _consecutive_black = 0
                 except Exception:
                     pass
 
@@ -4372,23 +4357,19 @@ class RelicBotApp(tk.Tk):
             try:
                 _img = screen_capture.capture(region)
                 if screen_capture.is_black_frame(_img):
-                    if not _game_rendered:
-                        # Still in initial loading — extend timeout as before.
+                    _consecutive_black += 1
+                    if not _game_rendered and _consecutive_black >= _BLACK_SUSTAINED_THRESHOLD:
                         _ext_remaining = _BLACK_FRAME_CEILING_S - _black_frame_total_extended_s
                         if _ext_remaining > 0:
                             _new_start = max(_start, time.time() - _MAX_WAIT + 30)
                             _ext_added = max(0.0, _new_start - _start)
                             _black_frame_total_extended_s += _ext_added
                             _start = _new_start
-                        if _cycle == 1 or _cycle % 5 == 0:
-                            self._log(
-                                "[Phase -0.5] Black frame detected — "
-                                "monitor may be off. Waiting for signal…")
-                    # Once game has been seen (_game_rendered=True), brief
-                    # black frames from menu transitions are normal — do NOT
-                    # revert to State A (would trigger F-spam on loaded game).
-                    time.sleep(2.0)
+                    # Brief black frames (menu transitions) are ignored.
+                    # State B is never reverted — game was confirmed rendered.
+                    time.sleep(1.0)
                     continue
+                _consecutive_black = 0
                 _equip_found = relic_analyzer.check_text_visible(
                     _img, "equipment", top_fraction=0.15)
                 # Fallback: if OCR can't find "equipment" text, check whether
