@@ -7378,6 +7378,42 @@ class RelicBotApp(tk.Tk):
         self._log(f"  Safe buy path used     : {self._batch_safe_path_count} iter(s)")
         self._log(f"  Avg settle poll depth  : {_avg_poll}  (1.0 = instant, 8 = worst)")
         self._log(f"  Final gap mult         : {self._perf_gap_mult:.3f}×")
+        # ── Post-run diagnostic guidance ──────────────────────────────── #
+        # Analyze the run's reliability counters and suggest settings
+        # changes for issues the user can fix themselves.
+        _hints: list[str] = []
+        if self._batch_p0_extra > 3:
+            _hints.append(
+                "Menu navigation needed multiple retries. Make sure the game "
+                "is running in Fullscreen or Borderless Fullscreen at a "
+                "standard 16:9 resolution (1920x1080 recommended).")
+        if self._batch_settle_retries > 5:
+            _hints.append(
+                "Settle detection was slow (OCR contention). Try reducing "
+                "the Additional CPU Workers count or switching to Standard mode.")
+        if self._perf_gap_mult > 1.5:
+            _hints.append(
+                "System slowness detected (gap multiplier "
+                f"{self._perf_gap_mult:.1f}x). Enable Conservative Timing "
+                "in Batch Mode Settings if not already on.")
+        _diag_ev = self._diag._ev if self._diag else {}
+        _buyq_fails = (_diag_ev.get("buy_qty_unrecoverable", 0)
+                       + _diag_ev.get("buy_qty_ocr_fail", 0))
+        if _buyq_fails > 3:
+            _hints.append(
+                "Multiple buy-quantity read failures occurred. If using "
+                "Async mode, try Standard mode to reduce CPU contention "
+                "during buy cycles. Conservative Timing also helps.")
+        _input_drops = _diag_ev.get("advance_drop", 0)
+        if _input_drops > 10:
+            _hints.append(
+                f"{_input_drops} input drops detected during relic scanning. "
+                "Consider lowering worker count or enabling Conservative "
+                "Timing to give inputs more room.")
+        if _hints:
+            self._log("[Suggestions]")
+            for _h in _hints:
+                self._log(f"  - {_h}")
         self._log("=" * 60)
 
         self._log(
