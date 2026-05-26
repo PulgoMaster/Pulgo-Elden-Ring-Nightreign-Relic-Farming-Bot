@@ -7397,22 +7397,19 @@ class RelicBotApp(tk.Tk):
         if (self._batch_settle_retries > 5
                 and _using_async and _using_workers and _no_gpu):
             _hints.append(
-                "Settle detection was slow — this typically happens when "
-                "multiple CPU workers compete for OCR during input phases. "
-                "Reducing worker count or switching to Standard mode "
-                "may help on CPU-only setups.")
-        # Buy-qty failures: only flag if async mode (workers cause contention)
+                "Settle detection may have been slowed by CPU workers "
+                "competing for OCR. Try reducing the worker count or "
+                "switching to Standard mode and see if that helps.")
         if _buyq_fails > 3 and _using_async:
             _hints.append(
-                "Multiple buy-quantity read failures occurred while running "
-                "in Async mode. Standard mode runs OCR sequentially and "
-                "avoids input contention during buy cycles.")
-        # Input drops: only flag if workers are actively causing GPU stalls
+                "Some buy-quantity reads failed — this can happen when "
+                "Async workers add CPU load during buy cycles. Try "
+                "Standard mode and see if the read failures go away.")
         if _input_drops > 10 and _gpu_stall_total > 5000:
             _hints.append(
-                f"{_input_drops} input drops correlated with "
-                f"{_gpu_stall_total/1000:.1f}s of GPU stall time. "
-                "Lowering worker count reduces GPU contention.")
+                f"{_input_drops} input drops may be related to GPU "
+                f"contention ({_gpu_stall_total/1000:.1f}s stall time). "
+                "Try lowering the worker count and see if that helps.")
         if _hints:
             self._log("[Suggestions]")
             for _h in _hints:
