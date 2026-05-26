@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.8.4] — 2026-04-20 — IN-UI UPDATER + UI POLISH
+
+### In-UI Update button
+- New "Update" button at the end of the Profile row. Click it, pick a downloaded RelicBot ZIP, and the bot closes itself so the embedded PowerShell updater can replace the EXE in place. Profiles, sequences, save backups, GPU torch, calibration, and timing data are all preserved.
+- Legacy `Update.bat` + `Update.ps1` sidecars are no longer shipped. The updater script is embedded inside the EXE (`ui/updater_script.py`) and written to `%TEMP%` when the button is clicked.
+- The embedded updater uses `-WaitForBot`: it polls for RelicBot.exe to exit for up to 30 seconds before touching files, so there's no race with the bot's own file lock.
+- When the updater finishes, RelicBot relaunches automatically.
+
+### Cross-flavor protection
+- New `build_flavor.txt` sidecar shipped alongside the EXE (contents: `mainline` or `ce`). The in-UI updater peeks the same file inside the update ZIP and refuses if the flavors don't match, so a mainline user can't accidentally brick their install with a CE ZIP (and vice versa).
+
+### Profile management polish
+- **"Save" gives clear feedback.** Successful saves show a green "Profile 'X' saved" toast; failures show a red error toast. Clicking Save with no profile selected no longer silently falls through to Save As — it pops a toast explaining to use Save As instead.
+- **"Restore Defaults" now deselects the active profile** after the reset. Prevents accidentally overwriting a real profile with the blank defaults on the next Save click.
+- **"Create" button removed.** Save As + Restore Defaults covers the same workflow in fewer clicks.
+
+### Support + Resources panels redesign
+- The old single Resources row is now two side-by-side panels at the bottom of the main tab. Left panel ("Support") holds GitHub Page + NexusMods Page buttons. Right panel ("Resources") holds the Relic Draw Rate math doc, Installation / Setup guide buttons, video walkthrough links, Ko-fi button, and the "Made by Pulgo" credit.
+- Support-channel prompts make it obvious where to report issues or request features (previously just a blue link in the bottom credit row).
+
+### Under the hood
+- `_BUILD_IS_CE` boolean constant in `ui/app.py` drives CE-specific URLs + title. Mainline value is `False`; the CE branch flips it to `True`.
+
+---
+
 ## [1.8.3] — 2026-04-19 — CUSTOM LAUNCHER + BRANCHING MODE + UI POLISH
 
 ### Custom launcher (advanced, opt-in)

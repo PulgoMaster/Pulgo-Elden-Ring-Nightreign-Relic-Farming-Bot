@@ -10,7 +10,7 @@ one committed to the repo.  If they match, the source is unmodified.
 Coverage:
     - All *.py files tracked in the repo
     - relic_bot.spec, requirements.txt, BUILD.md, CHANGELOG.md,
-      README.md, INSTALLATION.md, GUIDE.txt, Update.ps1, Update.bat
+      README.md, INSTALLATION.md, GUIDE.txt, build_flavor.txt
     - All .json sequences under sequences/
 
 Excluded:

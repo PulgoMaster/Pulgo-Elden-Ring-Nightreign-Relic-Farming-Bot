@@ -674,9 +674,11 @@ Settings" to apply them all at once.
   12. UPDATING
 ================================================================================
 
-  1. Download the new RelicBot ZIP from GitHub
-  2. Drag the ZIP file onto Update.bat (inside your RelicBot folder)
-     OR place the ZIP next to Update.bat and double-click it
+  1. Download the new RelicBot ZIP from GitHub or NexusMods
+  2. In RelicBot, click the "Update" button at the end of the Profile row
+  3. Pick the downloaded ZIP in the file dialog
+  4. RelicBot closes automatically and the updater runs in its own window
+  5. When the updater prints "Update complete!", RelicBot relaunches
 
   The updater preserves:
     - Your profiles and settings
@@ -684,6 +686,11 @@ Settings" to apply them all at once.
     - Save backups and batch output
     - Input sequences
     - Calibration data
+
+  Cross-flavor protection:
+    The updater checks the ZIP's build_flavor.txt against the running EXE.
+    A mainline ZIP cannot update a CE install (and vice versa) — you'll
+    get a clear error message instead of a broken mixed install.
 
 
 ================================================================================

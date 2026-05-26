@@ -138,9 +138,12 @@ To claim a relic, copy the `NR0000.sl2` from its iteration folder over your exis
 
 When a new version is released:
 
-1. Download the new `RelicBot_vX.Y.Z.zip` from the Releases page
-2. **Drag the ZIP file onto `Update.bat`** inside your existing RelicBot folder
-   (or place the ZIP next to `Update.bat` and double-click it)
+1. Download the new `RelicBot_vX.Y.Z.zip` from the Releases page or NexusMods
+2. In RelicBot, click the **Update** button at the end of the Profile row
+3. Pick the downloaded ZIP in the file dialog — RelicBot closes automatically
+   and the updater runs in its own PowerShell window
+4. When the updater prints "Update complete!", RelicBot relaunches with the
+   new version
 
 The updater automatically preserves:
 - Your profiles and settings
@@ -150,6 +153,11 @@ The updater automatically preserves:
 - Calibration data
 
 You do not need to reconfigure anything after updating.
+
+**Cross-flavor protection:** the updater reads `build_flavor.txt` inside
+the ZIP to confirm the ZIP matches the build you're running (mainline vs.
+CE). You'll get a clear error if the flavors don't match instead of
+silently ending up with a broken mixed install.
 
 ---
 

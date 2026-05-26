@@ -20,9 +20,12 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
+import uuid
+import zipfile
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from pynput import keyboard as _kb
@@ -47,7 +50,12 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.8.5"
+
+# Cross-flavor flag. Mainline = False, CE branch flips this to True.
+# Drives title string + support-link routing so the CE build deep-links to
+# its own branch on GitHub instead of master.
+_BUILD_IS_CE = False
 
 
 def _detect_steam_exe(game_exe: str = "") -> str:
@@ -817,7 +825,11 @@ class RelicBotApp(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        _canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0, bg=theme.BG)
+        # Canvas bg must match the inner ttk.Frame's bg (theme.SURFACE) so
+        # that pixels briefly exposed during scroll don't flash the darker
+        # theme.BG color. Mismatched bg here was the root cause of the
+        # scrolling-artifact bug where widgets appeared to leave trails.
+        _canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0, bg=theme.SURFACE)
         _vsb = ttk.Scrollbar(self, orient="vertical", command=_canvas.yview)
         _canvas.configure(yscrollcommand=_vsb.set)
         _vsb.grid(row=0, column=1, sticky="ns")
@@ -864,19 +876,29 @@ class RelicBotApp(tk.Tk):
         )
         self._profile_cb.grid(row=0, column=1, sticky="ew", **pad)
         self._profile_cb.bind("<<ComboboxSelected>>", lambda _e: self._load_profile())
-        ttk.Button(profile_frame, text="Create", command=self._create_profile).grid(row=0, column=2, **pad)
-        ttk.Button(profile_frame, text="Save", command=self._save_profile).grid(row=0, column=3, **pad)
-        ttk.Button(profile_frame, text="Save As…", command=self._save_profile_as).grid(row=0, column=4, **pad)
-        ttk.Button(profile_frame, text="Delete", command=self._delete_profile).grid(row=0, column=5, **pad)
-        ttk.Button(profile_frame, text="Restore Defaults", command=self._reset_to_defaults).grid(row=0, column=6, **pad)
+        ttk.Button(profile_frame, text="Save", command=self._save_profile).grid(row=0, column=2, **pad)
+        ttk.Button(profile_frame, text="Save As…", command=self._save_profile_as).grid(row=0, column=3, **pad)
+        ttk.Button(profile_frame, text="Delete", command=self._delete_profile).grid(row=0, column=4, **pad)
+        ttk.Button(profile_frame, text="Restore Defaults", command=self._reset_to_defaults).grid(row=0, column=5, **pad)
         _export_diag_btn = ttk.Button(
             profile_frame, text="Export Diagnostics", command=self._export_diagnostics,
         )
-        _export_diag_btn.grid(row=0, column=7, **pad)
+        _export_diag_btn.grid(row=0, column=6, **pad)
         _Tooltip(_export_diag_btn,
                  "Generates a small diagnostics text file with system info, GPU status,\n"
                  "install logs, and recent run data. Useful for diagnosing issues without\n"
                  "transferring the full bot folder.")
+
+        _update_btn = ttk.Button(
+            profile_frame, text="Update", command=self._run_updater,
+        )
+        _update_btn.grid(row=0, column=7, **pad)
+        _Tooltip(_update_btn,
+                 "Update RelicBot to a newer version.\n"
+                 "Click to choose a downloaded RelicBot*.zip file.\n"
+                 "RelicBot will close automatically — profiles, sequences, and GPU\n"
+                 "acceleration are preserved.\n\n"
+                 "You can find the latest releases on the GitHub or NexusMods page.")
 
         # Pre-initialize vars that are referenced by multiple sections below
         self.batch_output_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "batch_output"))
@@ -1470,11 +1492,22 @@ class RelicBotApp(tk.Tk):
             GPU on without Hybrid = exactly 1 GPU worker, no CPU workers.
             Hybrid on without Additional CPU Workers = 1 GPU + 1 CPU.
             Hybrid on WITH Additional CPU Workers = 1 GPU + N CPU (capped at 4).
+            Pure standard mode (no async/backlog/hybrid) = workers unused, grayed.
             """
-            _gpu = self._gpu_accel_var.get()
-            _hyb = self._hybrid_var.get()
+            _gpu     = self._gpu_accel_var.get()
+            _hyb     = self._hybrid_var.get()
+            _async   = self._async_enabled_var.get()
+            _backlog = self._backlog_mode_var.get()
+            # Workers are only consumed by Async, Backlog, or Hybrid paths.
+            # In pure standard mode they're dead weight — gray out so users
+            # don't waste RAM on an unused setting.
+            _no_consumer = not (_async or _backlog or _hyb)
             if _gpu and not _hyb:
                 # GPU-only mode — no CPU workers
+                bf_chk.config(state="disabled")
+                self._parallel_spin.configure(state="disabled")
+            elif _no_consumer:
+                # Pure standard mode — workers never dispatched, gray out
                 bf_chk.config(state="disabled")
                 self._parallel_spin.configure(state="disabled")
             else:
@@ -1534,6 +1567,9 @@ class RelicBotApp(tk.Tk):
         self._hybrid_var.trace_add("write", _update_async_sub_state)
         self._gpu_always_analyze_var.trace_add("write", _update_async_sub_state)
         self._smart_throttle_var.trace_add("write", _update_async_sub_state)
+        # Backlog toggling needs to re-run this so the workers spinbox
+        # gray state picks up the new "no consumer" condition.
+        self._backlog_mode_var.trace_add("write", _update_async_sub_state)
         # Branching toggling needs to re-run this so hybrid eligibility
         # picks up the new branching state (branching=on forces hybrid off).
         self._branching_mode_var.trace_add("write", _update_async_sub_state)
@@ -2182,51 +2218,132 @@ class RelicBotApp(tk.Tk):
         theme.style_text(self.log_box)
         self.log_box.grid(row=0, column=0, **pad)
 
-        # ── Resources ───────────────────────────────────────────────── #
-        res_frame = ttk.LabelFrame(inner, text="Resources")
-        res_frame.grid(row=11, column=0, sticky="ew", **pad)
+        # ── Support + Resources (side-by-side panels) ───────────────── #
+        # CE build deep-links GitHub entries to the uncapped-buy-ce branch so
+        # CE users land on the branch that matches the EXE they're running.
+        _gh_branch = "uncapped-buy-ce" if _BUILD_IS_CE else "master"
+        _gh_root = "https://github.com/PulgoMaster/Pulgo-Elden-Ring-Nightreign-Relic-Farming-Bot"
+        _github_url  = f"{_gh_root}/tree/{_gh_branch}" if _BUILD_IS_CE else _gh_root
+        _nexus_url   = "https://www.nexusmods.com/eldenringnightreign/mods/648?tab=description"
+        _install_url = f"{_gh_root}/blob/{_gh_branch}/INSTALLATION.md"
+        _setup_url   = f"{_gh_root}/blob/{_gh_branch}/SETUP.md"
+        _yt_demo     = "https://www.youtube.com/watch?v=vXJouNHcaC8"
+        _yt_setup    = "https://www.youtube.com/watch?v=qbmUDL8TH5U"
 
-        ttk.Button(
-            res_frame,
-            text="Relic Draw Rate Mathematics",
-            command=self._open_draw_rate_doc,
-        ).grid(row=0, column=0, **pad)
+        def _open_url(url: str) -> None:
+            import webbrowser as _wb
+            _wb.open(url)
+
+        def _make_link(parent: tk.Widget, text: str, url: str) -> None:
+            lbl = ttk.Label(
+                parent, text=text,
+                foreground="#4a90e2", cursor="hand2",
+                font=("Segoe UI", 9, "underline"),
+            )
+            lbl.pack(anchor="w")
+            lbl.bind("<Button-1>", lambda _e, u=url: _open_url(u))
+
+        _panel_row = ttk.Frame(inner)
+        _panel_row.grid(row=11, column=0, sticky="ew", **pad)
+        _panel_row.columnconfigure(0, weight=0)   # Support — fixed-ish
+        _panel_row.columnconfigure(1, weight=1)   # Resources — expands
+
+        # ─ Support panel (left) ──────────────────────────────────────
+        support_frame = ttk.LabelFrame(_panel_row, text="Support")
+        support_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         ttk.Label(
-            res_frame,
+            support_frame,
+            text="To report issues or request features, visit:",
+            foreground=theme.ACCENT,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+
+        _support_links = ttk.Frame(support_frame)
+        _support_links.pack(anchor="w", padx=16, pady=(0, 10))
+        ttk.Button(
+            _support_links, text="GitHub Page",
+            command=lambda: _open_url(_github_url),
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            _support_links, text="NexusMods Page",
+            command=lambda: _open_url(_nexus_url),
+        ).pack(side="left")
+
+        # ─ Resources panel (right) ───────────────────────────────────
+        # Sticky="nsw" (not "nsew") keeps the frame's own width tight so cols
+        # pack left-to-right without a weighted gap shoving Ko-fi to the edge.
+        res_frame = ttk.LabelFrame(_panel_row, text="Resources")
+        res_frame.grid(row=0, column=1, sticky="nsw")
+
+        # Col 0: Relic Draw Rate math doc button + description.
+        _res_col0 = ttk.Frame(res_frame)
+        _res_col0.grid(row=0, column=0, sticky="nw", padx=8, pady=8)
+        ttk.Button(
+            _res_col0, text="Relic Draw Rate Mathematics",
+            command=self._open_draw_rate_doc,
+        ).pack(anchor="w")
+        ttk.Label(
+            _res_col0,
             text="In-depth probability analysis of relic passive draw rates, "
                  "category exclusion mechanics, and odds calculations.",
             foreground=theme.TEXT_MUTED,
             font=("Segoe UI", 8),
-            wraplength=520,
+            wraplength=240,
             justify="left",
-        ).grid(row=0, column=1, sticky="w", padx=(0, 8))
+        ).pack(anchor="w", pady=(4, 0))
 
-        # ── Credit + Ko-fi ──────────────────────────────────────────── #
-        _credit_row = ttk.Frame(inner)
-        _credit_row.grid(row=10, column=0, sticky="e", padx=12, pady=(0, 4))
+        # Col 1: Text guides — Installation + Setup doc buttons under a header.
+        _res_col1 = ttk.Frame(res_frame)
+        _res_col1.grid(row=0, column=1, sticky="nw", padx=8, pady=8)
+        ttk.Label(
+            _res_col1, text="Text guides:",
+            foreground=theme.ACCENT,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Button(
+            _res_col1, text="Installation Guide",
+            command=lambda: _open_url(_install_url),
+        ).pack(anchor="w", pady=(0, 2))
+        ttk.Button(
+            _res_col1, text="Setup Guide",
+            command=lambda: _open_url(_setup_url),
+        ).pack(anchor="w")
 
-        def _open_kofi():
-            import webbrowser as _wb
-            _wb.open("https://ko-fi.com/G2G41XMFPO")
+        # Col 2: Video guides — YouTube walkthrough links under a header.
+        _res_col2 = ttk.Frame(res_frame)
+        _res_col2.grid(row=0, column=2, sticky="nw", padx=8, pady=8)
+        ttk.Label(
+            _res_col2, text="Video guides:",
+            foreground=theme.ACCENT,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+        _make_link(_res_col2, "▸ Demo video", _yt_demo)
+        _make_link(_res_col2, "▸ Setup walkthrough", _yt_setup)
+
+        # Col 3: Ko-fi button + "Made by Pulgo" credit.
+        _res_col3 = ttk.Frame(res_frame)
+        _res_col3.grid(row=0, column=3, sticky="ne", padx=12, pady=8)
 
         _kofi_btn = tk.Label(
-            _credit_row,
+            _res_col3,
             text="☕ Support on Ko-fi",
             foreground="#ffffff",
             background="#72a4f2",
-            font=("Segoe UI", 8, "bold"),
-            padx=8, pady=2,
+            font=("Segoe UI", 9, "bold"),
+            padx=10, pady=4,
             cursor="hand2",
         )
-        _kofi_btn.pack(side="right", padx=(8, 0))
-        _kofi_btn.bind("<Button-1>", lambda _e: _open_kofi())
+        _kofi_btn.pack(anchor="e", pady=(0, 6))
+        _kofi_btn.bind("<Button-1>", lambda _e: _open_url("https://ko-fi.com/G2G41XMFPO"))
         _kofi_btn.bind("<Enter>", lambda _e: _kofi_btn.configure(background="#5a8edf"))
         _kofi_btn.bind("<Leave>", lambda _e: _kofi_btn.configure(background="#72a4f2"))
 
-        ttk.Label(_credit_row, text="Made by Pulgo",
-                  foreground=theme.TEXT_MUTED,
-                  font=("Segoe UI", 8)).pack(side="right")
+        ttk.Label(
+            _res_col3, text="Made by Pulgo",
+            foreground=theme.TEXT_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="e")
 
         # Auto-load standard sequences after UI is built
         self.after(100, self._auto_load_sequences)
@@ -2738,12 +2855,16 @@ class RelicBotApp(tk.Tk):
     def _on_parallel_toggle(self):
         """Enable/disable the workers spinbox based on the Additional CPU Workers checkbox.
 
-        Spinbox is always disabled when GPU is on without Hybrid — in that mode
-        the GPU worker runs alone and CPU worker count is ignored.
+        Spinbox is always disabled when:
+          • GPU is on without Hybrid (GPU worker runs alone)
+          • Pure standard mode with no async/backlog/hybrid (workers unused)
         """
         _gpu_locked = (self._gpu_accel_var.get()
                        and not self._hybrid_var.get())
-        if _gpu_locked:
+        _no_consumer = not (self._async_enabled_var.get()
+                            or self._backlog_mode_var.get()
+                            or self._hybrid_var.get())
+        if _gpu_locked or _no_consumer:
             state = "disabled"
         else:
             state = "normal" if self._parallel_enabled_var.get() else "disabled"
@@ -3019,6 +3140,174 @@ class RelicBotApp(tk.Tk):
             return
         self.custom_launcher_path_var.set(path)
         self._save_app_config()
+
+    # ------------------------------------------------------------------ #
+    #  UI FEEDBACK
+    # ------------------------------------------------------------------ #
+
+    def _show_toast(self, message: str, kind: str = "success", duration: int = 1500) -> None:
+        """Show a brief auto-dismissing notification near the top of the app window.
+
+        kind='success' uses a green accent; kind='error' uses red and defaults
+        to a longer duration so the user has time to read it.
+        """
+        if kind == "error" and duration == 1500:
+            duration = 3500
+        bg = "#2d7a3e" if kind == "success" else "#a83232"
+        try:
+            toast = tk.Toplevel(self)
+            toast.overrideredirect(True)
+            toast.attributes("-topmost", True)
+            toast.configure(bg=bg)
+            tk.Label(
+                toast, text=message, bg=bg, fg="#ffffff",
+                font=("Segoe UI", 10, "bold"),
+                padx=16, pady=8, wraplength=420, justify="center",
+            ).pack()
+            self.update_idletasks()
+            toast.update_idletasks()
+            x = self.winfo_rootx() + max(0, (self.winfo_width() - toast.winfo_width()) // 2)
+            y = self.winfo_rooty() + 80
+            toast.geometry(f"+{x}+{y}")
+            self.after(duration, toast.destroy)
+        except Exception:
+            # If the toast can't be drawn (e.g. during teardown), fall back to
+            # a plain log entry so the user isn't left without feedback.
+            try:
+                self._log(message)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ #
+    #  IN-UI UPDATER
+    # ------------------------------------------------------------------ #
+
+    def _run_updater(self) -> None:
+        """Entry point for the profile-row Update button.
+
+        Flow: confirm → pick ZIP → verify build flavor matches the running
+        EXE → write the embedded PowerShell updater to %TEMP% → spawn it as
+        a detached process with -WaitForBot → exit RelicBot cleanly so the
+        updater can replace files without a lock.
+        """
+        if not messagebox.askyesno(
+            "Update RelicBot",
+            "This will close RelicBot to perform the update.\n\n"
+            "Profiles, sequences, and GPU acceleration will be preserved.\n\n"
+            "Continue?",
+        ):
+            return
+
+        # File picker — default to Downloads, fall back to home dir.
+        _default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.isdir(_default_dir):
+            _default_dir = os.path.expanduser("~")
+        zip_path = filedialog.askopenfilename(
+            title="Select RelicBot update ZIP",
+            initialdir=_default_dir,
+            filetypes=[("RelicBot ZIP", "RelicBot*.zip"), ("All zips", "*.zip")],
+        )
+        if not zip_path:
+            return
+
+        # Peek build_flavor.txt inside the ZIP before committing to the
+        # update.  If the ZIP is a different flavor than the running EXE,
+        # the clean-replace step would leave the user with a broken mixed
+        # install — refuse before we touch anything.
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                flavor_entry = None
+                for name in zf.namelist():
+                    if os.path.basename(name).lower() == "build_flavor.txt":
+                        flavor_entry = name
+                        break
+                if flavor_entry is None:
+                    messagebox.showerror(
+                        "Invalid ZIP",
+                        "This ZIP does not contain a build_flavor.txt file.\n"
+                        "It may be a pre-v1.8.4 release. Download a newer\n"
+                        "RelicBot ZIP from GitHub and try again.",
+                    )
+                    return
+                zip_flavor = zf.read(flavor_entry).decode("utf-8").strip().lower()
+        except zipfile.BadZipFile:
+            messagebox.showerror(
+                "Invalid ZIP", "The selected file is not a valid ZIP archive."
+            )
+            return
+        except Exception as e:
+            messagebox.showerror("Read Error", f"Could not read ZIP: {e}")
+            return
+
+        current_flavor = "ce" if _BUILD_IS_CE else "mainline"
+        if zip_flavor != current_flavor:
+            messagebox.showerror(
+                "Wrong Build Flavor",
+                f"This ZIP is the '{zip_flavor}' build, but you're running "
+                f"the '{current_flavor}' build.\n\n"
+                "Mixing flavors would break the install. Download the correct "
+                "ZIP from GitHub and try again.",
+            )
+            return
+
+        # Write the embedded PowerShell updater to a temp file.
+        try:
+            from ui.updater_script import UPDATER_PS1
+            tmp_ps1 = os.path.join(
+                tempfile.gettempdir(),
+                f"RelicBotUpd_{uuid.uuid4().hex[:8]}.ps1",
+            )
+            with open(tmp_ps1, "w", encoding="utf-8") as f:
+                f.write(UPDATER_PS1)
+        except Exception as e:
+            messagebox.showerror("Updater Error", f"Could not write updater script: {e}")
+            return
+
+        # Install directory = folder containing RelicBot.exe when frozen,
+        # repo root when running from source.
+        install_dir = (
+            os.path.dirname(sys.executable)
+            if getattr(sys, "frozen", False) else _REPO_ROOT
+        )
+
+        # Spawn the updater as a detached process so it outlives RelicBot.
+        # CREATE_NEW_CONSOLE gives it its own visible window so the user can
+        # watch progress and confirm the update completed.
+        CREATE_NEW_CONSOLE     = 0x00000010
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        try:
+            subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-ExecutionPolicy", "Bypass",
+                    "-NoProfile",
+                    "-File", tmp_ps1,
+                    "-ZipPath", zip_path,
+                    "-InstallDir", install_dir,
+                    "-WaitForBot",
+                ],
+                creationflags=CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+            )
+        except Exception as e:
+            # Clean up the temp updater script — if Popen failed, the script
+            # will never be executed and nothing else will delete it.
+            try:
+                os.remove(tmp_ps1)
+            except Exception:
+                pass
+            messagebox.showerror("Updater Error", f"Could not launch updater: {e}")
+            return
+
+        # Exit RelicBot cleanly so Windows releases the EXE's file lock.
+        # The updater is polling for RelicBot.exe to disappear and will
+        # resume as soon as the process group exits.
+        self._log("Update initiated — RelicBot will close now.")
+        try:
+            self.destroy()
+        except Exception:
+            pass
+        sys.exit(0)
 
     # ------------------------------------------------------------------ #
     #  PROFILE MANAGEMENT
@@ -3410,39 +3699,6 @@ class RelicBotApp(tk.Tk):
         except Exception:
             pass  # No last profile or corrupt file — start with defaults
 
-    def _create_profile(self):
-        """Create a new blank profile with a user-chosen name."""
-        from tkinter import simpledialog
-        name = simpledialog.askstring("Create Profile", "Profile name:", parent=self)
-        if not name or not name.strip():
-            return
-        name = name.strip()
-        # Check if it already exists
-        if os.path.exists(self._profile_path(name)):
-            messagebox.showwarning("Profile Exists",
-                                   f"A profile named '{name}' already exists.\n"
-                                   "Use Save to overwrite it, or choose a different name.")
-            return
-        # Reset profile to blank state. Guard the mode-type change with
-        # _loading_profile so _on_relic_type_change doesn't stash the stale
-        # pre-reset UI back into _mode_data["normal"], corrupting the blank.
-        self._loading_profile = True
-        try:
-            self._mode_data = {
-                "normal": {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
-                "night":  {"criteria": {}, "blocked_curses": [], "excluded_passives": []},
-            }
-            self.relic_type_var.set("night")
-            self._on_relic_type_change()
-            for var in self._color_vars.values():
-                var.set(True)
-            self._save_exclusion_matches_var.set(False)
-            self._restore_mode_data("night")
-        finally:
-            self._loading_profile = False
-        self._write_profile(name)
-        self._log(f"Created blank profile '{name}'.")
-
     def _load_profile(self):
         name = self._profile_var.get().strip()
         if not name:
@@ -3465,7 +3721,14 @@ class RelicBotApp(tk.Tk):
     def _save_profile(self):
         name = self._profile_var.get().strip()
         if not name:
-            self._save_profile_as()
+            # Don't silently fall through to Save As. Tell the user what's
+            # wrong and point them at the correct button so the next click
+            # lands somewhere intentional (e.g. after Restore Defaults).
+            self._show_toast(
+                "Save unsuccessful — no profile is selected.\n"
+                "Use 'Save As' to create a new profile.",
+                kind="error",
+            )
             return
         self._write_profile(name)
 
@@ -3495,6 +3758,7 @@ class RelicBotApp(tk.Tk):
             self._refresh_profile_list()
             self._profile_var.set(name)
             self._log(f"Profile '{name}' saved to {path}.")
+            self._show_toast(f"Profile '{name}' saved")
         except Exception as e:
             # Best-effort cleanup of any leftover tmp file
             try:
@@ -3502,7 +3766,7 @@ class RelicBotApp(tk.Tk):
                     os.remove(_tmp)
             except Exception:
                 pass
-            messagebox.showerror("Save Error", str(e))
+            self._show_toast(f"Save failed: {e}", kind="error", duration=4500)
 
     def _write_profile(self, name: str):
         os.makedirs(_PROFILES_DIR, exist_ok=True)
@@ -3520,6 +3784,7 @@ class RelicBotApp(tk.Tk):
             self._refresh_profile_list()
             self._profile_var.set(name)
             self._log(f"Profile '{name}' saved.")
+            self._show_toast(f"Profile '{name}' saved")
             try:
                 with open(_LAST_PROFILE_FILE, "w", encoding="utf-8") as _lf:
                     _lf.write(name)
@@ -3532,7 +3797,7 @@ class RelicBotApp(tk.Tk):
                     os.remove(_tmp)
             except Exception:
                 pass
-            messagebox.showerror("Save Error", str(e))
+            self._show_toast(f"Save failed: {e}", kind="error", duration=4500)
 
     def _delete_profile(self):
         name = self._profile_var.get().strip()
@@ -3585,6 +3850,9 @@ class RelicBotApp(tk.Tk):
         finally:
             self._loading_profile = False
         self._auto_load_sequences()
+        # Deselect the current profile so an immediate Save click can't
+        # overwrite it with the defaults. User must pick Save As explicitly.
+        self._profile_var.set("")
         self._log("Profile settings restored to defaults.")
 
     # ------------------------------------------------------------------ #
@@ -4003,6 +4271,7 @@ class RelicBotApp(tk.Tk):
         _cycle = 0
         _black_frame_total_extended_s = 0.0
         _BLACK_FRAME_CEILING_S = 600.0
+        _game_rendered = False
 
         self._log("[Phase -0.5] Adaptive load wait — watching for in-game state…")
 
@@ -4022,21 +4291,76 @@ class RelicBotApp(tk.Tk):
             _cycle += 1
             self._set_status(
                 f"Adaptive load wait — cycle {_cycle}…", "orange")
-            # Focus the game window before each F burst so keypresses land in the
-            # game rather than whatever window has focus (e.g. desktop, notification).
             if exe_name:
                 self._focus_game_window(exe_name, timeout=2.0)
 
-            # ── F-spam burst ──────────────────────────────────────────── #
-            _burst_end = time.time() + _F_BURST
-            while time.time() < _burst_end:
+            if not _game_rendered:
+                # ── State A: Loading/splash phase ─────────────────────── #
+                # Check if screen is still black BEFORE pressing anything.
+                # If black, just wait — no point spamming keys at a loading
+                # screen that can't accept input.
+                try:
+                    _pre_img = screen_capture.capture(region)
+                    if screen_capture.is_black_frame(_pre_img):
+                        if _cycle == 1 or _cycle % 5 == 0:
+                            self._log(
+                                "[Phase -0.5] Black frame detected — monitor may be off. "
+                                "Waiting for signal…")
+                            if self._diag:
+                                try:
+                                    self._diag.log_load(
+                                        event="black_frame_detected",
+                                        total_extended_s=_black_frame_total_extended_s)
+                                except Exception:
+                                    pass
+                        _ext_remaining = _BLACK_FRAME_CEILING_S - _black_frame_total_extended_s
+                        if _ext_remaining <= 0:
+                            self._log(
+                                "[Phase -0.5] Black frame extension ceiling reached"
+                                " (10 min) — aborting load wait")
+                            if self._diag:
+                                try:
+                                    self._diag.log_load(
+                                        event="ceiling_reached",
+                                        total_extended_s=_black_frame_total_extended_s)
+                                except Exception:
+                                    pass
+                            return False, 0.0
+                        _new_start = max(_start, time.time() - _MAX_WAIT + 30)
+                        _ext_added = max(0.0, _new_start - _start)
+                        _black_frame_total_extended_s += _ext_added
+                        if _ext_added > 0 and self._diag:
+                            try:
+                                self._diag.log_load(
+                                    event="black_frame_extend",
+                                    total_extended_s=_black_frame_total_extended_s)
+                            except Exception:
+                                pass
+                        _start = _new_start
+                        time.sleep(2.0)
+                        continue
+                except Exception:
+                    pass
+
+                # Screen is not black — splash/title screens visible.
+                # F-spam to advance through them.
+                _burst_end = time.time() + _F_BURST
+                while time.time() < _burst_end:
+                    if not self.bot_running:
+                        return False, 0.0
+                    self.player.tap("f", hold=0.05)
+                    time.sleep(_F_INTERVAL)
+
+                time.sleep(_PRE_ESC)
                 if not self.bot_running:
                     return False, 0.0
-                self.player.tap("f", hold=0.05)
-                time.sleep(_F_INTERVAL)
+            else:
+                # ── State B: Game rendered — gentle ESC probing ───────── #
+                # Game world is loaded. No F-spam (would interact with NPCs).
+                # Just press ESC to open Equipment menu and check.
+                time.sleep(0.5)
 
-            # ── Settle → ESC → settle → OCR ──────────────────────────── #
-            time.sleep(_PRE_ESC)
+            # ── ESC → settle → OCR check (both states) ───────────────── #
             if not self.bot_running:
                 return False, 0.0
 
@@ -4047,49 +4371,13 @@ class RelicBotApp(tk.Tk):
 
             try:
                 _img = screen_capture.capture(region)
-                # Detect monitor-off: if the frame is all black, the monitor
-                # may be sleeping. Don't count this as a failed detection —
-                # extend the timeout and keep trying.
                 if screen_capture.is_black_frame(_img):
-                    if _cycle == 1 or _cycle % 5 == 0:
-                        self._log(
-                            "[Phase -0.5] Black frame detected — monitor may be off. "
-                            "Waiting for signal…")
-                        if self._diag:
-                            try:
-                                self._diag.log_load(
-                                    event="black_frame_detected",
-                                    total_extended_s=_black_frame_total_extended_s)
-                            except Exception:
-                                pass
-                    # Extend timeout so the bot doesn't abort while monitor sleeps,
-                    # but cap cumulative extension so we don't wait forever.
-                    _ext_remaining = _BLACK_FRAME_CEILING_S - _black_frame_total_extended_s
-                    if _ext_remaining <= 0:
-                        self._log(
-                            "[Phase -0.5] Black frame extension ceiling reached"
-                            " (10 min) — aborting load wait")
-                        if self._diag:
-                            try:
-                                self._diag.log_load(
-                                    event="ceiling_reached",
-                                    total_extended_s=_black_frame_total_extended_s)
-                            except Exception:
-                                pass
-                        return False, 0.0
-                    _new_start = max(_start, time.time() - _MAX_WAIT + 30)
-                    _ext_added = max(0.0, _new_start - _start)
-                    _black_frame_total_extended_s += _ext_added
-                    if _ext_added > 0 and self._diag:
-                        try:
-                            self._diag.log_load(
-                                event="black_frame_extend",
-                                total_extended_s=_black_frame_total_extended_s)
-                        except Exception:
-                            pass
-                    _start = _new_start
+                    _game_rendered = False
+                    time.sleep(2.0)
                     continue
-                if relic_analyzer.check_text_visible(_img, "equipment", top_fraction=0.15):
+                _equip_found = relic_analyzer.check_text_visible(
+                    _img, "equipment", top_fraction=0.15)
+                if _equip_found:
                     _elapsed = time.time() - _start
                     self._log(
                         f"[Phase -0.5] Equipment menu detected — in-game confirmed "
@@ -4107,10 +4395,21 @@ class RelicBotApp(tk.Tk):
                         self._log("[Phase -0.5] Game process boosted to HIGH priority.")
                     time.sleep(0.2)
                     self.player.tap("Key.esc")
-                    # Conservative Timing needs more time for the menu-close animation.
                     _p05_esc_settle = (2.5 if self._low_perf_mode_var.get() else 1.5) * max(1.0, self._perf_gap_mult)
-                    time.sleep(_p05_esc_settle)   # wait for menu to fully close before Phase 0
+                    time.sleep(_p05_esc_settle)
                     return True, _elapsed
+                if not _game_rendered:
+                    _game_rendered = True
+                    self._log(
+                        "[Phase -0.5] Game world detected — switching to gentle ESC probing.")
+                    time.sleep(3.0)
+                elif _game_rendered and _cycle > 5:
+                    # State B but equipment not found after 5+ attempts.
+                    # ESC might be closing a dialog instead of opening menu.
+                    # Press ESC once more to clear whatever's open, then the
+                    # next cycle's ESC should open the Equipment menu cleanly.
+                    self.player.tap("Key.esc")
+                    time.sleep(1.5)
             except Exception as _ce:
                 self._log(f"[Phase -0.5] OCR error: {_ce}")
 
@@ -4614,6 +4913,11 @@ class RelicBotApp(tk.Tk):
         self._branch_reset_state()
         if self._branching_mode_var.get():
             self._branch_current_reset_path = backup_path
+            if limit_type == "loops" and int(limit_value) <= 1:
+                self._log(
+                    "  Note: Branching Mode accumulates matches across iterations. "
+                    "With 1 iteration set, the run ends after the first pass — "
+                    "increase iterations to let branches form.")
         criteria = self.relic_builder.get_criteria_dict()
         criteria_summary = self.relic_builder.get_criteria_summary()
         criteria["allowed_colors"] = self._get_allowed_colors()
@@ -4732,6 +5036,31 @@ class RelicBotApp(tk.Tk):
                 except Exception:
                     pass
                 self._log(f"Batch output folder: {run_dir}")
+                # ── Run configuration summary ─────────────────────────────
+                # Passive readout so users can verify their settings at a
+                # glance and self-diagnose configuration mismatches.
+                _rtype_label = "Deep of Night" if self.relic_type_var.get() == "night" else "Normal"
+                _mode_parts = []
+                if self._branching_mode_var.get():
+                    _mode_parts.append("Branching")
+                elif self._async_enabled_var.get():
+                    if self._hybrid_var.get():
+                        _mode_parts.append("Hybrid GPU+CPU")
+                    else:
+                        _mode_parts.append("Async")
+                elif self._backlog_mode_var.get():
+                    _mode_parts.append("Backlog")
+                else:
+                    _mode_parts.append("Standard")
+                if self._gpu_accel_var.get():
+                    _mode_parts.append("GPU")
+                if self._low_perf_mode_var.get():
+                    _mode_parts.append("Conservative")
+                _custom = self.custom_launcher_enabled_var.get()
+                self._log(
+                    f"  Run config: {int(limit_value)} iteration(s) | "
+                    f"{_rtype_label} | {' + '.join(_mode_parts)}"
+                    + (f" | Custom launcher" if _custom else ""))
                 # ── Diagnostic logger ─────────────────────────────────────
                 try:
                     # Wipe any prior persisted snapshot — a new batch run is
@@ -8708,18 +9037,29 @@ class RelicBotApp(tk.Tk):
                 _p0_t_start = time.perf_counter()
 
                 # Step 1: Press M to open the Roundtable menu
-                self.player.tap("m", hold=0.10)
-
-                # Step 2: Wait for menu to appear (Expeditions highlighted)
                 from bot.screen_capture import find_highlighted_item
                 _menu_open = False
-                _menu_deadline = time.time() + 5.0
-                while self.bot_running and time.time() < _menu_deadline:
-                    _item, _br, _ = find_highlighted_item(region)
-                    if _item == "expeditions":
-                        _menu_open = True
+                for _m_attempt in range(2):
+                    if not self.bot_running:
                         break
-                    time.sleep(0.05)
+                    self.player.tap("m", hold=0.10)
+
+                    # Step 2: Wait for menu to appear (any item highlighted).
+                    # The menu usually opens on Expeditions, but may remember
+                    # the last cursor position from a prior visit. Accept any
+                    # recognized menu item as proof the menu is open.
+                    _menu_deadline = time.time() + 5.0
+                    while self.bot_running and time.time() < _menu_deadline:
+                        _item, _br, _ = find_highlighted_item(region)
+                        if _item is not None:
+                            _menu_open = True
+                            break
+                        time.sleep(0.05)
+                    if _menu_open:
+                        break
+                    # M press may have been eaten — brief settle then retry
+                    if _m_attempt == 0:
+                        time.sleep(0.5)
 
                 _p0_nav_ok = False
                 _p0_shop_ok = False

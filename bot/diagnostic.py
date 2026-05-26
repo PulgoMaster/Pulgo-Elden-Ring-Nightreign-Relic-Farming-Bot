@@ -436,8 +436,10 @@ class DiagnosticLogger:
         lines.append(f"Smart Analyze  : {_get('_smart_analyze_var', '?')}")
         lines.append(f"Backlog mode   : {_get('_backlog_mode_var', '?')}")
         lines.append(f"Intermittent   : {_get('_intermittent_backlog_var', '?')} every {_get('_intermittent_every_n_var', '?')} batch(es)")
-        lines.append(f"Brute force    : {_get('_parallel_enabled_var', '?')}")
-        lines.append(f"Parallel workers: {_get('_parallel_workers_var', '?')}")
+        lines.append(f"Hybrid mode    : {_get('_hybrid_var', '?')}")
+        lines.append(f"GPU Always AA  : {_get('_gpu_always_analyze_var', '?')}")
+        lines.append(f"Branching mode : {_get('_branching_mode_var', '?')}")
+        lines.append(f"CPU workers    : {_get('_parallel_enabled_var', '?')} ({_get('_parallel_workers_var', '?')} workers)")
         lines.append(f"Low Perf Mode  : {_get('_low_perf_mode_var', '?')}")
 
         # OCR region

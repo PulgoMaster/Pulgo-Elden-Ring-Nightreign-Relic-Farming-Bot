@@ -210,9 +210,12 @@ exe = EXE(
     icon=['assets/icon.ico'],
 )
 
-# Place the single EXE alongside the updater scripts + GUIDE in `dist/RelicBot/`.
-# Users unzip a small directory containing 4 files total (EXE, GUIDE.txt,
-# Update.ps1, Update.bat) instead of the hundreds-of-files onedir layout.
+# Place the single EXE alongside GUIDE + build_flavor in `dist/RelicBot/`.
+# Users unzip a small directory containing 3 files total (EXE, GUIDE.txt,
+# build_flavor.txt) instead of the hundreds-of-files onedir layout.  The
+# legacy Update.bat / Update.ps1 sidecars are gone as of v1.8.4 — updates
+# now go through the in-UI Update button which embeds the PowerShell
+# updater inside the EXE.
 import shutil as _shutil
 _dist_dir = _os.path.join('dist', 'RelicBot')
 _os.makedirs(_dist_dir, exist_ok=True)
@@ -225,7 +228,9 @@ try:
         _shutil.move(_exe_src, _exe_dst)
         print(f"[Spec] Moved EXE to {_exe_dst}")
     # Sidecar files that ship alongside the EXE for end users.
-    for _sidecar in ('GUIDE.txt', 'Update.ps1', 'Update.bat'):
+    # build_flavor.txt is what the in-UI updater reads from an update ZIP
+    # to enforce cross-flavor protection (mainline vs CE).
+    for _sidecar in ('GUIDE.txt', 'build_flavor.txt'):
         if _os.path.exists(_sidecar):
             _shutil.copy2(_sidecar, _os.path.join(_dist_dir, _sidecar))
 except Exception as _e:

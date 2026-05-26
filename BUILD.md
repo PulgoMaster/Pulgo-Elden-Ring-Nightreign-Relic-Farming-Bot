@@ -67,8 +67,8 @@ python -m PyInstaller relic_bot.spec --noconfirm
 :: 6. Output layout
 ::    dist\RelicBot\RelicBot.exe     — single ~300 MB self-contained EXE
 ::    dist\RelicBot\GUIDE.txt        — user guide (plain text)
-::    dist\RelicBot\Update.ps1       — in-place updater (PowerShell)
-::    dist\RelicBot\Update.bat       — updater launcher
+::    dist\RelicBot\build_flavor.txt — "mainline" or "ce"; drives cross-flavor
+::                                     rejection in the in-UI updater
 ```
 
 Total build time on a typical laptop: 3–5 minutes (dominated by
@@ -102,7 +102,9 @@ PyTorch DLL collection and bundled-model compression).
    archive. On first launch, the payload self-extracts to
    `%TEMP%\_MEI<random>\` and executes from there.
 7. **Moves the built EXE** into `dist\RelicBot\` and places
-   `GUIDE.txt`, `Update.ps1`, and `Update.bat` alongside it.
+   `GUIDE.txt` + `build_flavor.txt` alongside it. The PowerShell updater
+   is embedded inside the EXE (`ui/updater_script.py`) and written to
+   `%TEMP%` when the in-UI Update button is clicked.
 
 ---
 
@@ -112,10 +114,10 @@ PyTorch DLL collection and bundled-model compression).
 Compress-Archive -Path 'dist\RelicBot' -DestinationPath 'RelicBot_vX.Y.Z.zip'
 ```
 
-The resulting ZIP contains four files: `RelicBot.exe`, `GUIDE.txt`,
-`Update.ps1`, and `Update.bat`. The EXE is self-contained — no
-`_internal/` folder, no loose DLLs, no on-first-run downloads. The bot
-works offline from launch.
+The resulting ZIP contains three files: `RelicBot.exe`, `GUIDE.txt`,
+and `build_flavor.txt`. The EXE is self-contained — no `_internal/`
+folder, no loose DLLs, no on-first-run downloads. The bot works
+offline from launch.
 
 ---
 

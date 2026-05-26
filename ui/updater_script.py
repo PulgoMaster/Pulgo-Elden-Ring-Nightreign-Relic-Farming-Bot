@@ -1,21 +1,42 @@
-<#
-.SYNOPSIS
-    In-place RelicBot updater -- preserves GPU torch, profiles, and settings.
-.DESCRIPTION
-    Usage:
-      1. Drag-and-drop a RelicBot*.zip onto Update.bat, OR
-      2. Place the ZIP next to this script and double-click Update.bat, OR
-      3. Run from terminal: powershell -ExecutionPolicy Bypass -File Update.ps1 -ZipPath "path\to\zip"
+"""Embedded PowerShell updater script.
 
-    GPU acceleration, profiles, app config, and calibration are preserved.
-    Everything else is replaced with the new version.
+Written to %TEMP% as a .ps1 file when the user clicks the in-UI Update
+button.  The script is invoked with `-ZipPath`, `-InstallDir`, and the
+`-WaitForBot` switch so it can wait for RelicBot.exe to release its file
+lock before replacing files.
+
+Differences vs. the legacy bundled Update.ps1:
+  * Accepts `-InstallDir` instead of relying on its own folder location
+    (it lives in %TEMP%, not alongside the EXE).
+  * `-WaitForBot` polls for RelicBot.exe to exit instead of refusing when
+    the process is still alive.
+  * No self-exemption for Update.ps1 / Update.bat — the legacy files are
+    no longer shipped and get cleaned up like any other orphan.
+"""
+
+UPDATER_PS1 = r"""<#
+.SYNOPSIS
+    RelicBot in-UI updater -- runs from %TEMP% against a user-picked ZIP.
+.DESCRIPTION
+    Parameters:
+      -ZipPath     Full path to the RelicBot update ZIP.
+      -InstallDir  Target install directory (where RelicBot.exe lives).
+      -WaitForBot  If set, polls for RelicBot.exe to exit before replacing
+                   files instead of erroring out immediately.
+
+    Preserved across updates: profiles, sequences, save_backups, batch_output,
+    overlay_stats.txt, relicbot_*.json, .last_profile, gpu_upgrade_ready,
+    gpu_upgrade.log, and the ~2 GB _internal\torch\ GPU CUDA install.
+    Everything else is wiped and replaced with the new ZIP's contents.
 #>
 
 param(
-    [string]$ZipPath = ""
+    [string]$ZipPath = "",
+    [string]$InstallDir = "",
+    [switch]$WaitForBot
 )
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptDir = if ($InstallDir) { $InstallDir } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
 try {
 
@@ -23,45 +44,44 @@ Write-Host ""
 Write-Host "=== RelicBot Updater ===" -ForegroundColor Cyan
 Write-Host ""
 
-# --- Check if RelicBot is running ---
-$running = Get-Process -Name "RelicBot" -ErrorAction SilentlyContinue
-if ($running) {
-    Write-Host "ERROR: RelicBot.exe is currently running!" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "The updater cannot replace files while RelicBot is open." -ForegroundColor Yellow
-    Write-Host "Please close RelicBot completely, then run the updater again." -ForegroundColor Yellow
-    Write-Host ""
-    Read-Host "Press Enter to close"
-    exit 1
-}
-
-# --- Find the ZIP ---
-$zipFile = $null
-
-if ($ZipPath -and (Test-Path $ZipPath) -and $ZipPath -like "*.zip") {
-    $zipFile = (Resolve-Path $ZipPath).Path
-    Write-Host "ZIP provided via drag-and-drop." -ForegroundColor Green
-}
-
-if (-not $zipFile) {
-    foreach ($searchDir in @($scriptDir, (Split-Path -Parent $scriptDir))) {
-        if (-not $searchDir) { continue }
-        $found = Get-ChildItem -Path $searchDir -Filter "RelicBot*.zip" -ErrorAction SilentlyContinue |
-                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($found) { $zipFile = $found.FullName; break }
+# --- Wait for or check that RelicBot is closed ---
+if ($WaitForBot) {
+    $maxWait = 30
+    $waited = 0
+    while ((Get-Process -Name "RelicBot" -ErrorAction SilentlyContinue) -and ($waited -lt $maxWait)) {
+        if ($waited -eq 0) {
+            Write-Host "Waiting for RelicBot to close..." -ForegroundColor Yellow
+        }
+        Start-Sleep -Seconds 1
+        $waited++
+    }
+    if ((Get-Process -Name "RelicBot" -ErrorAction SilentlyContinue)) {
+        Write-Host "ERROR: RelicBot did not close within ${maxWait}s." -ForegroundColor Red
+        Write-Host "Close RelicBot manually, then re-run the update." -ForegroundColor Yellow
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+    if ($waited -gt 0) {
+        Write-Host "RelicBot closed. Proceeding with update." -ForegroundColor Green
+    }
+} else {
+    $running = Get-Process -Name "RelicBot" -ErrorAction SilentlyContinue
+    if ($running) {
+        Write-Host "ERROR: RelicBot.exe is currently running!" -ForegroundColor Red
+        Write-Host "Close RelicBot completely, then run the updater again." -ForegroundColor Yellow
+        Read-Host "Press Enter to close"
+        exit 1
     }
 }
 
-if (-not $zipFile) {
-    Write-Host "ERROR: No RelicBot*.zip found." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "How to update:" -ForegroundColor Yellow
-    Write-Host "  1. Download the new RelicBot ZIP from GitHub"
-    Write-Host "  2. Drag the ZIP file onto Update.bat"
-    Write-Host "  OR place the ZIP next to Update.bat and double-click it."
-    Write-Host ""
+# --- Validate ZIP argument ---
+if (-not $ZipPath -or -not (Test-Path $ZipPath)) {
+    Write-Host "ERROR: ZIP path was not provided or does not exist: $ZipPath" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
     exit 1
 }
+$zipFile = (Resolve-Path $ZipPath).Path
+
 Write-Host "ZIP      : $zipFile"
 Write-Host "Install  : $scriptDir"
 Write-Host ""
@@ -139,11 +159,15 @@ if ($hasGpuTorch) {
 Write-Host ""
 
 # --- Clean install ---
+# Only downloaded RelicBot*.zip files are exempt so user-downloaded ZIPs
+# don't get wiped.  The legacy Update.ps1 / Update.bat files used to be
+# self-exempt but are no longer shipped, so any leftover copies on disk
+# get cleaned up here.
 Write-Host "--- Installing new version (clean replacement) ---" -ForegroundColor Cyan
 
 $removed = 0
 Get-ChildItem -Path $scriptDir -ErrorAction SilentlyContinue | Where-Object {
-    $_.Name -ne "Update.ps1" -and $_.Name -ne "Update.bat" -and $_.Name -notlike "RelicBot*.zip"
+    $_.Name -notlike "RelicBot*.zip"
 } | ForEach-Object {
     try { Remove-Item -Recurse -Force $_.FullName; $removed++ }
     catch { Write-Host "  WARNING: Could not remove $($_.Name): $_" -ForegroundColor Yellow }
@@ -289,3 +313,11 @@ Write-Host "==============================" -ForegroundColor Cyan
 }
 
 Write-Host ""
+Read-Host "Press Enter to close this window and launch RelicBot"
+
+# --- Launch new RelicBot ---
+$newExe = Join-Path $scriptDir "RelicBot.exe"
+if (Test-Path $newExe) {
+    Start-Process -FilePath $newExe -WorkingDirectory $scriptDir
+}
+"""
