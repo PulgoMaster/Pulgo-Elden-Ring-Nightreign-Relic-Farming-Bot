@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.8.7] — 2026-07-27 — FOCUS RELIABILITY FIX + DIAGNOSTICS
+
+### Fixed: bot could stall mid-batch and abort an iteration without buying
+- On some relaunches — most noticeable during long unattended batches — the game window would come back up **without keyboard focus**. The bot's key presses then went to whatever window happened to hold focus instead of the game, so menu navigation failed with repeated "input dropped" messages and the iteration was abandoned after retries.
+- The bot now **forces the game to the true foreground and verifies it actually took focus** before sending inputs, at game-load confirmation and before shop navigation. When a relaunch comes up unfocused it recovers automatically instead of aborting.
+- Root cause: the previous focus routine asked Windows to foreground the game but never checked whether the request was honored. Windows silently refuses foreground changes requested by a background app, so the bot believed it had focus when it did not. Focus is now confirmed, retried, and escalated until the game genuinely holds it.
+- The game-load check no longer accepts a "menu is visible on screen" signal as proof of being in-game while the game lacks focus — that visual-only shortcut was what let a doomed iteration start.
+
+### Added: focus diagnostics
+- The process log now records the exact window (title + executable) that held focus whenever the bot has to re-focus the game or fails to, so any future input-loss issue is self-diagnosing.
+
+---
+
 ## [1.8.4] — 2026-04-20 — IN-UI UPDATER + UI POLISH
 
 ### In-UI Update button

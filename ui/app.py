@@ -50,7 +50,7 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.8.6"
+APP_VERSION = "1.8.7"
 
 # Cross-flavor flag. Mainline = False, CE branch flips this to True.
 # Drives title string + support-link routing so the CE build deep-links to
@@ -4148,9 +4148,51 @@ class RelicBotApp(tk.Tk):
             close_fds=True
         )
 
+    def _active_window_desc(self) -> str:
+        """Return a 'title' (exe) description of the current foreground window,
+        for diagnostics.  When inputs go missing this names the window that
+        actually holds keyboard focus instead of the game."""
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return "<no foreground window>"
+            length = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value or "<untitled>"
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            exe = "?"
+            h = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+            if h:
+                pbuf = ctypes.create_unicode_buffer(260)
+                sz = ctypes.c_ulong(260)
+                if kernel32.QueryFullProcessImageNameW(h, 0, pbuf, ctypes.byref(sz)):
+                    exe = os.path.basename(pbuf.value)
+                kernel32.CloseHandle(h)
+            return f"'{title}' ({exe})"
+        except Exception:
+            return "<foreground query failed>"
+
     def _focus_game_window(self, exe_name: str, timeout: float = 15.0) -> bool:
-        """Find the game window by process exe name and bring it to the foreground.
-        Polls until the window appears or timeout expires. Returns True on success."""
+        """Find the game window by process exe name and force it to the foreground.
+
+        Polls until the window appears (up to `timeout`), then ensures the game
+        actually holds foreground input focus — not merely that SetForegroundWindow
+        was called.  Windows silently refuses foreground changes requested from a
+        background thread (the foreground lock), so a bare SetForegroundWindow
+        frequently no-ops while reporting nothing.  When that happens the bot's
+        keystrokes land in whatever window really has focus and the game ignores
+        them — the exact "input dropped" abort seen mid-batch.  This verifies
+        GetForegroundWindow and escalates (thread-input attach + foreground-lock
+        clear + ALT nudge) until the game is genuinely focused, or gives up.
+
+        Fast path: if the game already owns the foreground, returns immediately
+        without touching anything — normal operation never flashes the window.
+
+        Returns True only when the game is confirmed to be the foreground window."""
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
         target = exe_name.lower()
@@ -4158,10 +4200,7 @@ class RelicBotApp(tk.Tk):
 
         EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
-        while time.time() < deadline:
-            if not self.bot_running:
-                return False
-
+        def _find_hwnd():
             found = []
 
             def _cb(hwnd, _):
@@ -4180,15 +4219,71 @@ class RelicBotApp(tk.Tk):
                 return True
 
             user32.EnumWindows(EnumWindowsProc(_cb), None)
+            return found[0] if found else None
 
-            if found:
-                hwnd = found[0]
-                user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+        # Wait for the game window to exist.
+        hwnd = None
+        while time.time() < deadline:
+            if not self.bot_running:
+                return False
+            hwnd = _find_hwnd()
+            if hwnd:
+                break
+            time.sleep(0.5)
+        if not hwnd:
+            return False
+
+        # Fast path: game already foreground — do nothing (no flashing).
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+
+        # Not foreground: record what actually holds focus — the culprit behind
+        # the "input dropped" aborts — so any recurrence is self-diagnosing.
+        _held_by = self._active_window_desc()
+
+        # Clear the foreground-lock timeout so SetForegroundWindow is honoured.
+        try:
+            SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001
+            user32.SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0,
+                                         ctypes.c_void_p(0), 0)
+        except Exception:
+            pass
+
+        our_tid = kernel32.GetCurrentThreadId()
+        for _attempt in range(5):
+            if not self.bot_running:
+                return False
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+
+            # Attach our input thread to the current foreground thread so
+            # Windows treats the focus change as coming from the active app.
+            fg = user32.GetForegroundWindow()
+            fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+            attached = False
+            if fg_tid and fg_tid != our_tid:
+                attached = bool(user32.AttachThreadInput(our_tid, fg_tid, True))
+            try:
+                user32.BringWindowToTop(hwnd)
                 user32.SetForegroundWindow(hwnd)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(our_tid, fg_tid, False)
+
+            if user32.GetForegroundWindow() == hwnd:
+                if _attempt > 0:
+                    self._log(f"  [Focus] Game re-focused — foreground had been held "
+                              f"by {_held_by}.")
                 return True
 
-            time.sleep(0.5)
+            # Escalate: a synthetic ALT tap satisfies the 'process received the
+            # last input' condition that unlocks foreground changes.
+            if _attempt >= 1:
+                user32.keybd_event(0x12, 0, 0, 0)   # VK_MENU down
+                user32.keybd_event(0x12, 0, 2, 0)   # VK_MENU up (KEYEVENTF_KEYUP)
+            time.sleep(0.12)
 
+        self._log(f"  [Focus] WARNING: could not foreground the game — focus held "
+                  f"by {_held_by}; inputs may not register.")
         return False
 
     def _esc_to_game_screen(self, region) -> bool:
@@ -4349,6 +4444,15 @@ class RelicBotApp(tk.Tk):
             if not self.bot_running:
                 return False, 0.0
 
+            # Force the game to the foreground so this ESC actually lands in it.
+            # A relaunched game that comes up unfocused is the root cause of the
+            # mid-batch "input dropped" aborts: ESC goes to whatever window holds
+            # focus, "equipment" is never found, and the highlight fallback below
+            # would then falsely confirm from the on-screen render alone.
+            _fg_ok = True
+            if exe_name:
+                _fg_ok = self._focus_game_window(exe_name, timeout=2.0)
+
             self.player.tap("Key.esc")
             time.sleep(_POST_ESC)
             if not self.bot_running:
@@ -4379,11 +4483,22 @@ class RelicBotApp(tk.Tk):
                     try:
                         _hl_item, _hl_br, _ = screen_capture.find_highlighted_item(region)
                         if _hl_item is not None:
-                            _equip_found = True
-                            self._log(
-                                f"[Phase -0.5] Menu highlight detected "
-                                f"({_hl_item}) — confirming in-game via "
-                                f"highlight fallback.")
+                            if _fg_ok:
+                                _equip_found = True
+                                self._log(
+                                    f"[Phase -0.5] Menu highlight detected "
+                                    f"({_hl_item}) — confirming in-game via "
+                                    f"highlight fallback.")
+                            else:
+                                # Highlight is visible but the game does NOT hold
+                                # focus, so ESC/DOWN won't land — confirming here
+                                # would doom Phase 0 nav (the mid-batch abort).
+                                # Keep probing until focus is genuinely regained.
+                                self._log(
+                                    f"[Phase -0.5] Highlight ({_hl_item}) seen but "
+                                    f"game is not foreground (held by "
+                                    f"{self._active_window_desc()}) — refusing false "
+                                    f"confirm; will re-focus and retry.")
                     except Exception:
                         pass
                 if _equip_found:
