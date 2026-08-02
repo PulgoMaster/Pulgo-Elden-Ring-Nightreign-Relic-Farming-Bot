@@ -4,6 +4,28 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.8.8] — 2026-08-01 — GPU ACCELERATION REPAIRED + AUTOMATIC UPDATES
+
+### Fixed: GPU Acceleration could not work at all
+- Installing GPU Acceleration appeared to succeed — the ~2.5 GB download completed, the install reported no errors, and the GPU Settings panel showed **"GPU torch installed"** — but CUDA then failed with **"Torch not compiled with CUDA enabled"** and the bot silently stayed on CPU.
+- Cause: recent builds shipped as a single self-contained `RelicBot.exe`, which unpacks itself to a temporary folder on every launch and loads its CPU-only components from there. The GPU installer wrote the CUDA files next to the EXE instead, where nothing ever read them. The result was a large download that could never take effect, on any machine, regardless of GPU or driver.
+- RelicBot now ships as `RelicBot.exe` plus an `_internal` folder, which is the layout the GPU installer writes into. GPU Acceleration takes effect on the next launch as intended.
+- **If you previously installed GPU Acceleration**, updating keeps your existing CUDA files and they become active — no re-download. If GPU Settings still reports CUDA unavailable afterwards, click **Reinstall GPU Acceleration**.
+- This also affected drivers/hardware diagnosis: the "GPU torch installed — CUDA init failed" message misled users into chasing driver problems that did not exist.
+
+### Changed: the Update button now updates you automatically
+- Clicking **Update** checks GitHub for a newer release and reports what it found. If there is one, it downloads it for you, showing progress, size and estimated time remaining.
+- Interrupted downloads resume automatically instead of starting over.
+- You no longer have to download a ZIP by hand first.
+- Still works offline: the update dialog offers **Use a downloaded ZIP…** for machines without an internet connection. A ZIP you picked yourself is never deleted; one RelicBot downloaded is cleaned up after the update.
+- Cross-flavor protection is unchanged — a mainline package cannot update a CE install, or the reverse.
+
+### Note on the download
+- The distribution is now a folder (`RelicBot.exe` plus `_internal`) rather than a single file. Unzip it and run `RelicBot.exe` as before; `_internal` holds the bot's components and should not be modified.
+- Side benefit: **RelicBot starts much faster.** The single-file build had to unpack roughly 430 MB into a temporary folder on every single launch; it now loads directly from `_internal`. Startup drops from tens of seconds to a few.
+
+---
+
 ## [1.8.7] — 2026-07-27 — FOCUS RELIABILITY FIX + DIAGNOSTICS
 
 ### Fixed: bot could stall mid-batch and abort an iteration without buying

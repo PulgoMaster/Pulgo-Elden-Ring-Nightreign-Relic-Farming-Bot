@@ -23,6 +23,9 @@ UPDATER_PS1 = r"""<#
       -InstallDir  Target install directory (where RelicBot.exe lives).
       -WaitForBot  If set, polls for RelicBot.exe to exit before replacing
                    files instead of erroring out immediately.
+      -RemoveZip   If set, deletes the ZIP after a successful install.  Only
+                   passed for ZIPs RelicBot downloaded into %TEMP% itself --
+                   a ZIP the user picked by hand is never deleted.
 
     Preserved across updates: profiles, sequences, save_backups, batch_output,
     overlay_stats.txt, relicbot_*.json, .last_profile, gpu_upgrade_ready,
@@ -33,7 +36,8 @@ UPDATER_PS1 = r"""<#
 param(
     [string]$ZipPath = "",
     [string]$InstallDir = "",
-    [switch]$WaitForBot
+    [switch]$WaitForBot,
+    [switch]$RemoveZip
 )
 
 $scriptDir = if ($InstallDir) { $InstallDir } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -281,6 +285,22 @@ Write-Host ""
 # --- Cleanup ---
 Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force $backupDir -ErrorAction SilentlyContinue
+
+# Delete the source ZIP only when RelicBot downloaded it itself.  The whole
+# folder is removed ONLY when it is one RelicBot created (%TEMP%\RelicBotUpd_*)
+# -- otherwise just the single ZIP file goes, so a mis-passed switch can never
+# take out a folder full of the user's own files.
+if ($RemoveZip) {
+    $zipParent = Split-Path -Parent $zipFile
+    $parentName = Split-Path -Leaf $zipParent
+    if (($zipParent -like "$env:TEMP*") -and ($parentName -like "RelicBotUpd_*")) {
+        Write-Host "Removing temporary download..." -ForegroundColor Gray
+        Remove-Item -Recurse -Force $zipParent -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "Removing downloaded ZIP..." -ForegroundColor Gray
+        Remove-Item -Force $zipFile -ErrorAction SilentlyContinue
+    }
+}
 
 # --- Verify ---
 Write-Host "--- Verifying install ---" -ForegroundColor Cyan

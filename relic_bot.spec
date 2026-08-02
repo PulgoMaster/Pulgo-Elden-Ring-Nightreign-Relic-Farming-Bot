@@ -182,25 +182,30 @@ a.datas = [
 
 pyz = PYZ(a.pure)
 
-# ── Onefile mode ────────────────────────────────────────────────────────
-# Packs the interpreter, all dependencies, bundled EasyOCR models, and the
-# application itself into a single self-contained `RelicBot.exe`.  On first
-# run the EXE extracts its payload to a per-session temp directory
-# (`%TEMP%/_MEI<random>/`) and executes from there.  No `_internal/` folder
-# is shipped — the resulting distribution is a single executable.
+# ── Onedir mode ─────────────────────────────────────────────────────────
+# `RelicBot.exe` ships next to an `_internal/` folder holding the
+# interpreter, dependencies and bundled EasyOCR models.
+#
+# This layout is REQUIRED by GPU Acceleration and must not be changed to
+# onefile.  `_apply_gpu_upgrade()` in main.py swaps the downloaded CUDA
+# torch into `_internal/torch/` at startup, `_cuda_torch_installed()` reads
+# that same path, and the in-UI updater backs it up and restores it across
+# updates.  A onefile build extracts its payload to a fresh
+# `%TEMP%/_MEI<random>/` on every launch and imports torch from there, so a
+# torch swapped into `_internal/` is never loaded: the install appears to
+# succeed, the UI reports "GPU torch installed", and CUDA init still fails
+# with "Torch not compiled with CUDA enabled".
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='RelicBot',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -210,28 +215,29 @@ exe = EXE(
     icon=['assets/icon.ico'],
 )
 
-# Place the single EXE alongside GUIDE + build_flavor in `dist/RelicBot/`.
-# Users unzip a small directory containing 3 files total (EXE, GUIDE.txt,
-# build_flavor.txt) instead of the hundreds-of-files onedir layout.  The
-# legacy Update.bat / Update.ps1 sidecars are gone as of v1.8.4 — updates
-# now go through the in-UI Update button which embeds the PowerShell
-# updater inside the EXE.
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='RelicBot',
+)
+
+# COLLECT already produced `dist/RelicBot/` containing RelicBot.exe and the
+# `_internal/` payload folder.  Copy the user-facing sidecars in next to the
+# EXE: GUIDE.txt is the bundled documentation (PyInstaller puts its own copy
+# under _internal/, which users never look in), and build_flavor.txt is what
+# the in-UI updater reads out of an update ZIP to enforce cross-flavor
+# protection (mainline vs CE).
 import shutil as _shutil
 _dist_dir = _os.path.join('dist', 'RelicBot')
 _os.makedirs(_dist_dir, exist_ok=True)
 try:
-    # PyInstaller in onefile mode writes the EXE to dist/<name>.exe — move it
-    # into dist/RelicBot/ so the ZIP layout matches the onedir expectation.
-    _exe_src = _os.path.join('dist', 'RelicBot.exe')
-    _exe_dst = _os.path.join(_dist_dir, 'RelicBot.exe')
-    if _os.path.exists(_exe_src):
-        _shutil.move(_exe_src, _exe_dst)
-        print(f"[Spec] Moved EXE to {_exe_dst}")
-    # Sidecar files that ship alongside the EXE for end users.
-    # build_flavor.txt is what the in-UI updater reads from an update ZIP
-    # to enforce cross-flavor protection (mainline vs CE).
     for _sidecar in ('GUIDE.txt', 'build_flavor.txt'):
         if _os.path.exists(_sidecar):
             _shutil.copy2(_sidecar, _os.path.join(_dist_dir, _sidecar))
+            print(f"[Spec] Copied sidecar {_sidecar} to {_dist_dir}")
 except Exception as _e:
     print(f"[Spec] Post-build file layout failed: {_e}")

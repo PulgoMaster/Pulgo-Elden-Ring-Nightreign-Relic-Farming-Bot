@@ -674,11 +674,21 @@ Settings" to apply them all at once.
   12. UPDATING
 ================================================================================
 
-  1. Download the new RelicBot ZIP from GitHub or NexusMods
-  2. In RelicBot, click the "Update" button at the end of the Profile row
-  3. Pick the downloaded ZIP in the file dialog
+  1. Click the "Update" button at the end of the Profile row
+  2. RelicBot checks GitHub for a newer release and tells you what it found
+  3. If a newer version exists it downloads automatically, with progress,
+     size and time remaining shown in the dialog
   4. RelicBot closes automatically and the updater runs in its own window
   5. When the updater prints "Update complete!", RelicBot relaunches
+
+  You no longer need to download anything by hand. If the download is
+  interrupted it resumes automatically, and the downloaded file is deleted
+  once the update finishes.
+
+  No internet connection? The update dialog also has a
+  "Use a downloaded ZIP..." button — download RelicBot_vX.Y.Z.zip from
+  GitHub or NexusMods on any machine, then pick it there. A ZIP you chose
+  yourself is never deleted.
 
   The updater preserves:
     - Your profiles and settings

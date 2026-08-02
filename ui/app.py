@@ -50,7 +50,7 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.8.8"
 
 # Cross-flavor flag. Mainline = False, CE branch flips this to True.
 # Drives title string + support-link routing so the CE build deep-links to
@@ -894,11 +894,12 @@ class RelicBotApp(tk.Tk):
         )
         _update_btn.grid(row=0, column=7, **pad)
         _Tooltip(_update_btn,
-                 "Update RelicBot to a newer version.\n"
-                 "Click to choose a downloaded RelicBot*.zip file.\n"
-                 "RelicBot will close automatically — profiles, sequences, and GPU\n"
-                 "acceleration are preserved.\n\n"
-                 "You can find the latest releases on the GitHub or NexusMods page.")
+                 "Check GitHub for a newer RelicBot release.\n"
+                 "If one is available it downloads automatically and installs.\n"
+                 "RelicBot will close during the update — profiles, sequences,\n"
+                 "and GPU acceleration are preserved.\n\n"
+                 "If you are offline, the dialog also lets you pick a\n"
+                 "RelicBot*.zip you downloaded by hand.")
 
         # Pre-initialize vars that are referenced by multiple sections below
         self.batch_output_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "batch_output"))
@@ -3182,34 +3183,335 @@ class RelicBotApp(tk.Tk):
     #  IN-UI UPDATER
     # ------------------------------------------------------------------ #
 
+    # Repository the in-UI updater pulls releases from.
+    _GH_REPO = "PulgoMaster/Pulgo-Elden-Ring-Nightreign-Relic-Farming-Bot"
+    # CE ships under a persistent versionless tag instead of a vX.Y.Z tag,
+    # so it has no orderable version — see _run_updater for how that is
+    # handled (offer the download unconditionally rather than comparing).
+    _GH_CE_TAG = "bigbatch-ce"
+
+    @staticmethod
+    def _version_tuple(text: str) -> tuple:
+        """Parse 'v1.8.8' or '1.8.8' into (1, 8, 8) for ordering.
+
+        Returns an empty tuple when no version can be found, which callers
+        treat as "cannot compare" rather than "older".
+        """
+        import re as _re
+        m = _re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+        return tuple(int(g) for g in m.groups()) if m else ()
+
+    def _fetch_release_meta(self) -> dict:
+        """Query the GitHub releases API for this build's update channel.
+
+        Mainline reads /releases/latest; CE reads its persistent versionless
+        tag.  Returns the decoded JSON.  Raises on network or HTTP failure —
+        the caller turns that into a user-facing message plus the manual
+        ZIP fallback.
+        """
+        import json as _json
+        import urllib.request as _ur
+
+        if _BUILD_IS_CE:
+            url = (f"https://api.github.com/repos/{self._GH_REPO}"
+                   f"/releases/tags/{self._GH_CE_TAG}")
+        else:
+            url = f"https://api.github.com/repos/{self._GH_REPO}/releases/latest"
+
+        req = _ur.Request(url, headers={
+            "User-Agent": f"RelicBot/{APP_VERSION}",
+            "Accept":     "application/vnd.github+json",
+        })
+        with _ur.urlopen(req, timeout=20) as resp:
+            return _json.loads(resp.read().decode("utf-8", errors="replace"))
+
     def _run_updater(self) -> None:
         """Entry point for the profile-row Update button.
 
-        Flow: confirm → pick ZIP → verify build flavor matches the running
-        EXE → write the embedded PowerShell updater to %TEMP% → spawn it as
-        a detached process with -WaitForBot → exit RelicBot cleanly so the
-        updater can replace files without a lock.
+        Flow: confirm → query the GitHub releases API → compare versions →
+        download the release ZIP with live progress → hand off to
+        _apply_update_zip, which verifies the build flavor and launches the
+        embedded PowerShell updater.
+
+        If GitHub is unreachable (offline, rate limited, DNS blocked) the
+        dialog stays open with a "Use a downloaded ZIP" button so the user
+        can still update from a file they fetched by hand.
         """
         if not messagebox.askyesno(
             "Update RelicBot",
-            "This will close RelicBot to perform the update.\n\n"
-            "Profiles, sequences, and GPU acceleration will be preserved.\n\n"
+            "RelicBot will check GitHub for a newer release.\n\n"
+            "If one is available it downloads automatically and RelicBot\n"
+            "closes to install it.\n\n"
+            "Profiles, sequences, and GPU acceleration are preserved.\n\n"
             "Continue?",
         ):
             return
 
-        # File picker — default to Downloads, fall back to home dir.
+        dlg = tk.Toplevel(self)
+        dlg.title("Update RelicBot")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        status_var = tk.StringVar(value="Contacting GitHub…")
+        ttk.Label(dlg, textvariable=status_var, wraplength=460,
+                  justify="left").pack(padx=16, pady=(14, 6), fill="x")
+
+        progress = ttk.Progressbar(dlg, mode="indeterminate", length=440)
+        progress.pack(padx=16, pady=2, fill="x")
+        progress.start(15)
+
+        info_var = tk.StringVar(value="")
+        ttk.Label(dlg, textvariable=info_var, foreground="#c0c0c0",
+                  font=("Consolas", 9), anchor="w").pack(
+                      padx=16, pady=(2, 8), fill="x")
+
+        btn_row = ttk.Frame(dlg)
+        btn_row.pack(padx=16, pady=(0, 12), fill="x")
+        manual_btn = ttk.Button(btn_row, text="Use a downloaded ZIP…")
+        manual_btn.pack(side="left")
+        close_btn = ttk.Button(btn_row, text="Cancel")
+        close_btn.pack(side="right")
+
+        _cancelled = [False]
+
+        def _cancel():
+            _cancelled[0] = True
+            dlg.destroy()
+
+        close_btn.configure(command=_cancel)
+
+        def _manual():
+            _cancelled[0] = True
+            dlg.destroy()
+            picked = self._pick_update_zip()
+            if picked:
+                self._apply_update_zip(picked)
+
+        manual_btn.configure(command=_manual)
+
+        def _stop(msg: str):
+            """Halt the dialog on a terminal outcome (error or up-to-date)."""
+            try:
+                progress.stop()
+                progress.configure(mode="determinate", value=0)
+                status_var.set(msg)
+                close_btn.configure(text="Close")
+            except tk.TclError:
+                pass   # dialog already closed by the user
+
+        def _work():
+            import ssl            as _ssl
+            import time           as _time
+            import urllib.error   as _ue
+            import urllib.request as _ur
+
+            def _mb(b):
+                return f"{b / 1048576:.0f} MB"
+
+            def _spd(bps):
+                if bps >= 1048576: return f"{bps / 1048576:.1f} MB/s"
+                if bps >= 1024:    return f"{bps / 1024:.0f} KB/s"
+                return f"{bps:.0f} B/s"
+
+            def _eta(s):
+                if s >= 3600: return f"{int(s / 3600)}h {int((s % 3600) / 60)}m"
+                if s >= 60:   return f"{int(s / 60)}m {int(s % 60)}s"
+                return f"{int(s)}s"
+
+            # ── Query the release channel ──────────────────────────────── #
+            try:
+                rel = self._fetch_release_meta()
+            except Exception as e:
+                self.after(0, _stop,
+                           f"Could not reach GitHub: {e}\n\n"
+                           "Check your connection, or use a ZIP you have "
+                           "already downloaded.")
+                return
+            if _cancelled[0]:
+                return
+
+            tag      = str(rel.get("tag_name") or "")
+            remote_v = self._version_tuple(tag)
+            local_v  = self._version_tuple(APP_VERSION)
+
+            # CE's tag carries no version, so ordering is impossible — offer
+            # the download and let the flavor check be the only gate.
+            # Mainline tags always carry vX.Y.Z; if one can't be read, stop
+            # rather than pushing a download that may be the same build.
+            if not _BUILD_IS_CE:
+                if not remote_v:
+                    self.after(0, _stop,
+                               f"Could not read a version from the latest "
+                               f"release tag ({tag or 'unknown'}).\n"
+                               "Use a downloaded ZIP, or try again later.")
+                    return
+                if local_v and remote_v <= local_v:
+                    self.after(0, _stop,
+                               f"RelicBot is up to date (v{APP_VERSION}).\n"
+                               f"Latest release on GitHub: {tag}")
+                    return
+
+            asset = next(
+                (a for a in (rel.get("assets") or [])
+                 if str(a.get("name") or "").lower().startswith("relicbot")
+                 and str(a.get("name") or "").lower().endswith(".zip")),
+                None,
+            )
+            if not asset:
+                self.after(0, _stop,
+                           f"Release {tag} has no RelicBot ZIP attached.\n"
+                           "Use a downloaded ZIP instead.")
+                return
+
+            url        = asset.get("browser_download_url")
+            asset_name = str(asset.get("name"))
+            label      = tag if not _BUILD_IS_CE else f"{tag} ({asset_name})"
+            self.after(0, status_var.set, f"Downloading {label}…")
+
+            # ── Download into %TEMP% ───────────────────────────────────── #
+            dl_dir = os.path.join(
+                tempfile.gettempdir(), f"RelicBotUpd_{uuid.uuid4().hex[:8]}")
+            try:
+                os.makedirs(dl_dir, exist_ok=True)
+            except Exception as e:
+                self.after(0, _stop, f"Could not create a download folder: {e}")
+                return
+            zip_path = os.path.join(dl_dir, asset_name)
+
+            def _set_det():
+                progress.stop()
+                progress.configure(mode="determinate", value=0)
+
+            self.after(0, _set_det)
+
+            _MAX_RETRIES = 3
+            for _attempt in range(1, _MAX_RETRIES + 1):
+                resume_from = (os.path.getsize(zip_path)
+                               if os.path.exists(zip_path) else 0)
+                try:
+                    headers = {"User-Agent": f"RelicBot/{APP_VERSION}",
+                               "Accept": "application/octet-stream"}
+                    if resume_from > 0:
+                        headers["Range"] = f"bytes={resume_from}-"
+                    req = _ur.Request(url, headers=headers)
+                    with _ur.urlopen(req, context=_ssl.create_default_context(),
+                                     timeout=30) as resp:
+                        cr = resp.headers.get("Content-Range", "")
+                        if cr and "/" in cr:
+                            total = int(cr.split("/")[-1])
+                        else:
+                            total = int(
+                                resp.headers.get("Content-Length", 0) or 0
+                            ) + resume_from
+
+                        # Server ignored the Range header — restart cleanly.
+                        if resume_from > 0 and resp.status == 200:
+                            resume_from = 0
+
+                        got    = resume_from
+                        t_last = _time.time()
+                        b_last = got
+                        fmode  = "ab" if resume_from > 0 else "wb"
+                        with open(zip_path, fmode) as fout:
+                            while True:
+                                if _cancelled[0]:
+                                    break
+                                data = resp.read(65536)
+                                if not data:
+                                    break
+                                fout.write(data)
+                                got += len(data)
+
+                                now = _time.time()
+                                if now - t_last >= 0.5:
+                                    dt    = now - t_last
+                                    speed = (got - b_last) / dt if dt > 0 else 0
+                                    t_last, b_last = now, got
+                                    pct = got / total * 100 if total else 0
+                                    if speed > 0 and total > got:
+                                        eta_str = _eta((total - got) / speed)
+                                    else:
+                                        eta_str = "–"
+                                    if total:
+                                        txt = (f"{_mb(got)} / {_mb(total)}"
+                                               f"  ·  {pct:.1f}%"
+                                               f"  ·  {_spd(speed)}"
+                                               f"  ·  ETA {eta_str}")
+                                    else:
+                                        txt = f"{_mb(got)}  ·  {_spd(speed)}"
+
+                                    def _upd(p=pct, i=txt):
+                                        try:
+                                            progress["value"] = p
+                                            info_var.set(i)
+                                        except tk.TclError:
+                                            pass
+                                    self.after(0, _upd)
+                    break   # download finished
+
+                except Exception as e:
+                    if _cancelled[0]:
+                        shutil.rmtree(dl_dir, ignore_errors=True)
+                        return
+                    _is_conn = isinstance(e, (
+                        _ssl.SSLError, _ue.URLError, ConnectionResetError,
+                        ConnectionRefusedError, ConnectionAbortedError,
+                        TimeoutError, OSError,
+                    ))
+                    if _is_conn and _attempt < _MAX_RETRIES:
+                        self.after(0, status_var.set,
+                                   f"Connection interrupted — resuming "
+                                   f"({_attempt}/{_MAX_RETRIES})…")
+                        _time.sleep(3)
+                        continue   # partial file stays on disk for the resume
+                    shutil.rmtree(dl_dir, ignore_errors=True)
+                    self.after(0, _stop,
+                               f"Download failed: {e}\n\n"
+                               "Reconnect and try again, or use a ZIP you have "
+                               "already downloaded.")
+                    return
+
+            if _cancelled[0]:
+                shutil.rmtree(dl_dir, ignore_errors=True)
+                return
+
+            self.after(0, status_var.set,
+                       f"Download complete — installing {tag}…")
+
+            def _handoff():
+                try:
+                    dlg.destroy()
+                except tk.TclError:
+                    pass
+                self._apply_update_zip(zip_path, cleanup_zip=True)
+
+            self.after(0, _handoff)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _pick_update_zip(self) -> str:
+        """Offline fallback: let the user choose an already-downloaded ZIP."""
         _default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
         if not os.path.isdir(_default_dir):
             _default_dir = os.path.expanduser("~")
-        zip_path = filedialog.askopenfilename(
+        return filedialog.askopenfilename(
             title="Select RelicBot update ZIP",
             initialdir=_default_dir,
             filetypes=[("RelicBot ZIP", "RelicBot*.zip"), ("All zips", "*.zip")],
         )
-        if not zip_path:
-            return
 
+    def _apply_update_zip(self, zip_path: str, cleanup_zip: bool = False) -> None:
+        """Verify a ZIP's build flavor, then hand off to the PowerShell updater.
+
+        Shared by both paths: the GitHub download and the manual picker.
+        Writes the embedded updater to %TEMP%, spawns it detached with
+        -WaitForBot, and exits RelicBot cleanly so the updater can replace
+        files without holding a lock.
+
+        `cleanup_zip` is set only for ZIPs this app downloaded into %TEMP% —
+        the updater deletes those after installing.  A ZIP the user picked
+        themselves is their own file and is always left alone.
+        """
         # Peek build_flavor.txt inside the ZIP before committing to the
         # update.  If the ZIP is a different flavor than the running EXE,
         # the clean-replace step would leave the user with a broken mixed
@@ -3275,17 +3577,20 @@ class RelicBotApp(tk.Tk):
         # watch progress and confirm the update completed.
         CREATE_NEW_CONSOLE     = 0x00000010
         CREATE_NEW_PROCESS_GROUP = 0x00000200
+        _ps_args = [
+            "powershell.exe",
+            "-ExecutionPolicy", "Bypass",
+            "-NoProfile",
+            "-File", tmp_ps1,
+            "-ZipPath", zip_path,
+            "-InstallDir", install_dir,
+            "-WaitForBot",
+        ]
+        if cleanup_zip:
+            _ps_args.append("-RemoveZip")
         try:
             subprocess.Popen(
-                [
-                    "powershell.exe",
-                    "-ExecutionPolicy", "Bypass",
-                    "-NoProfile",
-                    "-File", tmp_ps1,
-                    "-ZipPath", zip_path,
-                    "-InstallDir", install_dir,
-                    "-WaitForBot",
-                ],
+                _ps_args,
                 creationflags=CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
                 close_fds=True,
             )
@@ -12688,8 +12993,18 @@ class RelicBotApp(tk.Tk):
         # Phase 2 downloads via urllib (real live progress)
         # Phase 3 installs from local wheel via pip --no-index
         # Phase 4 removes test/distributed folders (safe — no DLL deps)
+        # Pin the CUDA wheel to the EXACT torch version bundled in this build.
+        # Only the compiled half of torch is swapped in: the Python half stays
+        # the bundled copy inside the EXE, so a newer CUDA torch from the index
+        # would pair new binaries with old Python code.  Unpinned, this breaks
+        # silently the moment PyTorch publishes a release newer than the build.
+        try:
+            import torch as _bundled_torch
+            _torch_req = f"torch=={_bundled_torch.__version__.split('+')[0]}"
+        except Exception:
+            _torch_req = "torch"   # version unreadable — fall back to latest
         _resolve_cmd_base = [
-            sys.executable, "--run-pip", "install", "torch",
+            sys.executable, "--run-pip", "install", _torch_req,
             "--index-url", "https://download.pytorch.org/whl/cu126",
             "--no-deps", "--dry-run", "--force-reinstall",
             "--report",  # <report_path> appended at runtime

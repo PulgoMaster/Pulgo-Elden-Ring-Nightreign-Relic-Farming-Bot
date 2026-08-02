@@ -138,12 +138,22 @@ To claim a relic, copy the `NR0000.sl2` from its iteration folder over your exis
 
 When a new version is released:
 
-1. Download the new `RelicBot_vX.Y.Z.zip` from the Releases page or NexusMods
-2. In RelicBot, click the **Update** button at the end of the Profile row
-3. Pick the downloaded ZIP in the file dialog — RelicBot closes automatically
-   and the updater runs in its own PowerShell window
-4. When the updater prints "Update complete!", RelicBot relaunches with the
+1. In RelicBot, click the **Update** button at the end of the Profile row
+2. RelicBot checks GitHub for a newer release and reports what it found
+3. If there is one, it downloads automatically — progress, size and time
+   remaining are shown, and an interrupted download resumes on its own
+4. RelicBot closes automatically and the updater runs in its own PowerShell
+   window
+5. When the updater prints "Update complete!", RelicBot relaunches with the
    new version
+
+You no longer need to download the ZIP yourself.
+
+**No internet on that machine?** The update dialog also offers
+**Use a downloaded ZIP…** — fetch `RelicBot_vX.Y.Z.zip` from the Releases
+page or NexusMods however you like, then point RelicBot at it. A ZIP you
+picked yourself is never deleted; one RelicBot downloaded is cleaned up
+after the update.
 
 The updater automatically preserves:
 - Your profiles and settings

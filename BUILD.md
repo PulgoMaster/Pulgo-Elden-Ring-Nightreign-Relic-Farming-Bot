@@ -96,15 +96,25 @@ PyTorch DLL collection and bundled-model compression).
    final binary.
 5. **Excludes** user-specific runtime files (profiles, config, timing
    data, save backups) from the bundled data.
-6. **Builds a single-file EXE** via PyInstaller's onefile mode. The
-   EXE contains the Python interpreter, all dependencies, the
-   bundled OCR models, and the application code in one compressed
-   archive. On first launch, the payload self-extracts to
-   `%TEMP%\_MEI<random>\` and executes from there.
-7. **Moves the built EXE** into `dist\RelicBot\` and places
-   `GUIDE.txt` + `build_flavor.txt` alongside it. The PowerShell updater
-   is embedded inside the EXE (`ui/updater_script.py`) and written to
-   `%TEMP%` when the in-UI Update button is clicked.
+6. **Builds a onedir distribution** via `EXE(exclude_binaries=True)` +
+   `COLLECT`. `dist\RelicBot\` contains `RelicBot.exe` next to an
+   `_internal\` folder holding the Python interpreter, all dependencies,
+   and the bundled OCR models.
+
+   > **Do not switch this back to onefile.** GPU Acceleration depends on
+   > the on-disk `_internal\torch\` folder: `_apply_gpu_upgrade()` in
+   > `main.py` swaps the downloaded CUDA torch into it at startup,
+   > `_cuda_torch_installed()` reads that path, and the updater backs it
+   > up and restores it. A onefile build extracts its payload to a fresh
+   > `%TEMP%\_MEI<random>\` on every launch and imports torch from there,
+   > so a swapped torch is never loaded — the install reports success, the
+   > UI shows "GPU torch installed", and CUDA init still fails with
+   > "Torch not compiled with CUDA enabled".
+
+7. **Copies the sidecars** `GUIDE.txt` + `build_flavor.txt` next to the
+   EXE in `dist\RelicBot\`. The PowerShell updater is embedded inside the
+   EXE (`ui/updater_script.py`) and written to `%TEMP%` when the in-UI
+   Update button is clicked.
 
 ---
 
@@ -114,9 +124,10 @@ PyTorch DLL collection and bundled-model compression).
 Compress-Archive -Path 'dist\RelicBot' -DestinationPath 'RelicBot_vX.Y.Z.zip'
 ```
 
-The resulting ZIP contains three files: `RelicBot.exe`, `GUIDE.txt`,
-and `build_flavor.txt`. The EXE is self-contained — no `_internal/`
-folder, no loose DLLs, no on-first-run downloads. The bot works
+The resulting ZIP contains `RelicBot.exe`, `GUIDE.txt`,
+`build_flavor.txt`, and the `_internal\` payload folder. Everything the
+bot needs — interpreter, dependencies, OCR models — ships inside
+`_internal\`, so there are no on-first-run downloads and the bot works
 offline from launch.
 
 ---
