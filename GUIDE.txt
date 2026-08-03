@@ -320,7 +320,9 @@ The batch ends when EITHER:
   - Your configured iteration limit is hit (e.g. 100 iters)
   - Available murk drops below the per-relic cost (600 for Normal, 1800
     for Deep) on the current branch's save — at that point no more relics
-    can be bought, and the bot logs "Out of murk on branch X" and exits
+    can be bought, and the bot logs "Out of murk on branch X" and exits.
+    A single low reading is confirmed on the next iteration first, so a
+    misread of the murk counter cannot end a long run early
 
 If the run ends mid-batch due to out-of-murk, the BEST marker still
 identifies your final save folder.
@@ -328,9 +330,10 @@ identifies your final save folder.
 ──────────────────────────────────────────────────────────────────────────
 LIMITATIONS
 ──────────────────────────────────────────────────────────────────────────
-  - Standard mode only — Async / Backlog / Hybrid are disabled when
-    Branching is on (the bot needs to react to a match BEFORE the next
-    cycle's inputs are sent, which requires synchronous analysis).
+  - Standard mode only. The bot must react to a match BEFORE the next
+    cycle's inputs are sent, which requires synchronous analysis. If Async
+    or Backlog is on, Branching Mode is greyed out and has no effect on the
+    run — the run log says so at the start. Turn them off to use it.
   - In the unlikely event you accumulate 27+ branches in a single run, the
     bot retroactively renames all existing folders from single-letter
     (A-Z) to double-letter (AA-AZ) format and continues with BA, BB, ...
@@ -674,21 +677,37 @@ Settings" to apply them all at once.
   12. UPDATING
 ================================================================================
 
-  1. Click the "Update" button at the end of the Profile row
-  2. RelicBot checks GitHub for a newer release and tells you what it found
-  3. If a newer version exists it downloads automatically, with progress,
-     size and time remaining shown in the dialog
-  4. RelicBot closes automatically and the updater runs in its own window
-  5. When the updater prints "Update complete!", RelicBot relaunches
+  How the Update button behaves depends on where you got RelicBot from.
+  Both packages are the same program — only the update step differs.
 
-  You no longer need to download anything by hand. If the download is
-  interrupted it resumes automatically, and the downloaded file is deleted
-  once the update finishes.
+  GITHUB DOWNLOAD (RelicBot_vX.Y.Z.zip)
 
-  No internet connection? The update dialog also has a
-  "Use a downloaded ZIP..." button — download RelicBot_vX.Y.Z.zip from
-  GitHub or NexusMods on any machine, then pick it there. A ZIP you chose
-  yourself is never deleted.
+    1. Click the "Update" button at the end of the Profile row
+    2. RelicBot checks GitHub for a newer release and tells you what
+       it found
+    3. If a newer version exists it downloads automatically, with
+       progress, size and time remaining shown in the dialog
+    4. RelicBot closes automatically and the updater runs in its own window
+    5. When the updater prints "Update complete!", RelicBot relaunches
+
+    You do not need to download anything by hand. An interrupted download
+    resumes automatically, and the downloaded file is deleted once the
+    update finishes.
+
+    No internet connection? The dialog also has a "Use a downloaded ZIP..."
+    button — fetch the ZIP on any machine and pick it here.
+
+  NEXUSMODS DOWNLOAD (RelicBot_Nexus_vX.Y.Z.zip)
+
+    1. Download the newest RelicBot ZIP from the NexusMods page
+    2. Click the "Update" button and select that ZIP
+    3. RelicBot closes automatically and the updater runs in its own window
+    4. When the updater prints "Update complete!", RelicBot relaunches
+
+    This package never downloads anything by itself. NexusMods asks that a
+    mod's built-in updater install a file you downloaded yourself rather
+    than fetch one from another site, so the NexusMods copy always uses the
+    file picker. A ZIP you chose yourself is never deleted.
 
   The updater preserves:
     - Your profiles and settings

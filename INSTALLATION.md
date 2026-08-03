@@ -136,7 +136,9 @@ To claim a relic, copy the `NR0000.sl2` from its iteration folder over your exis
 
 ## Updating to a New Version
 
-When a new version is released:
+Both packages are the same program; only the update step differs.
+
+**If you downloaded from GitHub** (`RelicBot_vX.Y.Z.zip`):
 
 1. In RelicBot, click the **Update** button at the end of the Profile row
 2. RelicBot checks GitHub for a newer release and reports what it found
@@ -144,16 +146,22 @@ When a new version is released:
    remaining are shown, and an interrupted download resumes on its own
 4. RelicBot closes automatically and the updater runs in its own PowerShell
    window
-5. When the updater prints "Update complete!", RelicBot relaunches with the
-   new version
+5. When the updater prints "Update complete!", RelicBot relaunches
 
-You no longer need to download the ZIP yourself.
+You do not need to download the ZIP yourself. **No internet on that
+machine?** The dialog also offers **Use a downloaded ZIP…**.
 
-**No internet on that machine?** The update dialog also offers
-**Use a downloaded ZIP…** — fetch `RelicBot_vX.Y.Z.zip` from the Releases
-page or NexusMods however you like, then point RelicBot at it. A ZIP you
-picked yourself is never deleted; one RelicBot downloaded is cleaned up
-after the update.
+**If you downloaded from NexusMods** (`RelicBot_Nexus_vX.Y.Z.zip`):
+
+1. Download the newest ZIP from the NexusMods page
+2. Click **Update** and select it — RelicBot closes and the updater runs
+3. When it prints "Update complete!", RelicBot relaunches
+
+This package never downloads anything on its own. NexusMods asks that a
+mod's built-in updater install a file you downloaded yourself rather than
+fetch one from another site, so the NexusMods copy always uses the file
+picker. A ZIP you picked yourself is never deleted; one RelicBot
+downloaded is cleaned up after the update.
 
 The updater automatically preserves:
 - Your profiles and settings

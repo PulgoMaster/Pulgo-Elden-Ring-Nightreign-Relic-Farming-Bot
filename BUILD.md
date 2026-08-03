@@ -121,8 +121,31 @@ PyTorch DLL collection and bundled-model compression).
 ## Packaging for distribution
 
 ```powershell
-Compress-Archive -Path 'dist\RelicBot' -DestinationPath 'RelicBot_vX.Y.Z.zip'
+py -3.14 package_release.py
 ```
+
+`package_release.py` verifies the build is complete, then writes **two**
+packages from that single build:
+
+| Package | `update_channel.txt` | Destination |
+|---|---|---|
+| `RelicBot_vX.Y.Z.zip` | `github` | GitHub release |
+| `RelicBot_Nexus_vX.Y.Z.zip` | `nexus` | NexusMods upload |
+
+The only difference between them is that one-line sidecar, read at runtime
+by `_update_channel()`. The `github` package's Update button fetches the
+newest release from GitHub and installs it; the `nexus` package's Update
+button only installs a ZIP the user picked and never contacts GitHub,
+which is what NexusMods requires — their rules say a mod's in-app updater
+must install a user-provided file rather than pull one from another site.
+
+A missing `update_channel.txt` means `github`, so installs predating this
+scheme keep working. Upload the right ZIP to the right place: putting the
+`github` package on NexusMods would ship them an auto-downloading updater.
+
+The script refuses to package a build that is missing files or that still
+contains `profiles/`, `save_backups/`, `batch_output/` or `sequences/`
+folders left behind by a local smoke-test run.
 
 The resulting ZIP contains `RelicBot.exe`, `GUIDE.txt`,
 `build_flavor.txt`, and the `_internal\` payload folder. Everything the

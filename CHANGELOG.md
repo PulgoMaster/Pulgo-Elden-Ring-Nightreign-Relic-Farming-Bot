@@ -4,6 +4,38 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.8.9] — 2026-08-02 — BRANCHING MODE REPAIRED + SEPARATE NEXUSMODS PACKAGE
+
+### Fixed: Branching Mode would not start the bot
+- With **Branching Mode** ticked, pressing Start did nothing — Nightreign never opened and the bot simply sat on "Running (Batch)…" until stopped. Unticking it and starting again worked normally.
+- Cause: an internal error at the very beginning of the run, before the game-launch step, triggered only when Branching Mode was enabled. It has been present since 1.8.5; no other mode was affected.
+
+### Fixed: Branching Mode discarded the branch it had just made
+- After the first match, Branching Mode is meant to keep that save and continue rolling from it. Instead the run reverted to the original save and every following iteration ended early.
+- Cause: the bot compares each iteration's murk total against the previous one to detect a save restore that silently failed. A new branch legitimately holds **less** murk — it was spent buying the relics that produced the match — so that safeguard read the drop as a failed restore and put the original save back.
+- The comparison now re-establishes its reference point whenever a new branch is created, and still guards against failed restores within a branch, where every iteration does restore the same save.
+
+### Fixed: a greyed-out setting could still affect the run
+- Settings that depend on another setting — Branching Mode on Standard, Hybrid on GPU Acceleration, GPU Always Analyze on Hybrid, Smart Throttle and Excl. Analysis on Async, Intermittent on Backlog — grey out when the setting above them is off. That greying only stopped you clicking them: the stored value was still read while the run was underway, so a setting you could not see or reach could still change what the bot did.
+- Branching Mode showed this most clearly. It is Standard-mode only, because it has to read each relic as it is bought in order to know when to stop rolling. **Apply Recommended Settings** and loading a profile both write Async / Backlog / Hybrid directly, so Branching could end up ticked while another analysis mode ran — and the run would quietly behave like an ordinary one. No branches, no warning.
+- A setting whose parent is off is now inert as well as greyed, everywhere, and the run says so in the log rather than ignoring it silently.
+- Your choice is no longer thrown away when a parent is switched off. Previously, turning off GPU Acceleration cleared Hybrid, and turning Hybrid off cleared GPU Always Analyze, so turning the parent back on left the sub-setting off and you had to re-tick it. These now stay as you left them and simply resume when their parent comes back.
+
+### Changed: running out of murk is confirmed before the run ends
+- Branching Mode ends the run once the current branch's save can no longer afford a relic, which is the intended finish. It now confirms that on a second iteration first, so a single misread of the murk counter cannot end a long overnight run early.
+
+### Changed: unexpected errors are now reported
+- If something unexpected goes wrong during a run, the bot writes the error to the log and re-enables the Start button instead of stopping silently. Export Diagnostics captures it too.
+
+### Added: a NexusMods build with a manual updater
+- RelicBot now ships as two packages built from the same program: `RelicBot_vX.Y.Z.zip` from GitHub, and `RelicBot_Nexus_vX.Y.Z.zip` from NexusMods.
+- The **GitHub** package keeps the automatic updater added in 1.8.8 — the Update button checks for a newer release, downloads it, and installs it.
+- The **NexusMods** package's Update button opens a file picker and installs a ZIP you downloaded yourself; it never contacts GitHub. NexusMods asks that a mod's built-in updater install a user-provided file rather than fetch one from another site, and this respects that.
+- Everything else is identical between the two — same features, same bot. Only the update step differs, and each package's Update tooltip and GUIDE section describe the behaviour you actually have.
+- Existing installs are unaffected and keep the automatic updater.
+
+---
+
 ## [1.8.8] — 2026-08-01 — GPU ACCELERATION REPAIRED + AUTOMATIC UPDATES
 
 ### Fixed: GPU Acceleration could not work at all

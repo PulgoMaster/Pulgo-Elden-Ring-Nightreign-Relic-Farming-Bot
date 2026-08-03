@@ -50,12 +50,38 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.8.8"
+APP_VERSION = "1.8.9"
 
 # Cross-flavor flag. Mainline = False, CE branch flips this to True.
 # Drives title string + support-link routing so the CE build deep-links to
 # its own branch on GitHub instead of master.
 _BUILD_IS_CE = False
+
+# Sidecar naming which update path this copy uses. Read at RUNTIME rather than
+# baked in, so one build can be packaged for both channels by shipping a
+# different one-line file next to the EXE:
+#   github  — the Update button fetches the newest release from GitHub itself
+#   nexus   — the Update button only installs a ZIP the user picked
+#
+# The NexusMods package must be 'nexus': their rules require the in-app updater
+# to install a user-provided file rather than fetch one from another site, and
+# an updater that replaces the EXE off-site would mean the binary users run is
+# no longer the one Nexus scanned.
+#
+# Deliberately SEPARATE from build_flavor.txt — that file encodes the build
+# family (mainline vs ce) and drives cross-flavor protection. Overloading it
+# with a channel value would make a Nexus ZIP refuse to update a mainline
+# install. A missing file means 'github', so existing installs are unaffected.
+_UPDATE_CHANNEL_FILE = os.path.join(_REPO_ROOT, "update_channel.txt")
+
+
+def _update_channel() -> str:
+    """Return this copy's update channel: 'github' (default) or 'nexus'."""
+    try:
+        with open(_UPDATE_CHANNEL_FILE, "r", encoding="utf-8") as f:
+            return "nexus" if f.read().strip().lower() == "nexus" else "github"
+    except Exception:
+        return "github"
 
 
 def _detect_steam_exe(game_exe: str = "") -> str:
@@ -743,6 +769,8 @@ class RelicBotApp(tk.Tk):
         self._branch_current_reset_path: str  = ""
         self._branch_latest_creator_dir: str  = ""
         self._branch_double_letter_active     = False  # True after 26-branch rename pass
+        self._branch_out_of_murk              = False
+        self._branch_low_murk_strikes         = 0
         self._iter_input_drop_count      = 0
         self._iter_gpu_aa_suppressed     = False
         self._clean_cycles_since_suppress = 0
@@ -893,13 +921,23 @@ class RelicBotApp(tk.Tk):
             profile_frame, text="Update", command=self._run_updater,
         )
         _update_btn.grid(row=0, column=7, **pad)
-        _Tooltip(_update_btn,
-                 "Check GitHub for a newer RelicBot release.\n"
-                 "If one is available it downloads automatically and installs.\n"
-                 "RelicBot will close during the update — profiles, sequences,\n"
-                 "and GPU acceleration are preserved.\n\n"
-                 "If you are offline, the dialog also lets you pick a\n"
-                 "RelicBot*.zip you downloaded by hand.")
+        if _update_channel() == "nexus":
+            _update_tip = (
+                "Install a RelicBot update you downloaded from NexusMods.\n"
+                "Click to choose the downloaded RelicBot*.zip file.\n\n"
+                "RelicBot will close during the update — profiles, sequences,\n"
+                "and GPU acceleration are preserved."
+            )
+        else:
+            _update_tip = (
+                "Check GitHub for a newer RelicBot release.\n"
+                "If one is available it downloads automatically and installs.\n"
+                "RelicBot will close during the update — profiles, sequences,\n"
+                "and GPU acceleration are preserved.\n\n"
+                "If you are offline, the dialog also lets you pick a\n"
+                "RelicBot*.zip you downloaded by hand."
+            )
+        _Tooltip(_update_btn, _update_tip)
 
         # Pre-initialize vars that are referenced by multiple sections below
         self.batch_output_var = tk.StringVar(value=os.path.join(_REPO_ROOT, "batch_output"))
@@ -1496,9 +1534,9 @@ class RelicBotApp(tk.Tk):
             Pure standard mode (no async/backlog/hybrid) = workers unused, grayed.
             """
             _gpu     = self._gpu_accel_var.get()
-            _hyb     = self._hybrid_var.get()
-            _async   = self._async_enabled_var.get()
-            _backlog = self._backlog_mode_var.get()
+            _hyb     = self._eff_hybrid()
+            _async   = self._eff_async()
+            _backlog = self._eff_backlog()
             # Workers are only consumed by Async, Backlog, or Hybrid paths.
             # In pure standard mode they're dead weight — gray out so users
             # don't waste RAM on an unused setting.
@@ -1530,33 +1568,28 @@ class RelicBotApp(tk.Tk):
                 return
             _async_sub_updating[0] = True
             try:
-                _on = self._async_enabled_var.get()
+                _on = self._eff_async()
 
                 # Excl.Ops is async-only
                 _ebp_chk.config(state="normal" if _on else "disabled")
 
-                # Unified Hybrid: requires GPU Accel AND branching mode off.
-                # Hybrid uses async-family analysis which is incompatible with
-                # branching mode's sync requirement.
-                _br_on = self._branching_mode_var.get()
-                _hyb_ok = self._gpu_accel_var.get() and not _br_on
+                # Greying below mirrors the _eff_* predicates exactly — a
+                # setting is clickable precisely when it is live. Values are
+                # deliberately NOT cleared when a parent goes off: the choice
+                # is preserved for when the parent comes back, and the _eff_*
+                # accessors keep it inert meanwhile.
+
+                # Unified Hybrid: requires GPU Accel.
+                _hyb_ok = self._eff_gpu_accel()
                 _hyb_chk.config(state="normal" if _hyb_ok else "disabled")
-                if not _hyb_ok:
-                    self._hybrid_var.set(False)
-                _hybrid_on = self._hybrid_var.get()
+                _hybrid_on = self._eff_hybrid()
 
                 # Smart Throttle: only valid when Async is on AND Hybrid is off.
-                # Enabling Hybrid clears and disables Smart Throttle automatically.
-                _st_ok = _on and not _hybrid_on
-                if not _st_ok and self._smart_throttle_var.get():
-                    self._smart_throttle_var.set(False)
+                _st_ok = self._eff_async() and not _hybrid_on
                 st_chk.config(state="normal" if _st_ok else "disabled")
 
-                # GPU Always Analyze: available whenever Hybrid is on.
-                # Smart Throttle is already cleared when Hybrid is on — no extra check needed.
+                # GPU Always Analyze: available whenever Hybrid is live.
                 _gpu_aa_chk.config(state="normal" if _hybrid_on else "disabled")
-                if not _hybrid_on:
-                    self._gpu_always_analyze_var.set(False)
 
                 _update_bf_gpu_lock()
             finally:
@@ -1714,7 +1747,9 @@ class RelicBotApp(tk.Tk):
         )
         branching_chk.grid(row=9, column=0, columnspan=5, sticky="w", **pad)
         _Tooltip(branching_chk,
-                 "Standard mode only — mutually exclusive with Async / Backlog / Hybrid.\n\n"
+                 "Standard mode only. While Async or Backlog analysis is on this\n"
+                 "setting is greyed out and has no effect, whatever it\n"
+                 "is set to.\n\n"
                  "When the bot finds a HIT or GOD ROLL during a buy cycle, it finishes\n"
                  "analyzing that cycle, cancels remaining cycles for the iteration, and\n"
                  "the next iteration starts from THAT iteration's save (not the original).\n\n"
@@ -1778,16 +1813,18 @@ class RelicBotApp(tk.Tk):
                 return
             _mutex_updating[0] = True
             try:
-                _a  = self._async_enabled_var.get()
-                _b  = self._backlog_mode_var.get()
-                _h  = self._hybrid_var.get()
-                _br = self._branching_mode_var.get()
-                # Async: disabled when backlog or branching is on
-                async_chk.config(state="disabled" if (_b or _br) else "normal")
-                # Backlog: disabled when async or branching is on
-                backlog_chk.config(state="disabled" if (_a or _br) else "normal")
-                # Branching: disabled when any of async/backlog/hybrid is on
-                branching_chk.config(state="disabled" if (_a or _b or _h) else "normal")
+                _a  = self._eff_async()
+                _b  = self._eff_backlog()
+                _br = self._eff_branching()
+                # Async: disabled when backlog is on. Branching does NOT gray
+                # it out — the analysis mode wins, and Branching is the side
+                # that goes inert (see _eff_branching).
+                async_chk.config(state="disabled" if _b else "normal")
+                # Backlog: disabled when async is on
+                backlog_chk.config(state="disabled" if _a else "normal")
+                # Branching: Standard mode only — disabled whenever an
+                # analysis mode is live. It stays checked but does nothing.
+                branching_chk.config(state="disabled" if (_a or _b) else "normal")
                 # Hybrid's enable/disable state is fully handled by
                 # _update_async_sub_state (which now traces branching too)
                 # — no duplicate handling needed here.
@@ -1834,7 +1871,7 @@ class RelicBotApp(tk.Tk):
         ttk.Label(_ibl_frame, text="iteration(s)").grid(row=0, column=3, sticky="w")
 
         def _update_ibl_state(*_):
-            _on = self._backlog_mode_var.get()
+            _on = self._eff_backlog()
             _state = "normal" if _on else "disabled"
             _ibl_chk.config(state=_state)
             _ibl_spin.config(state=_state)
@@ -2861,10 +2898,10 @@ class RelicBotApp(tk.Tk):
           • Pure standard mode with no async/backlog/hybrid (workers unused)
         """
         _gpu_locked = (self._gpu_accel_var.get()
-                       and not self._hybrid_var.get())
-        _no_consumer = not (self._async_enabled_var.get()
-                            or self._backlog_mode_var.get()
-                            or self._hybrid_var.get())
+                       and not self._eff_hybrid())
+        _no_consumer = not (self._eff_async()
+                            or self._eff_backlog()
+                            or self._eff_hybrid())
         if _gpu_locked or _no_consumer:
             state = "disabled"
         else:
@@ -2914,6 +2951,81 @@ class RelicBotApp(tk.Tk):
             self._steam_exe_path = path
             self._save_app_config()
 
+    # ── Effective setting state ──────────────────────────────────────── #
+    # A sub-setting is LIVE only while its parent mode or setting is on. When
+    # the parent is off the checkbox greys out but its stored value is kept on
+    # purpose, so the user's choice survives toggling the parent off and back
+    # on. That means a stored value must never be read directly to decide what
+    # the bot does — a greyed setting has to be inert, not merely unclickable.
+    #
+    # Every runtime decision goes through these accessors, and the UI greys
+    # widgets from the same predicates, so "greyed out" and "has no effect"
+    # cannot drift apart.
+    #
+    # Precedence is fixed and acyclic. The analysis mode is decided first
+    # (Backlog over Async, both over Hybrid, which is a worker option inside
+    # them). Branching Mode is Standard-mode only, so it is inert whenever any
+    # of those is live — never the other way round.
+
+    def _eff_gpu_accel(self) -> bool:
+        """GPU acceleration — parent: CUDA actually present on this machine."""
+        return bool(self._gpu_accel_var.get()) and bool(self._hw_cuda_available)
+
+    def _eff_backlog(self) -> bool:
+        """Backlog Mode — top-level analysis mode, takes priority over Async."""
+        return bool(self._backlog_mode_var.get())
+
+    def _eff_async(self) -> bool:
+        """Async Analysis — top-level, yields to Backlog."""
+        return bool(self._async_enabled_var.get()) and not self._eff_backlog()
+
+    def _eff_hybrid(self) -> bool:
+        """Hybrid GPU+CPU — parent: GPU accel, inside an Async/Backlog run.
+
+        Hybrid is a worker option, not a mode of its own: with neither Async
+        nor Backlog live there are no workers for it to apply to.
+        """
+        return (bool(self._hybrid_var.get()) and self._eff_gpu_accel()
+                and (self._eff_async() or self._eff_backlog()))
+
+    def _eff_gpu_always_analyze(self) -> bool:
+        """GPU Always Analyze — parent: Hybrid."""
+        return bool(self._gpu_always_analyze_var.get()) and self._eff_hybrid()
+
+    def _eff_smart_throttle(self) -> bool:
+        """Smart Throttle — parent: Async, and only while Hybrid is off."""
+        return (bool(self._smart_throttle_var.get())
+                and self._eff_async() and not self._eff_hybrid())
+
+    def _eff_exclude_buy_phase(self) -> bool:
+        """Exclude Analysis During Operations — parent: Async."""
+        return bool(self._exclude_buy_phase_var.get()) and self._eff_async()
+
+    def _eff_intermittent_backlog(self) -> bool:
+        """Intermittent Backlog Analysis — parent: Backlog Mode."""
+        return bool(self._intermittent_backlog_var.get()) and self._eff_backlog()
+
+    def _branching_requested(self) -> bool:
+        """The user's stored Branching Mode choice, ignoring whether it is live.
+
+        For messaging only — never for deciding behaviour. Comparing this with
+        `_eff_branching()` is how the run detects "ticked but inert" so it can
+        say so in the log instead of silently doing nothing.
+        """
+        return bool(self._branching_mode_var.get())
+
+    def _eff_branching(self) -> bool:
+        """Branching Mode — parent: Standard mode.
+
+        Branching has to analyse each relic inline to know when to stop
+        rolling, so it cannot run under Async or Backlog. With either live
+        this returns False and every branching code path is skipped, whatever
+        the checkbox still holds.
+        """
+        return (bool(self._branching_mode_var.get())
+                and not self._eff_async()
+                and not self._eff_backlog())
+
     # ── Branching Mode helpers ───────────────────────────────────────── #
     @staticmethod
     def _branch_letter_for_index(idx: int, force_double: bool = False) -> str:
@@ -2951,21 +3063,26 @@ class RelicBotApp(tk.Tk):
         """Format a branching-mode iteration folder name.
 
         Examples:
-          (#, 0, 1, False)                       → '#00_Iter_001'
-          (#, 4, 5, True)                        → '#04_Branch_Split_Iter_005'
-          (A, 0, 6, False)                       → 'A00_Iter_006'
-          (A, 3, 9, False, 'SMART_HIT')          → 'A03_Iter_009_SMART_HIT'
-          (B, 0, 16, True)                       → 'B00_Branch_Split_Iter_016'
-          (B, 0, 16, True, is_best=True)         → 'B00_BEST_Branch_Split_Iter_016'
+          (#, 0, 1, False)                       → '#000_Iter_001'
+          (#, 4, 5, True)                        → '#004_Branch_Split_Iter_005'
+          (A, 0, 6, False)                       → 'A000_Iter_006'
+          (A, 3, 9, False, 'SMART_HIT')          → 'A003_Iter_009_SMART_HIT'
+          (B, 0, 16, True)                       → 'B000_Branch_Split_Iter_016'
+          (B, 0, 16, True, is_best=True)         → 'B000_BEST_Branch_Split_Iter_016'
 
-        Position is zero-padded to 2 digits. iter_num is zero-padded to 3.
+        Position is zero-padded to 3 digits, matching iter_num. Two digits
+        sorted wrongly past position 99 ('#100' lands between '#09' and
+        '#10'), which a long overnight batch on the pre-branch '#' segment
+        reaches easily — and sortable ordering is the whole point of the
+        prefix. Safe to change: branching never ran successfully before
+        v1.8.9, so no existing run folders use the old width.
         Branch creators drop HIT/GOD_ROLL match suffixes (the 'Branch_Split'
         marker tells you all you need); other suffixes (smart hit, near miss,
         excluded hit) ARE preserved on non-creator iterations.
         is_best applies only to branch creators — marks the LATEST creator
         as the save with the most accumulated matches.
         """
-        pos_str = f"{position:02d}"
+        pos_str = f"{position:03d}"
         iter_str = f"{iter_num:03d}"
         if is_branch_creator:
             best_part = "_BEST" if is_best else ""
@@ -2987,11 +3104,11 @@ class RelicBotApp(tk.Tk):
     def _branch_screenshot_prefix(branch_letter: str, position: int) -> str:
         """Return the screenshot filename prefix for an iteration.
 
-        Example: ('A', 4) → 'A04'. Used to rename relic / hit / smart hit /
+        Example: ('A', 4) → 'A004'. Used to rename relic / hit / smart hit /
         near miss / excluded hit screenshot files so the cumulative chain-copy
         view shows where each relic came from.
         """
-        return f"{branch_letter}{position:02d}"
+        return f"{branch_letter}{position:03d}"
 
     def _branch_reset_state(self):
         """Reset all branching runtime state. Called at batch start."""
@@ -3001,9 +3118,12 @@ class RelicBotApp(tk.Tk):
         self._branch_current_reset_path       = ""
         self._branch_latest_creator_dir       = ""
         self._branch_double_letter_active     = False
-        # Set True when Phase 0 reads murk and finds it < per-relic cost.
-        # Checked by the outer batch loop to abort the run cleanly.
+        # Set True when Phase 0 confirms murk < per-relic cost on the current
+        # branch's save. Checked by the outer batch loop to abort the run
+        # cleanly. `_branch_low_murk_strikes` counts consecutive below-cost
+        # iterations so one bad OCR read can't end the run on its own.
         self._branch_out_of_murk              = False
+        self._branch_low_murk_strikes         = 0
 
     def _branch_current_letter(self) -> str:
         """Convenience: current branch's letter, accounting for double-letter rename."""
@@ -3236,7 +3356,14 @@ class RelicBotApp(tk.Tk):
         If GitHub is unreachable (offline, rate limited, DNS blocked) the
         dialog stays open with a "Use a downloaded ZIP" button so the user
         can still update from a file they fetched by hand.
+
+        The NexusMods package takes the manual path instead and never
+        contacts GitHub at all — see _run_updater_manual.
         """
+        if _update_channel() == "nexus":
+            self._run_updater_manual()
+            return
+
         if not messagebox.askyesno(
             "Update RelicBot",
             "RelicBot will check GitHub for a newer release.\n\n"
@@ -3488,6 +3615,27 @@ class RelicBotApp(tk.Tk):
             self.after(0, _handoff)
 
         threading.Thread(target=_work, daemon=True).start()
+
+    def _run_updater_manual(self) -> None:
+        """Update flow for the NexusMods package — install a user-picked ZIP.
+
+        This copy never contacts GitHub: NexusMods requires the in-app
+        updater to install a file the user downloaded themselves rather than
+        fetching one from another site.  No version check is performed
+        either, since that would mean querying an off-site API.
+        """
+        if not messagebox.askyesno(
+            "Update RelicBot",
+            "Download the latest RelicBot ZIP from the NexusMods page,\n"
+            "then select it here.\n\n"
+            "RelicBot will close to perform the update.\n\n"
+            "Profiles, sequences, and GPU acceleration are preserved.\n\n"
+            "Continue?",
+        ):
+            return
+        picked = self._pick_update_zip()
+        if picked:
+            self._apply_update_zip(picked)
 
     def _pick_update_zip(self) -> str:
         """Offline fallback: let the user choose an already-downloaded ZIP."""
@@ -4925,8 +5073,8 @@ class RelicBotApp(tk.Tk):
             from bot.screen_capture import get_screen_size
             sw, sh = get_screen_size()
             self._overlay = BotOverlay(self)
-            self._overlay.build(sw, sh, async_mode=self._async_enabled_var.get(),
-                                backlog_mode=self._backlog_mode_var.get(),
+            self._overlay.build(sw, sh, async_mode=self._eff_async(),
+                                backlog_mode=self._eff_backlog(),
                                 settings=self._get_ov_settings())
             self._overlay.set_reset_iter_callback(self._request_reset_iter)
             self._overlay.set_stop_callback(self._request_stop_after_batch)
@@ -5283,7 +5431,7 @@ class RelicBotApp(tk.Tk):
             os.path.basename(self.game_exe_var.get().strip()))[0].lower() or "nightreign"
 
         self._set_status("Running (Batch)…", "green")
-        self.bot_thread = threading.Thread(target=self._batch_loop, daemon=True)
+        self.bot_thread = threading.Thread(target=self._batch_loop_guarded, daemon=True)
         self.bot_thread.start()
         threading.Thread(target=self._game_watchdog, daemon=True,
                          name="game-watchdog").start()
@@ -5314,6 +5462,41 @@ class RelicBotApp(tk.Tk):
     #  BATCH MODE LOOP
     # ------------------------------------------------------------------ #
 
+    def _batch_loop_guarded(self):
+        """Run the batch loop with a last-resort crash reporter.
+
+        `_batch_loop` runs on a daemon thread. An unhandled exception there
+        kills the thread and prints to a stderr that does not exist in a
+        windowed build — the UI simply sits on "Running (Batch)…" forever
+        with no game launch and no message. A Branching Mode crash hid in
+        exactly that blind spot from v1.8.5 to v1.8.9. Anything that escapes
+        the loop now reaches the user's log and the diagnostic file.
+        """
+        try:
+            self._batch_loop()
+        except Exception as e:
+            import traceback
+            _tb = traceback.format_exc()
+            self._log(f"FATAL: the batch loop crashed — "
+                      f"{type(e).__name__}: {e}")
+            self._log("  This is a bug. Please report it with the lines below "
+                      "(Export Diagnostics captures them too).")
+            for _line in _tb.strip().splitlines()[-8:]:
+                self._log(f"  {_line}")
+            if self._diag:
+                try:
+                    self._diag.log_failure(
+                        "SYSTEM", "batch_loop_crash",
+                        {"error": f"{type(e).__name__}: {e}"[:120],
+                         "traceback": _tb[-800:]},
+                        severity="FATAL")
+                except Exception:
+                    pass
+            try:
+                self.after(0, self._reset_controls)
+            except Exception:
+                pass
+
     def _batch_loop(self):
         # Raise bot thread priority so input sends are never starved by OCR
         # threads running in the background.  THREAD_PRIORITY_ABOVE_NORMAL = 1.
@@ -5331,12 +5514,17 @@ class RelicBotApp(tk.Tk):
         backup_path  = os.path.join(_backup_dir, os.path.basename(save_path))
         self._run_backup_path = backup_path   # accessible to _run_iteration_phases
 
+        # Run limits are read up-front: the Branching Mode note below needs
+        # them, and they are plain Tk var reads with no dependencies.
+        limit_type = self.batch_limit_type.get()
+        limit_value = float(self.batch_limit_var.get())
+
         # Branching Mode runtime state — reset at batch start. Initial reset
         # source = the pristine pre-bot backup just created. Branch trigger
         # logic (Phase 4) updates this pointer when a HIT/GOD ROLL is found.
         # Pristine backup file at backup_path is NEVER overwritten by the bot.
         self._branch_reset_state()
-        if self._branching_mode_var.get():
+        if self._eff_branching():
             self._branch_current_reset_path = backup_path
             if limit_type == "loops" and int(limit_value) <= 1:
                 self._log(
@@ -5396,8 +5584,6 @@ class RelicBotApp(tk.Tk):
         else:
             self._smart_doors = []
         region = self._get_region()
-        limit_type = self.batch_limit_type.get()
-        limit_value = float(self.batch_limit_var.get())
         mode_desc = "loops"
         base_output = self.batch_output_var.get()
         # hit_min is no longer needed — per-door thresholds handle everything.
@@ -5466,14 +5652,14 @@ class RelicBotApp(tk.Tk):
                 # glance and self-diagnose configuration mismatches.
                 _rtype_label = "Deep of Night" if self.relic_type_var.get() == "night" else "Normal"
                 _mode_parts = []
-                if self._branching_mode_var.get():
+                if self._eff_branching():
                     _mode_parts.append("Branching")
-                elif self._async_enabled_var.get():
-                    if self._hybrid_var.get():
+                elif self._eff_async():
+                    if self._eff_hybrid():
                         _mode_parts.append("Hybrid GPU+CPU")
                     else:
                         _mode_parts.append("Async")
-                elif self._backlog_mode_var.get():
+                elif self._eff_backlog():
                     _mode_parts.append("Backlog")
                 else:
                     _mode_parts.append("Standard")
@@ -5628,9 +5814,20 @@ class RelicBotApp(tk.Tk):
         save_filename = os.path.basename(save_path)
         _prev_save_dir = None  # iteration folder waiting for its save copy
 
+        # ── Effective mode state for this run ─────────────────────────── #
+        # Read through the _eff_* accessors, never the raw variables: a
+        # checkbox whose parent is off is greyed but still holds its value,
+        # and must have no effect on the run.
+        _branching_mode = self._eff_branching()
+        if self._branching_requested() and not _branching_mode:
+            self._log(
+                "  NOTE: Branching Mode is Standard-mode only and is inactive "
+                "for this run — Async or Backlog analysis is enabled. Turn "
+                "those off to use Branching Mode.")
+
         # ── Backlog mode: defer all OCR until after the batch ─────────── #
-        _backlog_mode         = self._backlog_mode_var.get()
-        _intermittent_mode    = _backlog_mode and self._intermittent_backlog_var.get()
+        _backlog_mode         = self._eff_backlog()
+        _intermittent_mode    = self._eff_intermittent_backlog()
         _intermittent_every_n = max(1, self._intermittent_every_n_var.get())
         _iters_since_drain    = 0   # how many iterations since last intermittent drain
 
@@ -5638,9 +5835,7 @@ class RelicBotApp(tk.Tk):
         # the entire capture phase — enqueued immediately after each iteration,
         # no game-close needed for GPU.  CPU workers are gated: released every N
         # iterations to handle any remainder the GPU hasn't reached yet.
-        _gpu_aa_bl = (self._gpu_always_analyze_var.get()
-                      and self._hybrid_var.get()
-                      and self._gpu_accel_var.get()
+        _gpu_aa_bl = (self._eff_gpu_always_analyze()
                       and self._parallel_enabled_var.get())
         _bg_gpu_active  = _backlog_mode and _intermittent_mode and _gpu_aa_bl
         _bg_gpu_q       = queue.PriorityQueue() if _bg_gpu_active else None
@@ -5721,11 +5916,11 @@ class RelicBotApp(tk.Tk):
 
         # ── Async mode setup ──────────────────────────────────────────── #
         # Backlog mode takes priority — skip async workers during the run.
-        _async_mode = self._async_enabled_var.get() and not _backlog_mode
+        _async_mode = self._eff_async()
         # Exclude Analysis While Operations Are Happening: workers run ONLY during
         # the game-close → Phase -0.5 window.  Hard gate managed by the batch loop;
         # all in-phase throttle releases inside _run_iteration_phases are suppressed.
-        _excl_ops_mode = _async_mode and self._exclude_buy_phase_var.get()
+        _excl_ops_mode = self._eff_exclude_buy_phase()
         _async_relic_q: queue.PriorityQueue | None = None
         _async_dir_map:    dict = {}   # iteration → final dir (after any rename)
         _async_iter_state: dict = {}   # iteration → per-iter completion tracking
@@ -5741,8 +5936,7 @@ class RelicBotApp(tk.Tk):
             self._async_state_lock  = _async_state_lock
             self._async_results_list = results
             _gpu_on          = self._gpu_accel_var.get()
-            _async_hybrid    = (_gpu_on
-                                and self._hybrid_var.get())
+            _async_hybrid    = self._eff_hybrid()
             _worker_max      = min(8, max(1, self._hw_cpu_cores or 8))
             # CPU worker count — only used when Hybrid is on or GPU is off.
             # When GPU is on without Hybrid, the GPU worker runs alone.
@@ -5778,7 +5972,7 @@ class RelicBotApp(tk.Tk):
             else:
                 _worker_desc  = f"{_async_workers} CPU worker(s)"
                 _total_workers = _async_workers
-            _gpu_aa_active = _async_hybrid and self._gpu_always_analyze_var.get()
+            _gpu_aa_active = self._eff_gpu_always_analyze()
             self._log(
                 f"Async Analysis enabled — {_worker_desc}; "
                 + f"OCR cores: {_ocr_cores}/{_cpu_cores} ({_mode_tag}); "
@@ -5803,7 +5997,7 @@ class RelicBotApp(tk.Tk):
                     _ra.set_thread_device(use_gpu)
                     _ra._get_reader()   # warm CUDA/CPU model now, before first task arrives
                     while True:
-                        _gpu_aa = (self._gpu_always_analyze_var.get()
+                        _gpu_aa = (self._eff_gpu_always_analyze()
                                    and not getattr(self, "_iter_gpu_aa_suppressed", False))
                         if _gpu_aa and not use_gpu:
                             # GPU AA on, CPU worker: wait for gate BEFORE dequeuing.
@@ -6047,17 +6241,17 @@ class RelicBotApp(tk.Tk):
                 _mode_parts.append("Backlog")
                 if _intermittent_mode:
                     _mode_parts.append(f"Intermittent/{_intermittent_every_n}")
-                if self._gpu_always_analyze_var.get():
+                if self._eff_gpu_always_analyze():
                     _mode_parts.append("GPU.Always")
             elif _async_mode:
                 _mode_parts.append("Async")
                 if _excl_ops_mode:
                     _mode_parts.append("Excl.Ops")
-                if self._gpu_always_analyze_var.get():
+                if self._eff_gpu_always_analyze():
                     _mode_parts.append("GPU.Always")
             else:
                 _mode_parts.append("Additional CPU Workers")
-            if self._smart_throttle_var.get():
+            if self._eff_smart_throttle():
                 _mode_parts.append("SmartThrottle")
             if self._smart_analyze_var.get():
                 _mode_parts.append("SmartAnalyze")
@@ -6072,7 +6266,7 @@ class RelicBotApp(tk.Tk):
 
             # Branching Mode: out-of-murk on the current branch's save means
             # no more relics can be bought — terminate the batch.
-            if self._branching_mode_var.get() and self._branch_out_of_murk:
+            if self._eff_branching() and self._branch_out_of_murk:
                 self._log(
                     f"[Branching] Out of murk on branch "
                     f"{self._branch_current_letter()} after iteration "
@@ -6135,7 +6329,7 @@ class RelicBotApp(tk.Tk):
             # If this iter turns out to be a branch creator (HIT/GOD ROLL
             # found), Phase 5 renames the folder to add the 'Branch_Split'
             # marker at iteration end.
-            if self._branching_mode_var.get():
+            if self._eff_branching():
                 _bl = self._branch_current_letter()
                 folder_name = self._branch_iter_folder_name(
                     _bl, self._branch_position, iteration,
@@ -6193,7 +6387,7 @@ class RelicBotApp(tk.Tk):
             # on how many branches have been created so far. Pristine backup
             # is never touched; we COPY from whichever pointer is live.
             _restore_source = backup_path
-            if self._branching_mode_var.get() \
+            if self._eff_branching() \
                     and self._branch_current_reset_path \
                     and os.path.isfile(self._branch_current_reset_path):
                 _restore_source = self._branch_current_reset_path
@@ -7138,7 +7332,7 @@ class RelicBotApp(tk.Tk):
             # Rename folder: GOD ROLL > HIT > SMART > EXCLUDED.
             # Near-miss iterations keep plain NNN — the Near Miss aggregation
             # folder + screenshots + Info.txt provide the visibility.
-            if self._branching_mode_var.get():
+            if self._eff_branching():
                 # Branching Mode rename: branch creators get a Branch_Split
                 # marker (HIT/GOD_ROLL suffix dropped — the marker conveys it).
                 # The LATEST branch creator also gets a _BEST marker, with the
@@ -7479,7 +7673,7 @@ class RelicBotApp(tk.Tk):
             # `_branch_latest_creator_dir` as chain-copy source if this iter
             # was a creator. Now we update it to point at THIS iter's folder
             # (which Phase 5 also renamed to include Branch_Split / BEST).
-            if self._branching_mode_var.get():
+            if self._eff_branching():
                 if self._branch_creator_pending:
                     # Phase 9: if this is the 27th branch about to be created
                     # (current index 26 → next 27), trigger the multi-letter
@@ -7512,6 +7706,19 @@ class RelicBotApp(tk.Tk):
                     self._branch_current_reset_path = os.path.join(
                         iter_dir, save_filename)
                     self._branch_creator_pending = False
+                    # The new branch's save holds LESS murk than the previous
+                    # one — this iteration spent some buying the relics that
+                    # produced the match. Phase 0's anti-drift guard compares
+                    # every iteration's murk against `_global_murk_expected`
+                    # and reads a mismatch as a failed save restore, which
+                    # would wipe the branch save with the pristine backup and
+                    # abort the iteration. Clear the baseline so the next
+                    # iteration re-establishes it from the new branch's save.
+                    # The guard stays fully active WITHIN each branch, which
+                    # is where it earns its keep (every iteration on a given
+                    # branch restores the same file, so murk must not move).
+                    self._global_murk_expected = None
+                    self._branch_low_murk_strikes = 0
                     self._log(
                         f"  [Branching] Iter {iteration} is the new branch "
                         f"{self._branch_current_letter()} creator. Reset source "
@@ -7805,7 +8012,7 @@ class RelicBotApp(tk.Tk):
         # game bug or OS quirk caused isolated drops.
         _hints: list[str] = []
         _diag_ev = self._diag._ev if self._diag else {}
-        _using_async = self._async_enabled_var.get()
+        _using_async = self._eff_async()
         _using_workers = (self._parallel_enabled_var.get()
                           and self._parallel_workers_var.get() > 2)
         _no_gpu = not self._gpu_accel_var.get()
@@ -7951,7 +8158,7 @@ class RelicBotApp(tk.Tk):
         _workers    = (max(1, min(_worker_max, self._parallel_workers_var.get()))
                        if self._parallel_enabled_var.get() else 1)
         _hybrid     = (_bl_gpu_on
-                       and self._hybrid_var.get())
+                       and self._eff_hybrid())
         # Sync global GPU mode with the backlog run's intended device so
         # the retry-pass (which runs on the bot thread without a thread-local
         # override) falls back to the correct device rather than whatever the
@@ -7976,7 +8183,7 @@ class RelicBotApp(tk.Tk):
                     # gate entirely — GPU inference doesn't compete for CPU time.
                     # All other workers (CPU workers, or GPU worker with AA off)
                     # respect the shared gate as normal.
-                    _aa_live = (self._gpu_always_analyze_var.get()
+                    _aa_live = (self._eff_gpu_always_analyze()
                                 and not getattr(self, "_iter_gpu_aa_suppressed", False))
                     if not (use_gpu and _aa_live):
                         _go_ev = self._ocr_go_event
@@ -7994,7 +8201,7 @@ class RelicBotApp(tk.Tk):
             return _worker
 
         if _hybrid:
-            _gpu_aa_bl = self._gpu_always_analyze_var.get()
+            _gpu_aa_bl = self._eff_gpu_always_analyze()
             if _gpu_aa_bl:
                 # GPU Always Analyze on: GPU worker handles all tasks alone.
                 # In backlog mode there is no throttle gate to bypass (unlike
@@ -8345,7 +8552,7 @@ class RelicBotApp(tk.Tk):
         # game operations when system RAM is naturally low.
         _task_use_gpu = task.get("_use_gpu")
         _skip_mem_gate = (_task_use_gpu is True
-                          and self._gpu_always_analyze_var.get())
+                          and self._eff_gpu_always_analyze())
         if not _skip_mem_gate:
             _MEM_THRESHOLD_MB = 400
             _mem_wait_logged  = False
@@ -8916,7 +9123,7 @@ class RelicBotApp(tk.Tk):
         if ev is None:
             return
         if paused:
-            if (self._smart_throttle_var.get()
+            if (self._eff_smart_throttle()
                     and not self._is_system_stressed()):
                 return   # system is fine — let workers continue during inputs
             ev.clear()
@@ -9500,7 +9707,7 @@ class RelicBotApp(tk.Tk):
         # guard is correct from the first key press.  Re-assigned at Phase 2 setup
         # (line 5792) once _p2_async is confirmed — same intent, tighter condition.
         _exclude_buy_phase = (
-            async_iter_meta is not None and self._exclude_buy_phase_var.get()
+            async_iter_meta is not None and self._eff_exclude_buy_phase()
         )
         for _p01_att in range(_P01_MAX_ATTEMPTS):
             if not self.bot_running or self._reset_iter_requested:
@@ -9664,8 +9871,14 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             f"  Murk: {murk_val:,}  →  {_p3_count} relic(s) to review "
                             f"({murk_cost} murk each).")
+                        # A clean above-cost read clears any pending
+                        # out-of-murk suspicion for the current branch.
+                        self._branch_low_murk_strikes = 0
                         # Global murk check: first iteration sets expected value;
                         # subsequent iterations verify save restore returned the same amount.
+                        # In Branching Mode the baseline is cleared whenever a
+                        # new branch is created, so it always describes the
+                        # save the current branch actually restores from.
                         if self._global_murk_expected is None:
                             self._global_murk_expected = murk_val
                         elif murk_val != self._global_murk_expected:
@@ -9724,12 +9937,39 @@ class RelicBotApp(tk.Tk):
                             f"  Murk is below relic cost ({murk_cost:,} each) — "
                             "no relics available to buy. Ending iteration.")
                         # Branching Mode: murk floor reached on the current
-                        # branch's save. Set the abort flag so the outer
-                        # batch loop ends the run cleanly (no point trying
-                        # more iters — every iter on this save will see the
-                        # same murk total and immediately end).
-                        if self._branching_mode_var.get():
-                            self._branch_out_of_murk = True
+                        # branch's save. Ending the run is correct once the
+                        # branch really is out of murk — every iteration on
+                        # this save would see the same total and immediately
+                        # end. But a single bad murk OCR read would otherwise
+                        # kill an overnight run, so confirm before aborting.
+                        if self._eff_branching():
+                            _mbase = self._global_murk_expected
+                            if _mbase is not None and _mbase >= murk_cost:
+                                # Contradicts this branch's established
+                                # baseline. Every iteration on a branch
+                                # restores the same file, so the murk total
+                                # cannot actually have dropped — this is a
+                                # misread. End the iteration only.
+                                self._branch_low_murk_strikes = 0
+                                self._log(
+                                    f"  [Branching] Read contradicts this "
+                                    f"branch's baseline ({_mbase:,} murk) — "
+                                    f"treating as a murk misread, not "
+                                    f"exhaustion. Run continues.")
+                            else:
+                                # No baseline yet (first iteration on a new
+                                # branch): nothing to check against, so
+                                # require a second consecutive below-cost
+                                # iteration before ending the run.
+                                self._branch_low_murk_strikes = getattr(
+                                    self, "_branch_low_murk_strikes", 0) + 1
+                                if self._branch_low_murk_strikes >= 2:
+                                    self._branch_out_of_murk = True
+                                else:
+                                    self._log(
+                                        "  [Branching] Branch save may be out "
+                                        "of murk — confirming on the next "
+                                        "iteration before ending the run.")
                         return relic_results
                     else:
                         self._log(
@@ -9785,7 +10025,7 @@ class RelicBotApp(tk.Tk):
             # When True, workers stay throttled from Phase 1 start through the end of
             # Phase 2 (all screenshots captured). They then run freely during Phase 3
             # and Phase 0 of the next cycle.  Sub-option of Async Analysis only.
-            _exclude_buy_phase = _p2_async and self._exclude_buy_phase_var.get()
+            _exclude_buy_phase = _p2_async and self._eff_exclude_buy_phase()
 
             if _p2_async:
                 # Slot 0 of each batch is inline; the rest are queued.
@@ -11058,7 +11298,7 @@ class RelicBotApp(tk.Tk):
                             # outer cycle loop to stop after this cycle
                             # completes; the iteration-end logic (Phase 5)
                             # commits the branch state change.
-                            if self._branching_mode_var.get() \
+                            if self._eff_branching() \
                                     and _cat_s in ("GOD_ROLL", "HIT") \
                                     and not self._branch_creator_pending:
                                 self._branch_creator_pending = True
@@ -12200,8 +12440,8 @@ class RelicBotApp(tk.Tk):
         async_on    = getattr(self, "_async_enabled_var", None)
         workers_var = getattr(self, "_parallel_workers_var", None)
         gpu_accel   = getattr(self, "_gpu_accel_var", None) and self._gpu_accel_var.get()
-        hybrid_on   = gpu_accel and getattr(self, "_hybrid_var", None) and self._hybrid_var.get()
-        gpu_aa_on   = hybrid_on and getattr(self, "_gpu_always_analyze_var", None) and self._gpu_always_analyze_var.get()
+        hybrid_on   = gpu_accel and getattr(self, "_hybrid_var", None) and self._eff_hybrid()
+        gpu_aa_on   = hybrid_on and getattr(self, "_gpu_always_analyze_var", None) and self._eff_gpu_always_analyze()
 
         # Timing model — buy-phase scanning architecture (Proposal 1):
         #   Phase 0: shop nav once per iteration (~20 s flat)
@@ -12373,7 +12613,7 @@ class RelicBotApp(tk.Tk):
         ss_lines = []   # list of (text, tag)
         ss_lines.append(("Active modes:\n", "heading"))
 
-        _intermittent_active = _backlog_active and getattr(self, "_intermittent_backlog_var", None) and self._intermittent_backlog_var.get()
+        _intermittent_active = _backlog_active and getattr(self, "_intermittent_backlog_var", None) and self._eff_intermittent_backlog()
         _every_n = getattr(self, "_intermittent_every_n_var", None) and self._intermittent_every_n_var.get()
 
         active_parts = []
@@ -12702,10 +12942,31 @@ class RelicBotApp(tk.Tk):
             lines.append(f"Backlog Mode:            {self._backlog_mode_var.get()}")
             lines.append(f"Intermittent Backlog:    {self._intermittent_backlog_var.get()} (every {self._intermittent_every_n_var.get()} batches)")
             lines.append(f"Perf gap mult:           {self._perf_gap_mult:.3f}×  (1.0 = baseline, rises with load time)")
+            lines.append(f"Branching Mode:          {self._branching_mode_var.get()}")
             lines.append(f"Phase 0 configured:      {bool(self.phase_events[0])}")
             lines.append(f"Phase 1 configured:      {bool(self.phase_events[1])}")
             lines.append(f"Phase 2 configured:      {bool(self.phase_events[2])}")
             lines.append(f"Phase 3 configured:      {bool(self.phase_events[3])}")
+            # The values above are what the checkboxes hold. A setting whose
+            # parent is off keeps its value but has no effect on the run, so
+            # list what was actually live — otherwise a bug report reads
+            # "Hybrid: True" for a run where Hybrid did nothing.
+            _live = [n for n, on in (
+                ("GPU Acceleration",   self._eff_gpu_accel()),
+                ("Async Analysis",     self._eff_async()),
+                ("Backlog Mode",       self._eff_backlog()),
+                ("Hybrid",             self._eff_hybrid()),
+                ("GPU Always Analyze", self._eff_gpu_always_analyze()),
+                ("Smart Throttle",     self._eff_smart_throttle()),
+                ("Excl. Analysis",     self._eff_exclude_buy_phase()),
+                ("Intermittent",       self._eff_intermittent_backlog()),
+                ("Branching Mode",     self._eff_branching()),
+            ) if on]
+            lines.append(f"Effective (live) modes:  "
+                         f"{', '.join(_live) if _live else 'Standard only'}")
+            if self._branching_requested() and not self._eff_branching():
+                lines.append("  NOTE: Branching Mode is ticked but INACTIVE "
+                             "(Standard mode only — Async or Backlog is on).")
         except Exception as e:
             lines.append(f"[settings read error: {e}]")
         lines.append("")
@@ -13610,12 +13871,16 @@ class RelicBotApp(tk.Tk):
         """Apply all hardware-recommended settings in one click."""
         recs = self._get_hw_recommendations()
 
+        # These recommendations are about hardware and set the analysis mode.
+        # If that turns Async or Backlog on while Branching Mode is ticked,
+        # Branching simply greys out and goes inert like any other sub-setting
+        # whose parent is off — no special-casing needed here.
+
         # GPU settings first (other settings depend on GPU state)
         gpu_on = recs["gpu"][0] == "ON" and self._hw_cuda_available
         self._gpu_accel_var.set(gpu_on)
         self._hybrid_var.set(gpu_on and recs["hybrid"][0] == "ON")
-        self._gpu_always_analyze_var.set(
-            gpu_on and recs["gpu_aa"][0] == "ON")
+        self._gpu_always_analyze_var.set(gpu_on and recs["gpu_aa"][0] == "ON")
 
         # CPU workers
         brute_on = recs["brute"][0] == "ON"
