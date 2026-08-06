@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.8.11] — 2026-08-06 — BRANCHING MODE RESULTS ARE NOW BROWSABLE
+
+### Added: branching runs are grouped per branch when the run ends
+- A long Branching Mode run could leave 140+ iteration folders side by side in one directory, with no indication of which branch any of them belonged to. The run folder is now organised once the run finishes:
+  - **`Best Branch Preview/`** — the run's answer without digging. Every match the winning `_BEST` save carries, plus that branch's smart and excluded hits.
+  - **`Branch #/`, `Branch A/`, `Branch B/`, …** — each branch keeps all of its own iteration folders together, so a single branch browses exactly like a normal run. Beside them sit `All Hits`, `Smart Analyze Hits`, `Excluded Hits` and `Near Misses` shortcuts for that branch.
+- A category folder is only created when it has something in it, so a folder that exists is always worth opening.
+- Screenshot names keep their branch and iteration (`D048_Iter_102_Relic_5_SMART.jpg`), so a file still tells you where it came from after being filed. Screenshots that previously had no branch attribution at all now gain it.
+- Nothing is deleted or renamed — folders are only grouped. `README.txt`, `PRIORITY.txt`, `matches_log.txt` and the logs stay at the top level.
+
+### Fixed: Branching Mode collected no hit, excluded or near-miss screenshots
+- In Branching Mode the `All Hits` folder was never created at all, and `Near Miss` and `Excluded Hits` contained their Info.txt file describing screenshots that were not actually there.
+- Cause: Branching Mode renames each iteration's screenshots to carry the branch prefix, and the step that files them into those folders was still looking for the name they had *before* the rename. Finding nothing, it skipped every one silently.
+- Only Branching Mode was affected. Standard, Async, Backlog and Hybrid runs do not rename screenshots and have always filed them correctly.
+
+---
+
 ## [1.8.10] — 2026-08-06 — STANDARD MODE STOPPED ON THE FIRST MATCH
 
 ### Fixed: the run ended as soon as a relic matched (Standard mode)

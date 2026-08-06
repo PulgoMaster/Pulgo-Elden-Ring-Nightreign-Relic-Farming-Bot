@@ -17,6 +17,7 @@ import json
 import math
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -50,7 +51,7 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.8.10"
+APP_VERSION = "1.8.11"
 
 # Cross-flavor flag. Mainline = False, CE branch flips this to True.
 # Drives title string + support-link routing so the CE build deep-links to
@@ -3110,6 +3111,194 @@ class RelicBotApp(tk.Tk):
         view shows where each relic came from.
         """
         return f"{branch_letter}{position:03d}"
+
+    # Screenshot basename: optional <branch><pos>_ then Iter_<n>_Relic_<m>_<TAG>
+    _BRANCH_SHOT_RE = re.compile(
+        r"^(?:(#|[A-Z]+)(\d+)_)?Iter_(\d+)_Relic_(\d+)_([A-Z_]+)\.(jpg|jpeg|png)$",
+        re.IGNORECASE)
+    _BRANCH_ITER_DIR_RE = re.compile(r"^(#|[A-Z]+)(\d+)_(.+)$")
+    _BRANCH_TAG_CATEGORY = {
+        "MATCH": "All Hits", "HIT": "All Hits",
+        "SMART": "Smart Analyze Hits",
+        "EXCL": "Excluded Hits", "EXCLUDED_HIT": "Excluded Hits",
+        "EXCLUDED_MATCH": "Excluded Hits",
+        "NEARMISS": "Near Misses", "NEAR_MISS": "Near Misses",
+    }
+    # Flat root folders written during the run whose screenshots get filed
+    # under the branch they came from. Their Info.txt files stay put.
+    _BRANCH_ROOT_AGGREGATES = ("Smart Analyze Hits", "Excluded Hits",
+                               "Near Miss", "All Hits", "All God Rolls")
+    _BRANCH_PREVIEW_DIR = "Best Branch Preview"
+
+    @classmethod
+    def _branch_classify_shot(cls, filename):
+        """-> (branch_prefix|None, iter_num, relic_num, category) or None."""
+        m = cls._BRANCH_SHOT_RE.match(filename)
+        if not m:
+            return None
+        prefix, _pos, itr, relic, tag, _ext = m.groups()
+        cat = cls._BRANCH_TAG_CATEGORY.get(tag.upper())
+        if not cat:
+            return None
+        return (prefix, int(itr), int(relic), cat)
+
+    def _branch_reorganize_run(self, run_dir):
+        """Group a finished branching run into one folder per branch.
+
+        Produces `Branch #/`, `Branch A/`, ... each holding that branch's
+        iteration folders plus `All Hits` / `Smart Analyze Hits` /
+        `Excluded Hits` / `Near Misses` shortcuts, and a top-level
+        `Best Branch Preview/` mirroring what the winning save carries.
+
+        Categories with nothing in them are never created, so a folder that
+        exists always has something worth opening. Screenshots keep (or gain)
+        their `<branch><position>_` prefix so origin survives the move.
+
+        Presentation only — never raises into the run.
+        """
+        try:
+            entries = sorted(os.listdir(run_dir))
+        except Exception as e:
+            self._log(f"  [Branching] WARNING: could not read run dir: {e}")
+            return
+
+        reserved = set(self._BRANCH_ROOT_AGGREGATES) | {
+            "buy_qty_fails", self._BRANCH_PREVIEW_DIR}
+        groups, iter_owner, best_folder = {}, {}, None
+        for entry in entries:
+            if entry in reserved or entry.startswith("Branch "):
+                continue
+            if not os.path.isdir(os.path.join(run_dir, entry)):
+                continue
+            m = self._BRANCH_ITER_DIR_RE.match(entry)
+            if not m:
+                continue
+            prefix, pos, rest = m.groups()
+            groups.setdefault(prefix, []).append(entry)
+            _n = re.search(r"Iter_(\d+)", rest)
+            if _n:
+                iter_owner[int(_n.group(1))] = (prefix, pos)
+            if "BEST" in rest:
+                best_folder = entry
+
+        if not groups:
+            return   # nothing branch-shaped to reorganize
+
+        def _place(src_path, branch_prefix, category, basename):
+            dest_dir = os.path.join(run_dir, f"Branch {branch_prefix}", category)
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = os.path.join(dest_dir, basename)
+            if not os.path.exists(dest):
+                shutil.copy2(src_path, dest)
+            return dest
+
+        placed = set()      # (category, iter, relic) — one image per relic
+        moved_folders = {}  # original folder name -> new path
+
+        # 1. Each iteration folder moves under its branch.
+        for prefix, names in groups.items():
+            branch_dir = os.path.join(run_dir, f"Branch {prefix}")
+            os.makedirs(branch_dir, exist_ok=True)
+            for name in names:
+                src = os.path.join(run_dir, name)
+                dst = os.path.join(branch_dir, name)
+                try:
+                    if os.path.isdir(src) and not os.path.exists(dst):
+                        shutil.move(src, dst)
+                    moved_folders[name] = dst
+                except Exception as e:
+                    self._log(
+                        f"  [Branching] WARNING: could not file {name}: {e}")
+                    moved_folders[name] = src
+
+        # 2. Screenshots inside iteration folders -> the branch that FOUND
+        #    them (their own prefix), not the one they were chain-copied into.
+        for prefix, names in groups.items():
+            for name in names:
+                folder = moved_folders.get(name, os.path.join(run_dir, name))
+                try:
+                    files = sorted(os.listdir(folder))
+                except Exception:
+                    continue
+                for f in files:
+                    info = self._branch_classify_shot(f)
+                    if not info:
+                        continue
+                    f_prefix, itr, relic, cat = info
+                    owner = f_prefix if f_prefix in groups else prefix
+                    key = (cat, itr, relic)
+                    if key in placed:
+                        continue
+                    try:
+                        _place(os.path.join(folder, f), owner, cat, f)
+                        placed.add(key)
+                    except Exception:
+                        pass
+
+        # 3. Screenshots stranded in the flat root aggregates -> their branch,
+        #    gaining the branch+position prefix they never had.
+        for agg in self._BRANCH_ROOT_AGGREGATES:
+            agg_dir = os.path.join(run_dir, agg)
+            if not os.path.isdir(agg_dir):
+                continue
+            try:
+                files = sorted(os.listdir(agg_dir))
+            except Exception:
+                continue
+            for f in files:
+                info = self._branch_classify_shot(f)
+                if not info:
+                    continue          # Info.txt / summaries stay at root
+                f_prefix, itr, relic, cat = info
+                owner = iter_owner.get(itr)
+                if not owner:
+                    continue          # unattributable — leave where it is
+                key = (cat, itr, relic)
+                if key in placed:
+                    continue
+                new_name = f if f_prefix else f"{owner[0]}{owner[1]}_{f}"
+                try:
+                    _place(os.path.join(agg_dir, f), owner[0], cat, new_name)
+                    placed.add(key)
+                    os.remove(os.path.join(agg_dir, f))
+                except Exception:
+                    pass
+
+        # 4. Best Branch Preview — the run's answer without digging: every hit
+        #    the winning save carries, plus that branch's own other findings.
+        if best_folder:
+            bm = self._BRANCH_ITER_DIR_RE.match(best_folder)
+            best_prefix = bm.group(1) if bm else None
+            best_dir = moved_folders.get(best_folder)
+            if best_prefix and best_dir and os.path.isdir(best_dir):
+                preview_root = os.path.join(run_dir, self._BRANCH_PREVIEW_DIR)
+                try:
+                    for f in sorted(os.listdir(best_dir)):
+                        info = self._branch_classify_shot(f)
+                        if not info or info[3] != "All Hits":
+                            continue
+                        _d = os.path.join(preview_root, "All Hits")
+                        os.makedirs(_d, exist_ok=True)
+                        shutil.copy2(os.path.join(best_dir, f),
+                                     os.path.join(_d, f))
+                    for cat in ("Smart Analyze Hits", "Excluded Hits",
+                                "Near Misses"):
+                        src_cat = os.path.join(
+                            run_dir, f"Branch {best_prefix}", cat)
+                        if not os.path.isdir(src_cat):
+                            continue
+                        for f in sorted(os.listdir(src_cat)):
+                            _d = os.path.join(preview_root, cat)
+                            os.makedirs(_d, exist_ok=True)
+                            shutil.copy2(os.path.join(src_cat, f),
+                                         os.path.join(_d, f))
+                except Exception as e:
+                    self._log(
+                        f"  [Branching] WARNING: preview folder incomplete: {e}")
+
+        self._log(
+            f"  [Branching] Run organised into {len(groups)} branch folder(s)"
+            + (f" + {self._BRANCH_PREVIEW_DIR}." if best_folder else "."))
 
     def _branch_reset_state(self):
         """Reset all branching runtime state. Called at batch start."""
@@ -7321,6 +7510,7 @@ class RelicBotApp(tk.Tk):
                 # (e.g. chain-copied from previous branches — those start
                 # with a letter+digits pattern, not bare 'Iter_').
                 _ss_prefix = self._branch_screenshot_prefix(_bl, self._branch_position)
+                _ss_renamed = {}          # old basename -> new basename
                 try:
                     for _entry in os.listdir(iter_dir):
                         if not _entry.lower().endswith((".jpg", ".jpeg", ".png")):
@@ -7328,13 +7518,26 @@ class RelicBotApp(tk.Tk):
                         if not _entry.startswith("Iter_"):
                             continue   # already prefixed (chain-copied), skip
                         _src_p = os.path.join(iter_dir, _entry)
-                        _dst_p = os.path.join(iter_dir, f"{_ss_prefix}_{_entry}")
+                        _new_entry = f"{_ss_prefix}_{_entry}"
+                        _dst_p = os.path.join(iter_dir, _new_entry)
                         if os.path.exists(_dst_p):
                             continue
                         try:
                             os.rename(_src_p, _dst_p)
+                            _ss_renamed[_entry] = _new_entry
                         except Exception:
                             pass
+                    # LOAD-BEARING: the All Hits / Excluded Hits / Near Miss
+                    # blocks below locate their screenshot via
+                    # `_screenshot_file`, then skip on os.path.exists() failure.
+                    # Without this re-point they look for the PRE-rename name,
+                    # never find it, and silently collect nothing — which is
+                    # why branching runs produced no All Hits folder and a
+                    # Near Miss folder holding only its Info.txt.
+                    for _rr in relic_results:
+                        _old = _rr.get("_screenshot_file", "")
+                        if _old in _ss_renamed:
+                            _rr["_screenshot_file"] = _ss_renamed[_old]
                 except Exception as e:
                     self._log(
                         f"  [Branching] WARNING: screenshot prefix rename "
@@ -7944,6 +8147,16 @@ class RelicBotApp(tk.Tk):
                 self._log(f"PRIORITY.txt written to {run_dir}")
             except Exception as e:
                 self._log(f"WARNING: could not write PRIORITY.txt: {e}")
+            # Branching runs scatter across dozens of sibling iteration
+            # folders; group them per branch now that the full branch shape
+            # (and which creator carries BEST) is finally known. Runs AFTER
+            # README/PRIORITY so both read the pre-move layout they expect.
+            if self._eff_branching():
+                try:
+                    self._branch_reorganize_run(run_dir)
+                except Exception as e:
+                    self._log(
+                        f"WARNING: could not organise branch folders: {e}")
 
         self._run_backup_path = None   # clear so stale path can't be reused
 

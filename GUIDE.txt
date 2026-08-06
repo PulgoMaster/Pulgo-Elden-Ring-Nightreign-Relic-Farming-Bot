@@ -314,6 +314,48 @@ documented in the iter folder where they were found, but they DON'T
 propagate forward via chain-copy. They also don't create branches.
 
 ──────────────────────────────────────────────────────────────────────────
+HOW THE RUN FOLDER IS ORGANISED WHEN THE RUN ENDS
+──────────────────────────────────────────────────────────────────────────
+A long branching run can leave well over a hundred sibling iteration
+folders in one directory. When the run finishes, the bot groups them so
+the results are actually browsable:
+
+  batch_run_.../
+    Best Branch Preview/     ← open this first
+        All Hits/                every match the winning save carries
+        Smart Analyze Hits/      the winning branch's smart hits
+        Excluded Hits/
+    Branch #/                pre-branch iters (before the first match)
+        #000_Iter_001
+        #001_Iter_002_SMART
+        #002_Branch_Split_Iter_003
+        All Hits/
+        Smart Analyze Hits/
+        Near Misses/
+    Branch A/
+    Branch B/
+    ...
+    README.txt, PRIORITY.txt, matches_log.txt, logs
+
+Each branch keeps all of its own iteration folders together, so you can
+browse a single branch exactly the way you browse a normal run. The
+category folders beside them are shortcuts to that branch's findings.
+
+  - `Best Branch Preview` is the whole run's answer without digging. It
+    mirrors what the `_BEST` save carries.
+  - `Branch #` sorts above `Branch A`, so branches read top to bottom in
+    the order they were created.
+  - A category folder is only created if it has something in it. If you
+    don't see `Excluded Hits` in a branch, that branch had none.
+  - Screenshot names keep their branch and iteration, e.g.
+    `D048_Iter_102_Relic_5_SMART.jpg` — so a file always tells you where
+    it came from even after it has been filed.
+  - A branch's `All Hits` holds the match THAT branch found. The
+    cumulative all-branches view is what `Best Branch Preview` is for.
+
+Nothing is deleted or renamed by this step — folders are only grouped.
+
+──────────────────────────────────────────────────────────────────────────
 WHEN BRANCHING MODE STOPS THE RUN
 ──────────────────────────────────────────────────────────────────────────
 The batch ends when EITHER:
