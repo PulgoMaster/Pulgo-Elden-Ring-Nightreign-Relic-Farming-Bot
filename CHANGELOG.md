@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.8.10] — 2026-08-06 — STANDARD MODE STOPPED ON THE FIRST MATCH
+
+### Fixed: the run ended as soon as a relic matched (Standard mode)
+- With **Async** and **Backlog** both off, the bot stopped the moment it found its first HIT, GOD ROLL or excluded hit. The relic was announced in the log and its screenshot was saved, and then the run simply ended — mid-iteration, with the remaining cycles unscanned.
+- Before 1.8.9 it stopped with no message whatsoever, which is why this went unreported for so long: it looked like the bot had quietly finished. The error reporting added in 1.8.9 is what finally surfaced the cause.
+- **Async, Backlog and Hybrid runs were never affected.** Matched relics found by the analysis workers are recorded through a separate path that has always been correct.
+- Cause: writing the entry to `matches_log.txt` failed with an internal error on the Standard-mode path. Present since 1.4.8.
+- Matched relics are now recorded correctly in every mode, and `matches_log.txt` fills in as the run goes.
+
+### Note on earlier runs
+- If you run Standard mode, any run that appeared to end early right after a match ended for this reason. The relics found up to that point were still saved to their iteration folders and their screenshots are intact — only the entry in `matches_log.txt`, and everything that would have come after, was lost.
+
+---
+
 ## [1.8.9] — 2026-08-02 — BRANCHING MODE REPAIRED + SEPARATE NEXUSMODS PACKAGE
 
 ### Fixed: Branching Mode would not start the bot

@@ -50,7 +50,7 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.8.9"
+APP_VERSION = "1.8.10"
 
 # Cross-flavor flag. Mainline = False, CE branch flips this to True.
 # Drives title string + support-link routing so the CE build deep-links to
@@ -675,6 +675,7 @@ class RelicBotApp(tk.Tk):
         self.attempt_count = 0
         self._batch_log_path: str = ""        # set while a batch run is active (process log)
         self._batch_relic_log_path: str = ""  # set while a batch run is active (relic log)
+        self._batch_matches_log_path: str = ""  # set while a batch run is active (matches log)
 
         # Manual iteration reset (user-triggered soft nuke from overlay)
         self._reset_iter_requested = False
@@ -5644,6 +5645,7 @@ class RelicBotApp(tk.Tk):
                     with open(matches_log_path, "w", encoding="utf-8") as _f:
                         _f.write(f"Matched Relics Log — {run_stamp}\n")
                         _f.write("=" * 60 + "\n\n")
+                    self._batch_matches_log_path = matches_log_path
                 except Exception:
                     pass
                 self._log(f"Batch output folder: {run_dir}")
@@ -5759,39 +5761,10 @@ class RelicBotApp(tk.Tk):
                 except Exception as _de:
                     self._log(f"[DIAG] Logger init failed: {_de}")
 
-        def _write_match_entry(iteration: int, relic_num: int, tier: str,
-                               result: dict) -> None:
-            """Append a formatted match entry to matches_log.txt and the overlay panel."""
-            relics = result.get("relics_found", [])
-            r0 = relics[0] if relics else {}
-            rname    = r0.get("name", "Unknown") if isinstance(r0, dict) else "Unknown"
-            passives = r0.get("passives", []) if isinstance(r0, dict) else []
-            curses   = r0.get("curses",   []) if isinstance(r0, dict) else []
-
-            sep  = "─" * 40
-            lines = [
-                sep,
-                f"  {tier}  |  Iter #{iteration:03d}  ·  Relic {relic_num}",
-                f"  Relic : {rname}",
-            ]
-            if passives:
-                for p in passives:
-                    lines.append(f"  + {p}")
-            if curses:
-                for c in curses:
-                    lines.append(f"  ✗ {c}  (curse)")
-            lines.append("")
-
-            text = "\n".join(lines) + "\n"
-            try:
-                with open(matches_log_path, "a", encoding="utf-8") as _f:
-                    _f.write(text)
-            except Exception:
-                pass
-            if self._overlay:
-                ov = self._overlay
-                self.after(0, lambda t=text: ov.append_matches_log(t)
-                           if ov._win else None)
+        # NOTE: match entries are written by the _write_match_log METHOD, not by a
+        # local closure. A closure here is unreachable from _run_iteration_phases
+        # (a sibling method), which is exactly how the standard-mode HIT path
+        # carried a latent NameError from v1.4.8 to v1.8.9. Keep it a method.
 
         try:
             save_manager.backup(save_path, backup_path)
@@ -11333,20 +11306,26 @@ class RelicBotApp(tk.Tk):
                                 self._log(
                                     f"★★★ GOD ROLL FOUND!  Batch {iteration} · "
                                     f"Relic {_relic_num} — 3/3")
-                                _write_match_entry(iteration, _relic_num,
-                                                   "★★★ GOD ROLL (3/3)", result)
+                                self._write_match_log(
+                                    self._batch_matches_log_path,
+                                    iteration, _relic_num,
+                                    "★★★ GOD ROLL (3/3)", result)
                             elif _cat_s == "HIT":
                                 self._log(
                                     f"★★ HIT FOUND!  Batch {iteration} · "
                                     f"Relic {_relic_num} — {_n_mp_s}/3")
-                                _write_match_entry(iteration, _relic_num,
-                                                   f"★★  HIT ({_n_mp_s}/3)", result)
+                                self._write_match_log(
+                                    self._batch_matches_log_path,
+                                    iteration, _relic_num,
+                                    f"★★  HIT ({_n_mp_s}/3)", result)
                             elif _cat_s == "EXCLUDED":
                                 self._log(
                                     f"  EXCLUDED HIT FOUND — Batch {iteration} · Relic {_relic_num}"
                                     f" — {_n_mp_s}/3 match but has excluded passive/curse.")
-                                _write_match_entry(iteration, _relic_num,
-                                                   f"\u2716  EXCLUDED ({_n_mp_s}/3)", result)
+                                self._write_match_log(
+                                    self._batch_matches_log_path,
+                                    iteration, _relic_num,
+                                    f"\u2716  EXCLUDED ({_n_mp_s}/3)", result)
 
                             # Single counter increment
                             _c_g3 = _c_g2 = _c_dud = 0
@@ -12052,11 +12031,15 @@ class RelicBotApp(tk.Tk):
                 if r_g3 > 0:
                     self._log(
                         f"★★★ GOD ROLL FOUND!  Batch {iteration} · Relic {step_i + 1} — 3/3")
-                    _write_match_entry(iteration, step_i + 1, "★★★ GOD ROLL (3/3)", result)
+                    self._write_match_log(self._batch_matches_log_path,
+                                          iteration, step_i + 1,
+                                          "★★★ GOD ROLL (3/3)", result)
                 elif r_g2 > 0:
                     self._log(
                         f"★★ HIT FOUND!  Batch {iteration} · Relic {step_i + 1} — 2/3")
-                    _write_match_entry(iteration, step_i + 1, "★★  HIT (2/3)", result)
+                    self._write_match_log(self._batch_matches_log_path,
+                                          iteration, step_i + 1,
+                                          "★★  HIT (2/3)", result)
                 # Track per-iteration contributions for rollback on reset
                 if iteration:
                     with self._iter_contrib_lock:
@@ -14494,6 +14477,7 @@ class RelicBotApp(tk.Tk):
         self.bot_running = False
         self._batch_log_path = ""        # stop mirroring to process log
         self._batch_relic_log_path = ""  # stop mirroring to relic log
+        self._batch_matches_log_path = ""  # stop mirroring to matches log
         self._hide_mouse_blocker()
         if self._overlay:
             self._overlay.destroy()
