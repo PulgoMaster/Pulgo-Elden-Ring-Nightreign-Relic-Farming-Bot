@@ -248,21 +248,13 @@ if ($hasGpuTorch) {
 }
 Write-Host ""
 
-# REPAIR MODE: nuke _internal outright. A merge leaves stale files behind,
-# and stale files inside _internal/torch are exactly what makes an install
-# unsalvageable in the first place.
-if ($Repair) {
-    $internalDir = Join-Path $scriptDir "_internal"
-    if (Test-Path $internalDir) {
-        Write-Host "  [Repair] Removing _internal completely..." -ForegroundColor Magenta
-        try { Remove-Item -Recurse -Force $internalDir -ErrorAction Stop }
-        catch { Write-Host "  [Repair] WARNING: could not fully remove _internal: $_" -ForegroundColor Yellow }
-    }
-    foreach ($stale in @("gpu_torch_staging", "gpu_upgrade_ready", "gpu_state.json")) {
-        $sp = Join-Path $scriptDir $stale
-        if (Test-Path $sp) { Remove-Item -Recurse -Force $sp -ErrorAction SilentlyContinue }
-    }
-}
+# NOTE: Repair mode needs no extra wipe here. The install step above already
+# removes EVERYTHING in the install dir (except RelicBot*.zip) before copying
+# the new build in, so _internal is always fully replaced. An earlier version
+# of this script re-wiped _internal at this point -- i.e. AFTER the new files
+# had been copied -- which deleted the freshly installed _internal and left the
+# app unable to start ("Failed to load Python DLL ... python314.dll"). Repair
+# mode's only real difference is the narrowed $preserveItems list above.
 
 # --- Refresh default sequences ---
 Write-Host "--- Refreshing default sequences ---" -ForegroundColor Cyan
