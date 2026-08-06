@@ -44,6 +44,7 @@ if '--run-pip' in sys.argv:
 # ────────────────────────────────────────────────────────────────────────────── #
 
 
+
 def _apply_gpu_upgrade() -> None:
     """
     If the user ran Install GPU Acceleration, the CUDA torch is staged next to
@@ -69,26 +70,55 @@ def _apply_gpu_upgrade() -> None:
         log.append(f"new_torch exists: {new_torch.exists()}")
         log.append(f"old_torch exists: {old_torch.exists()}")
 
-        if new_torch.exists():
-            if old_torch.exists():
-                # Retry rmtree — Windows Defender may briefly lock DLLs at startup
-                for _attempt in range(3):
-                    try:
-                        shutil.rmtree(str(old_torch))
-                        log.append(f"rmtree old_torch: success (attempt {_attempt + 1})")
-                        break
-                    except Exception as _re:
-                        log.append(f"rmtree old_torch: attempt {_attempt + 1} failed: {_re}")
-                        if _attempt < 2:
-                            _time.sleep(1.5)
-                        else:
-                            raise
-            shutil.move(str(new_torch), str(old_torch))
-            log.append("shutil.move: success")
+        if new_torch.exists() and old_torch.exists():
+            # ── LOAD-BEARING: swap ONLY the compiled half ──────────────────
+            # PyInstaller's collect_all('torch') puts torch's .py modules in
+            # BOTH the PYZ (hiddenimports) and on disk (datas). Replacing the
+            # whole on-disk package leaves two DIFFERENT torch builds
+            # reachable, torch's docstring registration runs twice, and the
+            # import dies with:
+            #     RuntimeError: function 'conv1d' already has a docstring
+            # That is not a degraded GPU — torch does not import at all, so
+            # OCR is dead and the bot can never confirm it is in-game. It
+            # bricked every GPU install on v1.8.8-v1.8.11 (found 2026-08-06 on
+            # an RTX 3070 laptop). Version-pinning the wheel does NOT help;
+            # the two copies collide even at identical versions.
+            # Only lib/* and *.pyd may be replaced. The .py half must remain
+            # exactly the bundled copy so it always matches the PYZ.
+            _copied = []
+
+            new_lib, old_lib = new_torch / "lib", old_torch / "lib"
+            if new_lib.is_dir():
+                if old_lib.exists():
+                    for _attempt in range(3):
+                        try:
+                            shutil.rmtree(str(old_lib))
+                            log.append(f"rmtree torch/lib: success (attempt {_attempt + 1})")
+                            break
+                        except Exception as _re:
+                            log.append(f"rmtree torch/lib: attempt {_attempt + 1} failed: {_re}")
+                            if _attempt < 2:
+                                _time.sleep(1.5)
+                            else:
+                                raise
+                shutil.copytree(str(new_lib), str(old_lib))
+                _copied.append(f"lib/ ({len(list(old_lib.iterdir()))} files)")
+            else:
+                log.append("WARNING: staged torch has no lib/ — nothing to swap")
+
+            for _pyd in new_torch.glob("*.pyd"):
+                shutil.copy2(str(_pyd), str(old_torch / _pyd.name))
+                _copied.append(_pyd.name)
+
+            log.append("compiled-half swap: " + ", ".join(_copied))
+            log.append(f"python half untouched: "
+                       f"{len(list(old_torch.rglob('*.py')))} .py files retained")
             cudart = old_torch / "lib" / "cudart64_12.dll"
-            log.append(f"cudart64_12.dll present after move: {cudart.exists()}")
+            log.append(f"cudart64_12.dll present after swap: {cudart.exists()}")
+        elif not new_torch.exists():
+            log.append("WARNING: new_torch not found in staging — nothing to swap")
         else:
-            log.append("WARNING: new_torch not found in staging — nothing to move")
+            log.append("WARNING: _internal/torch missing — cannot swap compiled half")
 
         flag.unlink(missing_ok=True)
         log.append("flag removed")
@@ -164,6 +194,46 @@ if getattr(sys, "frozen", False):
         _inspect.getsource = _frozen_getsource
     except Exception:
         pass
+
+# ── torch self-check ───────────────────────────────────────────────────────── #
+# `RelicBot.exe --torch-check` imports torch and reports what actually happened,
+# then exits. Exists because GPU acceleration shipped broken in v1.8.8-v1.8.11:
+# the only checks anyone could run were "does cudart64_12.dll exist on disk" and
+# "does the GPU panel say installed". Both passed while torch could not import at
+# all. Anything that swaps torch MUST be validated with this, not with a file
+# listing. Runs AFTER --run-pip so the pip path is unaffected, and BEFORE the
+# GUI import so a broken torch cannot hide behind a window that still opens.
+if '--torch-check' in sys.argv:
+    import json as _json
+    _r = {"ok": False}
+    try:
+        import torch as _t
+        _r["ok"] = True
+        _r["version"] = getattr(_t, "__version__", "?")
+        _r["file"] = getattr(_t, "__file__", "?")
+        try:
+            _r["cuda_available"] = bool(_t.cuda.is_available())
+            _r["cuda_build"] = getattr(_t.version, "cuda", None)
+            if _r["cuda_available"]:
+                _r["device"] = _t.cuda.get_device_name(0)
+        except Exception as _ce:
+            _r["cuda_available"] = False
+            _r["cuda_error"] = f"{type(_ce).__name__}: {_ce}"
+    except Exception as _te:
+        import traceback as _tb
+        _r["error"] = f"{type(_te).__name__}: {_te}"
+        _r["traceback"] = _tb.format_exc().splitlines()[-14:]
+    # EasyOCR is what the bot actually needs; torch importing is necessary but
+    # not sufficient, so probe the real consumer too.
+    try:
+        import easyocr as _e          # noqa: F401
+        _r["easyocr"] = True
+    except Exception as _ee:
+        _r["easyocr"] = False
+        _r["easyocr_error"] = f"{type(_ee).__name__}: {_ee}"
+    print("TORCH_CHECK " + _json.dumps(_r, indent=1))
+    sys.exit(0 if _r["ok"] and _r.get("easyocr") else 2)
+# ────────────────────────────────────────────────────────────────────────────── #
 
 from ui.app import RelicBotApp
 

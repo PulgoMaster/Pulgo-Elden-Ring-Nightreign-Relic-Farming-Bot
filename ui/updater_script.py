@@ -37,7 +37,8 @@ param(
     [string]$ZipPath = "",
     [string]$InstallDir = "",
     [switch]$WaitForBot,
-    [switch]$RemoveZip
+    [switch]$RemoveZip,
+    [switch]$Repair
 )
 
 $scriptDir = if ($InstallDir) { $InstallDir } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -109,15 +110,27 @@ Write-Host "Extracted to: $newDir"
 Write-Host ""
 
 # --- Detect GPU torch ---
+# We record WHETHER GPU acceleration was installed, and deliberately do NOT
+# carry the installed torch across the update.
+#
+# _internal\torch is a DERIVED artifact. Preserving it meant that once it was
+# wrong it stayed wrong through every future update -- which is exactly how a
+# broken GPU install survived on a user's machine. Preserve the INTENT
+# (gpu_state.json), lay the bundled torch down clean from the new build, and
+# re-apply GPU acceleration afterwards. The base is then deterministic and the
+# update outcome no longer depends on the state of the GPU install at all.
+# Users without GPU acceleration keep the disk space.
 $cudaDll      = Join-Path $scriptDir "_internal\torch\lib\cudart64_12.dll"
 $torchCudaDll = Join-Path $scriptDir "_internal\torch\lib\torch_cuda.dll"
 $hasGpuTorch  = (Test-Path $cudaDll) -or (Test-Path $torchCudaDll)
 
 Write-Host "--- GPU Check ---" -ForegroundColor Cyan
 if ($hasGpuTorch) {
-    Write-Host "  GPU torch DETECTED -- will preserve." -ForegroundColor Green
+    Write-Host "  GPU acceleration DETECTED." -ForegroundColor Green
+    Write-Host "  The bundled CPU torch will be installed clean, and RelicBot" -ForegroundColor Green
+    Write-Host "  will offer to reinstall GPU acceleration on next launch." -ForegroundColor Green
 } else {
-    Write-Host "  GPU torch not installed -- CPU version will be used." -ForegroundColor Yellow
+    Write-Host "  GPU acceleration not installed -- CPU version will be used." -ForegroundColor Yellow
 }
 Write-Host ""
 
@@ -137,8 +150,27 @@ $preserveItems = @(
     "relicbot_timing.json",
     ".last_profile",
     "gpu_upgrade_ready",
-    "gpu_upgrade.log"
+    "gpu_upgrade.log",
+    "gpu_state.json"
 )
+
+# REPAIR MODE: keep ONLY user data. Everything else -- including anything
+# that could be carrying the damage -- is discarded and replaced from the
+# ZIP. Used when the installed build is unsalvageable (e.g. torch/EasyOCR
+# will not import), which a normal merge-style update cannot fix.
+if ($Repair) {
+    $preserveItems = @(
+        "profiles",
+        "relicbot_config.json",
+        "relicbot_calibration.json",
+        "relicbot_timing.json",
+        ".last_profile"
+    )
+    Write-Host "--- REPAIR MODE ---" -ForegroundColor Magenta
+    Write-Host "  Preserving profiles + settings only." -ForegroundColor Magenta
+    Write-Host "  Everything else will be replaced from the download." -ForegroundColor Magenta
+    Write-Host ""
+}
 
 foreach ($item in $preserveItems) {
     $src = Join-Path $scriptDir $item
@@ -150,16 +182,11 @@ foreach ($item in $preserveItems) {
     }
 }
 
-if ($hasGpuTorch) {
-    $torchSrc = Join-Path $scriptDir "_internal\torch"
-    $torchDst = Join-Path $backupDir "_torch_backup"
-    Write-Host "  Backing up GPU torch (~2 GB, may take a moment)..." -ForegroundColor Green
-    try { Copy-Item -Recurse $torchSrc $torchDst -Force }
-    catch {
-        Write-Host "  WARNING: Could not back up torch: $_" -ForegroundColor Yellow
-        $hasGpuTorch = $false
-    }
-}
+# NOTE: _internal\torch is deliberately NOT backed up. See the GPU Check block
+# above -- it is a derived artifact, and preserving it is what allowed a broken
+# GPU install to survive across updates. The new build lays down the bundled
+# CPU torch clean and re-applies GPU acceleration afterwards. This also skips a
+# ~2 GB copy on every update.
 Write-Host ""
 
 # --- Clean install ---
@@ -201,21 +228,41 @@ foreach ($item in $preserveItems) {
     }
 }
 
+# GPU torch is intentionally NOT restored -- the bundled CPU torch from the new
+# build stays in place. Instead record that GPU acceleration WAS installed, so
+# the new build can offer a one-click reinstall on first launch. Any stale GPU
+# staging is cleared so the reinstall starts from a clean slate.
 if ($hasGpuTorch) {
-    $torchBackup = Join-Path $backupDir "_torch_backup"
-    $torchDst    = Join-Path $scriptDir "_internal\torch"
-    if (Test-Path $torchBackup) {
-        Write-Host "  Restoring GPU torch..." -ForegroundColor Green
-        try {
-            if (Test-Path $torchDst) { Remove-Item -Recurse -Force $torchDst }
-            Copy-Item -Recurse $torchBackup $torchDst -Force
-        } catch {
-            Write-Host "  WARNING: Could not restore torch: $_" -ForegroundColor Yellow
-            $hasGpuTorch = $false
-        }
+    Write-Host "  Recording GPU acceleration for reinstall..." -ForegroundColor Green
+    try {
+        Set-Content -Path (Join-Path $scriptDir "gpu_state.json") `
+                    -Value '{"gpu_requested": true, "reinstall_required": true}' `
+                    -Encoding ascii
+    } catch {
+        Write-Host "  WARNING: Could not write gpu_state.json: $_" -ForegroundColor Yellow
+    }
+    foreach ($stale in @("gpu_torch_staging", "gpu_upgrade_ready")) {
+        $sp = Join-Path $scriptDir $stale
+        if (Test-Path $sp) { Remove-Item -Recurse -Force $sp -ErrorAction SilentlyContinue }
     }
 }
 Write-Host ""
+
+# REPAIR MODE: nuke _internal outright. A merge leaves stale files behind,
+# and stale files inside _internal/torch are exactly what makes an install
+# unsalvageable in the first place.
+if ($Repair) {
+    $internalDir = Join-Path $scriptDir "_internal"
+    if (Test-Path $internalDir) {
+        Write-Host "  [Repair] Removing _internal completely..." -ForegroundColor Magenta
+        try { Remove-Item -Recurse -Force $internalDir -ErrorAction Stop }
+        catch { Write-Host "  [Repair] WARNING: could not fully remove _internal: $_" -ForegroundColor Yellow }
+    }
+    foreach ($stale in @("gpu_torch_staging", "gpu_upgrade_ready", "gpu_state.json")) {
+        $sp = Join-Path $scriptDir $stale
+        if (Test-Path $sp) { Remove-Item -Recurse -Force $sp -ErrorAction SilentlyContinue }
+    }
+}
 
 # --- Refresh default sequences ---
 Write-Host "--- Refreshing default sequences ---" -ForegroundColor Cyan
@@ -309,10 +356,9 @@ $profilesOk = Test-Path (Join-Path $scriptDir "profiles")
 
 Write-Host "  RelicBot.exe present   : $(if ($exeOk) { 'YES' } else { 'NO  <-- PROBLEM' })"
 if ($hasGpuTorch) {
-    $cudaOk  = Test-Path (Join-Path $scriptDir "_internal\torch\lib\cudart64_12.dll")
-    $torchOk = Test-Path (Join-Path $scriptDir "_internal\torch\lib\torch_cuda.dll")
-    Write-Host "  GPU torch intact       : $(if ($cudaOk -or $torchOk) { 'YES' } else { 'MISSING' })" `
-        -ForegroundColor $(if ($cudaOk -or $torchOk) { 'Green' } else { 'Red' })
+    $stateOk = Test-Path (Join-Path $scriptDir "gpu_state.json")
+    Write-Host "  GPU reinstall queued   : $(if ($stateOk) { 'YES' } else { 'NO  <-- PROBLEM' })" `
+        -ForegroundColor $(if ($stateOk) { 'Green' } else { 'Red' })
 }
 Write-Host "  profiles folder present: $(if ($profilesOk) { 'YES' } else { 'NO (first run is OK)' })"
 Write-Host ""
@@ -321,7 +367,9 @@ Write-Host ""
 Write-Host "==============================" -ForegroundColor Cyan
 Write-Host " Update complete!" -ForegroundColor Green
 if ($hasGpuTorch) {
-    Write-Host " GPU acceleration preserved." -ForegroundColor Green
+    Write-Host " GPU acceleration must be reinstalled -- RelicBot will" -ForegroundColor Yellow
+    Write-Host " prompt you on launch. The update no longer carries a" -ForegroundColor Yellow
+    Write-Host " ~2 GB torch across, so the base install is always clean." -ForegroundColor Yellow
 }
 Write-Host "==============================" -ForegroundColor Cyan
 

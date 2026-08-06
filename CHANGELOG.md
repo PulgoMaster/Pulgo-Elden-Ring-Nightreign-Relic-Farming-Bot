@@ -4,6 +4,30 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.9.0] — 2026-08-06 — RELIC SCANNING REPAIRED + GPU ACCELERATION ACTUALLY WORKS
+
+### Fixed: relic scanning could not start at all in v1.8.8 – v1.8.11
+- On those versions the bot would launch normally, then fail to recognise anything on screen. Runs showed `OCR error` repeating every few seconds, `Could not confirm in-game state within 150 s`, three restarts, then an abort — with nothing analysed.
+- Cause: the packaged build paired two mismatched versions of the image-recognition engine, so it could not load. It was a packaging fault, not a settings or hardware problem, and it affected every install of those versions regardless of PC.
+- **If you are on 1.8.8 – 1.8.11, update.** Those builds cannot scan relics.
+- The build process now verifies the engine's components match and **refuses to produce a release if they do not**, so this cannot ship again.
+
+### Fixed: installing GPU Acceleration broke the bot
+- Installing GPU Acceleration replaced more of the image-recognition engine than it should have, which stopped it loading entirely — the bot could no longer scan anything, and the error looked unrelated to the GPU.
+- Only the compiled part is now replaced, leaving the rest of the engine exactly as shipped.
+- GPU Acceleration has been verified working end to end on an NVIDIA card: the engine loads, CUDA is detected and the GPU is used for scanning.
+
+### Added: RelicBot now checks itself on startup
+- On launch RelicBot verifies its scanning engine actually loads. If something is wrong it tells you immediately, instead of letting you start a run that cannot work.
+- If the installation is damaged, RelicBot offers to **repair** it: it re-downloads and reinstalls cleanly, keeping your profiles and settings and replacing everything else.
+
+### Changed: updates no longer carry GPU files across
+- Updating previously kept your existing ~2 GB GPU install. That also meant a damaged GPU install survived every update.
+- Updates now install a clean copy and, if you had GPU Acceleration, offer to reinstall it in one click afterwards. Updates are faster, and a bad install can no longer follow you from version to version.
+- If you do not use GPU Acceleration, nothing extra is kept and you save the space.
+
+---
+
 ## [1.8.11] — 2026-08-06 — BRANCHING MODE RESULTS ARE NOW BROWSABLE
 
 ### Added: branching runs are grouped per branch when the run ends

@@ -106,12 +106,45 @@ if _is_cuda_build:
     _cache_dir = _os.path.join(_tmp.gettempdir(), "relicbot_spec_cache")
     _extract_dir = _os.path.join(_cache_dir, f"torch-cpu-{_torch_ver}-{_py_tag}")
     _cpu_lib_dir = _os.path.join(_extract_dir, "torch", "lib")
+
+    def _cached_cpu_version():
+        """Actual __version__ of the cached CPU wheel, or None."""
+        _vp = _os.path.join(_extract_dir, "torch", "version.py")
+        try:
+            with open(_vp, "r", encoding="utf-8") as _vf:
+                for _line in _vf:
+                    if _line.startswith("__version__"):
+                        return _line.split("=", 1)[1].strip().strip("'\"")
+        except Exception:
+            pass
+        return None
+
+    # LOAD-BEARING: pin the CPU wheel to the EXACT bundled torch version.
+    # Asking pip for plain "torch" returns the NEWEST on the CPU index, which
+    # is then cached under a directory named after the BUNDLED version — so the
+    # name lies and the build silently pairs torch 2.11.0+cu126's Python half
+    # with 2.13.0+cpu's DLLs. torch then fails to import outright:
+    #     AttributeError: torch._C.TensorBase has no attribute 'align_as'
+    # and EasyOCR's retry surfaces it as
+    #     RuntimeError: method '...' already has a docstring
+    # i.e. no OCR at all in the shipped EXE. This is the same defect v1.8.8
+    # fixed in _install_gpu_acceleration; the sibling build path was missed.
+    # The version is ALSO verified after the fact, because a cache poisoned by
+    # an earlier unpinned build would otherwise be reused forever.
+    _cached = _cached_cpu_version()
+    if _cached and _cached.split('+')[0] != _torch_ver:
+        print(f"[Spec] Cached CPU torch is {_cached}, expected {_torch_ver} — "
+              f"discarding poisoned cache")
+        import shutil as _sh
+        _sh.rmtree(_extract_dir, ignore_errors=True)
+
     if not _os.path.exists(_cpu_lib_dir):
-        print(f"[Spec] CUDA torch detected ({_t.__version__}) — downloading CPU wheel")
+        print(f"[Spec] CUDA torch detected ({_t.__version__}) — "
+              f"downloading CPU wheel pinned to =={_torch_ver}")
         _os.makedirs(_extract_dir, exist_ok=True)
         try:
             _sp.check_call([
-                _sys.executable, "-m", "pip", "install", "torch",
+                _sys.executable, "-m", "pip", "install", f"torch=={_torch_ver}",
                 "--index-url", "https://download.pytorch.org/whl/cpu",
                 "--no-deps", "--target", _extract_dir,
                 "--force-reinstall", "--quiet",
@@ -123,6 +156,17 @@ if _is_cuda_build:
             _cpu_lib_dir = None
     else:
         print(f"[Spec] Using cached CPU torch at {_extract_dir}")
+
+    # Hard gate: never ship a build whose CPU DLLs disagree with the Python half.
+    if _cpu_lib_dir:
+        _got = _cached_cpu_version()
+        if not _got or _got.split('+')[0] != _torch_ver:
+            raise SystemExit(
+                f"[Spec] FATAL: CPU torch version mismatch — bundled Python half "
+                f"is {_torch_ver}, CPU wheel is {_got}. Refusing to build a broken "
+                f"EXE (torch would fail to import and OCR would be dead)."
+            )
+        print(f"[Spec] CPU torch version verified: {_got} matches {_torch_ver}")
 
 if _cpu_lib_dir and _os.path.exists(_cpu_lib_dir):
     _cpu_dlls = {
@@ -147,6 +191,83 @@ if _cpu_lib_dir and _os.path.exists(_cpu_lib_dir):
             _new_binaries.append((name, path, typ))
     a.binaries = _new_binaries
     print(f"[Spec] Swapped {_swap_count} torch DLLs for CPU, dropped {_drop_count} CUDA-only DLLs")
+
+    # ── torchvision must be CPU-matched too ────────────────────────────────
+    # Swapping only torch leaves a CUDA-built torchvision whose native ops
+    # cannot register against CPU torch, so EasyOCR dies with:
+    #     RuntimeError: operator torchvision::nms does not exist
+    # torch imports fine at that point, which makes this look like an EasyOCR
+    # bug rather than a build-composition one. Pin to the bundled version for
+    # the same reason torch is pinned.
+    try:
+        import torchvision as _tv
+        _tv_ver = _tv.__version__.split('+')[0]
+    except Exception:
+        _tv_ver = None
+
+    if _tv_ver:
+        _tv_dir = _os.path.join(_cache_dir, f"torchvision-cpu-{_tv_ver}-{_py_tag}")
+
+        def _cached_tv_version():
+            _vp = _os.path.join(_tv_dir, "torchvision", "version.py")
+            try:
+                with open(_vp, "r", encoding="utf-8") as _vf:
+                    for _line in _vf:
+                        if _line.startswith("__version__"):
+                            return _line.split("=", 1)[1].strip().strip("'\"")
+            except Exception:
+                return None
+            return None
+
+        _tvc = _cached_tv_version()
+        if _tvc and _tvc.split('+')[0] != _tv_ver:
+            print(f"[Spec] Cached CPU torchvision is {_tvc}, expected {_tv_ver} — discarding")
+            import shutil as _sh2
+            _sh2.rmtree(_tv_dir, ignore_errors=True)
+
+        if not _os.path.isdir(_os.path.join(_tv_dir, "torchvision")):
+            print(f"[Spec] Downloading CPU torchvision pinned to =={_tv_ver}")
+            _os.makedirs(_tv_dir, exist_ok=True)
+            try:
+                _sp.check_call([
+                    _sys.executable, "-m", "pip", "install",
+                    f"torchvision=={_tv_ver}",
+                    "--index-url", "https://download.pytorch.org/whl/cpu",
+                    "--no-deps", "--target", _tv_dir,
+                    "--force-reinstall", "--quiet",
+                ])
+            except Exception as _e:
+                print(f"[Spec] WARNING: CPU torchvision download failed: {_e}")
+
+        _tv_src = _os.path.join(_tv_dir, "torchvision")
+        if _os.path.isdir(_tv_src):
+            _got_tv = _cached_tv_version()
+            if not _got_tv or _got_tv.split('+')[0] != _tv_ver:
+                raise SystemExit(
+                    f"[Spec] FATAL: CPU torchvision mismatch — bundled is {_tv_ver}, "
+                    f"wheel is {_got_tv}. Refusing to build (EasyOCR would fail with "
+                    f"'operator torchvision::nms does not exist').")
+            _tv_files = {
+                _fn.lower(): _os.path.join(_tv_src, _fn)
+                for _fn in _os.listdir(_tv_src)
+                if _fn.lower().endswith(('.dll', '.pyd'))
+            }
+            _tv_swap = _tv_drop = 0
+            _nb = []
+            for name, path, typ in a.binaries:
+                _norm = name.replace('\\', '/')
+                if _norm.startswith('torchvision/') and _norm.lower().endswith(('.dll', '.pyd')):
+                    _bn = _os.path.basename(_norm).lower()
+                    if _bn in _tv_files:
+                        _nb.append((name, _tv_files[_bn], typ))
+                        _tv_swap += 1
+                    else:
+                        _tv_drop += 1   # CUDA-only (e.g. nvjpeg64_12.dll)
+                else:
+                    _nb.append((name, path, typ))
+            a.binaries = _nb
+            print(f"[Spec] CPU torchvision {_got_tv} verified — swapped {_tv_swap} "
+                  f"file(s), dropped {_tv_drop} CUDA-only")
 
 # Safety net: strip any remaining CUDA DLLs and .lib files that slipped
 # through (e.g. outside torch/lib/, or if the CPU-swap step was skipped).

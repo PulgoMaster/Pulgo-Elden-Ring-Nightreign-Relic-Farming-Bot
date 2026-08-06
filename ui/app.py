@@ -51,7 +51,7 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.8.11"
+APP_VERSION = "1.9.0"
 
 # Cross-flavor flag. Mainline = False, CE branch flips this to True.
 # Drives title string + support-link routing so the CE build deep-links to
@@ -731,6 +731,10 @@ class RelicBotApp(tk.Tk):
         self._hw_ram_gb, self._hw_cpu_cores, self._hw_gpu_name = self._detect_hardware()
         self._hw_cuda_available, self._hw_cuda_error = self._check_cuda_available()
         self._hw_cuda_torch_installed = self._cuda_torch_installed()
+        # Real import check of the OCR stack. Runs before the user can start a
+        # batch, so a damaged install is reported up front instead of surfacing
+        # as looping "[Phase -0.5] OCR error" and an abort three restarts later.
+        self._ocr_ok, self._ocr_error = self._check_ocr_health()
         self._gpu_eligible, self._gpu_eligible_name, self._gpu_eligible_reason = \
             self._check_gpu_install_eligible()
         # Pre-seed adaptive timing from persisted calibration (if machine matches)
@@ -842,6 +846,7 @@ class RelicBotApp(tk.Tk):
         self.after(0, _apply_post_load_ui)
         self.after(200, self._log_screen_resolution)
         self.after(300, self._log_calibration_status)
+        self.after(600, self._prompt_install_health)
         self.deiconify()   # show window now that icon is set and UI is fully built
 
     # ------------------------------------------------------------------ #
@@ -3535,7 +3540,7 @@ class RelicBotApp(tk.Tk):
         with _ur.urlopen(req, timeout=20) as resp:
             return _json.loads(resp.read().decode("utf-8", errors="replace"))
 
-    def _run_updater(self) -> None:
+    def _run_updater(self, repair: bool = False) -> None:
         """Entry point for the profile-row Update button.
 
         Flow: confirm → query the GitHub releases API → compare versions →
@@ -3602,7 +3607,7 @@ class RelicBotApp(tk.Tk):
             dlg.destroy()
             picked = self._pick_update_zip()
             if picked:
-                self._apply_update_zip(picked)
+                self._apply_update_zip(picked, repair=repair)
 
         manual_btn.configure(command=_manual)
 
@@ -3662,7 +3667,9 @@ class RelicBotApp(tk.Tk):
                                f"release tag ({tag or 'unknown'}).\n"
                                "Use a downloaded ZIP, or try again later.")
                     return
-                if local_v and remote_v <= local_v:
+                # In repair mode the point is to REPLACE the current version,
+                # not upgrade past it, so an equal version must not bail out.
+                if local_v and remote_v <= local_v and not repair:
                     self.after(0, _stop,
                                f"RelicBot is up to date (v{APP_VERSION}).\n"
                                f"Latest release on GitHub: {tag}")
@@ -3800,7 +3807,7 @@ class RelicBotApp(tk.Tk):
                     dlg.destroy()
                 except tk.TclError:
                     pass
-                self._apply_update_zip(zip_path, cleanup_zip=True)
+                self._apply_update_zip(zip_path, cleanup_zip=True, repair=repair)
 
             self.after(0, _handoff)
 
@@ -3838,7 +3845,8 @@ class RelicBotApp(tk.Tk):
             filetypes=[("RelicBot ZIP", "RelicBot*.zip"), ("All zips", "*.zip")],
         )
 
-    def _apply_update_zip(self, zip_path: str, cleanup_zip: bool = False) -> None:
+    def _apply_update_zip(self, zip_path: str, cleanup_zip: bool = False,
+                          repair: bool = False) -> None:
         """Verify a ZIP's build flavor, then hand off to the PowerShell updater.
 
         Shared by both paths: the GitHub download and the manual picker.
@@ -3926,6 +3934,10 @@ class RelicBotApp(tk.Tk):
         ]
         if cleanup_zip:
             _ps_args.append("-RemoveZip")
+        if repair:
+            # Destructive reinstall: keeps profiles + settings, discards
+            # everything else (incl. _internal) rather than merging over it.
+            _ps_args.append("-Repair")
         try:
             subprocess.Popen(
                 _ps_args,
@@ -12959,6 +12971,134 @@ class RelicBotApp(tk.Tk):
             return cudart.exists()
         except Exception:
             return False
+
+    def _prompt_install_health(self) -> None:
+        """Warn on a damaged install and offer a clean repair.
+
+        Two situations land here:
+
+        1. `gpu_state.json` says GPU acceleration was installed but the update
+           deliberately did not carry the old torch across, so it needs
+           reinstalling. Normal, expected, one click.
+
+        2. The OCR stack does not import at all. The bot cannot scan a single
+           relic in this state — previously it launched happily and only failed
+           mid-run with looping "[Phase -0.5] OCR error", aborting after three
+           restarts, which reads like a game/timing problem rather than a
+           broken install.
+
+        Case 2 offers a REPAIR: re-download and reinstall keeping only profiles
+        and settings. That path exists because `_apply_update_zip` runs the PS1
+        from the CURRENTLY INSTALLED build — so a user on a broken version
+        updates with the OLD updater, which preserves the very thing that is
+        broken, and arrives still broken. A normal update cannot rescue them.
+        """
+        try:
+            _st = self._gpu_state()
+
+            if not getattr(self, "_ocr_ok", True):
+                _err = getattr(self, "_ocr_error", "") or "unknown error"
+                self._log("=" * 60)
+                self._log("INSTALLATION PROBLEM — relic scanning cannot run")
+                self._log(f"  {_err}")
+                self._log("=" * 60)
+                _msg = (
+                    "RelicBot cannot load its relic-scanning engine, so it "
+                    "cannot analyse any relics in this state.\n\n"
+                    f"{_err}\n\n"
+                    "This is an installation problem, not a game or settings "
+                    "problem. A normal update may not fix it, because an update "
+                    "keeps parts of the existing install.\n\n"
+                    "Repair now?\n"
+                    "This re-downloads RelicBot and reinstalls it cleanly.\n"
+                    "Your profiles and settings are kept. Everything else is "
+                    "replaced.\n\n"
+                    "If you have GPU Acceleration installed you will need to "
+                    "install it again afterwards."
+                )
+                if messagebox.askyesno("RelicBot — Repair installation", _msg):
+                    self._run_updater(repair=True)
+                return
+
+            if _st.get("reinstall_required"):
+                # Healthy, but the update intentionally dropped the GPU layer.
+                self._write_gpu_state(reinstall_required=False)
+                self._log("GPU Acceleration needs reinstalling after the update.")
+                if messagebox.askyesno(
+                    "RelicBot — Reinstall GPU Acceleration",
+                    "The update installed a clean copy of RelicBot, which "
+                    "means GPU Acceleration has to be installed again.\n\n"
+                    "This is deliberate: carrying the old GPU files across "
+                    "updates is what allowed a damaged install to persist.\n\n"
+                    "Reinstall GPU Acceleration now?\n"
+                    "(You can also do it later from the GPU Settings panel.)",
+                ):
+                    self._install_gpu_acceleration()
+        except Exception as e:
+            try:
+                self._log(f"WARNING: install health check failed: {e}")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _check_ocr_health() -> tuple[bool, str]:
+        """Import torch AND EasyOCR for real. Returns (ok, error).
+
+        LOAD-BEARING: this must IMPORT, never inspect the filesystem.
+        v1.8.8-v1.8.11 shipped with OCR completely dead while
+        `_cuda_torch_installed()` (does cudart64_12.dll exist) returned True and
+        the GPU panel displayed "installed". Presence is not health.
+
+        EasyOCR is imported lazily deep inside `relic_analyzer`, so a broken
+        install does not surface until a run is already underway — the user
+        sees `[Phase -0.5] OCR error: ...` looping and the batch aborting after
+        three restarts. Checking here means we can say so before they start.
+
+        Note the error the user actually sees may be a RETRY artifact:
+        `import torch` can die partway through docstring registration, and the
+        second import then reports `... already has a docstring`. The FIRST
+        error is the real one, which is why the raw text is captured verbatim.
+        """
+        try:
+            import torch  # noqa: F401
+        except Exception as e:
+            return False, f"PyTorch failed to load — {type(e).__name__}: {e}"
+        try:
+            import easyocr  # noqa: F401
+        except Exception as e:
+            return False, f"EasyOCR failed to load — {type(e).__name__}: {e}"
+        return True, ""
+
+    def _gpu_state(self) -> dict:
+        """Read gpu_state.json — the preserved INTENT to run GPU acceleration.
+
+        Written by the updater when it detects an existing GPU install. The
+        installed torch itself is deliberately not carried across updates
+        (it is a derived artifact; preserving it is how a broken install
+        survived every update), so this marker is what tells us to offer a
+        reinstall on the freshly-laid-down build.
+        """
+        try:
+            _p = os.path.join(_REPO_ROOT, "gpu_state.json")
+            if os.path.isfile(_p):
+                with open(_p, "r", encoding="utf-8") as f:
+                    return json.load(f) or {}
+        except Exception:
+            pass
+        return {}
+
+    def _write_gpu_state(self, **kw) -> None:
+        """Merge keys into gpu_state.json (atomic)."""
+        try:
+            _st = self._gpu_state()
+            _st.update(kw)
+            _p = os.path.join(_REPO_ROOT, "gpu_state.json")
+            _tmp = _p + ".tmp"
+            with open(_tmp, "w", encoding="utf-8") as f:
+                json.dump(_st, f, indent=1)
+            os.replace(_tmp, _p)
+        except Exception as e:
+            self._log(f"WARNING: could not write gpu_state.json: {e}")
 
     @staticmethod
     def _check_gpu_install_eligible() -> tuple[bool, str, str]:
