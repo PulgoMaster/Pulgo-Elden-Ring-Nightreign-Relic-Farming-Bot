@@ -17,6 +17,11 @@ All notable changes to this project are documented here.
 - Only the compiled part is now replaced, leaving the rest of the engine exactly as shipped.
 - GPU Acceleration has been verified working end to end on an NVIDIA card: the engine loads, CUDA is detected and the GPU is used for scanning.
 
+### Fixed: Install GPU Acceleration could download the wrong version
+- The installer worked out which version to install by asking the already-installed engine. If that engine was damaged and could not load, the installer fell back to simply downloading the newest available version — which is almost never the right one for your build.
+- That fallback triggered in the worst case: someone whose scanning was already broken clicking Install GPU Acceleration to fix it, and ending up worse off. It is what happened on a real install.
+- The correct version is now read from the build itself, so it stays correct even when the engine cannot load. If it cannot be determined, the install is refused with an explanation instead of guessing.
+
 ### Added: RelicBot now checks itself on startup
 - On launch RelicBot verifies its scanning engine actually loads. If something is wrong it tells you immediately, instead of letting you start a run that cannot work.
 - If the installation is damaged, RelicBot offers to **repair** it: it re-downloads and reinstalls cleanly, keeping your profiles and settings and replacing everything else.
