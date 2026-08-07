@@ -13041,6 +13041,41 @@ class RelicBotApp(tk.Tk):
                 pass
 
     @staticmethod
+    def _bundled_torch_version() -> str:
+        """Version of the torch this build SHIPPED, without importing torch.
+
+        LOAD-BEARING: this must not depend on `import torch`.
+
+        The previous implementation read `torch.__version__` and fell back to
+        an unpinned `"torch"` when the import failed -- i.e. it failed OPEN, at
+        exactly the moment a user is most likely to click Install GPU
+        Acceleration: when scanning is already broken. On a user's laptop that
+        fallback pulled the newest CUDA build (2.13.0) into a 2.11.0 build,
+        replacing torch's Python half with a different version's and leaving
+        the bot unable to import torch at all.
+
+        `_internal/torch-<version>.dist-info` is written by PyInstaller at
+        build time and still names the version the build actually shipped even
+        when that torch cannot be imported. Returns "" if it cannot be
+        determined, and callers MUST refuse to install rather than guess.
+        """
+        try:
+            _int = os.path.join(_REPO_ROOT, "_internal")
+            for _name in os.listdir(_int):
+                if _name.startswith("torch-") and _name.endswith(".dist-info"):
+                    _v = _name[len("torch-"):-len(".dist-info")]
+                    return _v.split("+")[0]
+        except Exception:
+            pass
+        # Source runs (not frozen) have no _internal; importing is safe there
+        # because there is no PYZ copy to diverge from.
+        try:
+            import torch as _t
+            return _t.__version__.split("+")[0]
+        except Exception:
+            return ""
+
+    @staticmethod
     def _check_ocr_health() -> tuple[bool, str]:
         """Import torch AND EasyOCR for real. Returns (ok, error).
 
@@ -13595,11 +13630,18 @@ class RelicBotApp(tk.Tk):
         # the bundled copy inside the EXE, so a newer CUDA torch from the index
         # would pair new binaries with old Python code.  Unpinned, this breaks
         # silently the moment PyTorch publishes a release newer than the build.
-        try:
-            import torch as _bundled_torch
-            _torch_req = f"torch=={_bundled_torch.__version__.split('+')[0]}"
-        except Exception:
-            _torch_req = "torch"   # version unreadable — fall back to latest
+        _bundled_ver = self._bundled_torch_version()
+        if not _bundled_ver:
+            messagebox.showerror(
+                "GPU Acceleration",
+                "RelicBot could not determine which PyTorch version this build "
+                "was made with, so it cannot safely install the matching CUDA "
+                "version.\n\n"
+                "Installing a mismatched version would stop relic scanning "
+                "working entirely, so the install has been cancelled.\n\n"
+                "Reinstalling RelicBot from a fresh download will fix this.")
+            return
+        _torch_req = f"torch=={_bundled_ver}"
         _resolve_cmd_base = [
             sys.executable, "--run-pip", "install", _torch_req,
             "--index-url", "https://download.pytorch.org/whl/cu126",
