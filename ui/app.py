@@ -4698,7 +4698,7 @@ class RelicBotApp(tk.Tk):
                     break
 
                 # Not on expected — check where we actually are
-                _item, _br, _ = find_highlighted_item(region)
+                _item, _br, _all_br = find_highlighted_item(region)
                 if _item == _cur_item:
                     # Input dropped — still on previous position, retry
                     if _retry < _MAX_RETRIES_PER_STEP - 1:
@@ -4709,6 +4709,18 @@ class RelicBotApp(tk.Tk):
                         # it, so report WHO can actually receive input. Once per
                         # nav attempt — this is noisy and only useful the first
                         # time it happens.
+                        # Which rows are actually lit? If the highlight has
+                        # in fact moved and we are simply naming the wrong row,
+                        # this shows it -- that is a detection bug, not a
+                        # dropped key, and the two look identical from here.
+                        try:
+                            _top = sorted((_all_br or {}).items(),
+                                          key=lambda kv: kv[1], reverse=True)[:4]
+                            self._log("  [NavDiag] menu brightness (B-R): "
+                                      + ", ".join(f"{_n}={_v:.1f}" for _n, _v in _top)
+                                      + f"  | expected={_expected_item}")
+                        except Exception:
+                            pass
                         if not getattr(self, "_input_diag_done", False):
                             self._input_diag_done = True
                             self._log_input_delivery_report()

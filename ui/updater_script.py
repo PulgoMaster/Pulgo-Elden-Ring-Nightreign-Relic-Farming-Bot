@@ -159,15 +159,21 @@ $preserveItems = @(
 # ZIP. Used when the installed build is unsalvageable (e.g. torch/EasyOCR
 # will not import), which a normal merge-style update cannot fix.
 if ($Repair) {
+    # sequences/ is USER DATA -- recorded input, same class as profiles.
+    # Leaving it out meant a repair silently reset Phase 0-4 timings to the
+    # bundled defaults. Repair exists to replace unsalvageable PROGRAM state;
+    # it must never cost the user recorded input, least of all when the prompt
+    # that offers it is triggered automatically by the bot.
     $preserveItems = @(
         "profiles",
+        "sequences",
         "relicbot_config.json",
         "relicbot_calibration.json",
         "relicbot_timing.json",
         ".last_profile"
     )
     Write-Host "--- REPAIR MODE ---" -ForegroundColor Magenta
-    Write-Host "  Preserving profiles + settings only." -ForegroundColor Magenta
+    Write-Host "  Preserving profiles, sequences + settings only." -ForegroundColor Magenta
     Write-Host "  Everything else will be replaced from the download." -ForegroundColor Magenta
     Write-Host ""
 }
