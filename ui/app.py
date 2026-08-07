@@ -3542,7 +3542,7 @@ class RelicBotApp(tk.Tk):
         with _ur.urlopen(req, timeout=20) as resp:
             return _json.loads(resp.read().decode("utf-8", errors="replace"))
 
-    def _run_updater(self, repair: bool = False) -> None:
+    def _run_updater(self, repair: bool = False, force: bool = False) -> None:
         """Entry point for the profile-row Update button.
 
         Flow: confirm → query the GitHub releases API → compare versions →
@@ -3623,6 +3623,25 @@ class RelicBotApp(tk.Tk):
             except tk.TclError:
                 pass   # dialog already closed by the user
 
+        def _offer_reinstall(msg: str, tag: str):
+            """Same version number, but the build may not be the same build.
+
+            A release can be re-cut in place after a fix without the version
+            changing. Matching version numbers then mean "no newer RELEASE",
+            never "you already have these files" — and bailing out here left
+            the Update button as a dead end for exactly the users who most
+            needed it, with no way back except a hand-installed ZIP.
+            """
+            _stop(msg + "\n\nIf this version was re-released with fixes, you "
+                        "can install it again from here.")
+            try:
+                manual_btn.configure(
+                    text=f"Reinstall {tag}",
+                    command=lambda: (dlg.destroy(),
+                                     self._run_updater(force=True)))
+            except tk.TclError:
+                pass
+
         def _work():
             import ssl            as _ssl
             import time           as _time
@@ -3671,10 +3690,11 @@ class RelicBotApp(tk.Tk):
                     return
                 # In repair mode the point is to REPLACE the current version,
                 # not upgrade past it, so an equal version must not bail out.
-                if local_v and remote_v <= local_v and not repair:
-                    self.after(0, _stop,
+                if local_v and remote_v <= local_v and not repair and not force:
+                    self.after(0, _offer_reinstall,
                                f"RelicBot is up to date (v{APP_VERSION}).\n"
-                               f"Latest release on GitHub: {tag}")
+                               f"Latest release on GitHub: {tag}",
+                               tag)
                     return
 
             asset = next(

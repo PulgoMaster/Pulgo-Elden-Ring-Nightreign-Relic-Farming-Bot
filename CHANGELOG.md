@@ -17,6 +17,11 @@ All notable changes to this project are documented here.
 ### Why runs stopped after exactly one iteration
 - The first launch of a run usually reaches the game before the bot makes this judgement, so iteration 1 nearly always worked. Later launches follow a different timing and were the ones that got caught. That is why a run would complete one full iteration perfectly and then fail repeatedly on the second.
 
+### Fixed: the Update button could dead-end on a re-released version
+- If a release was re-cut in place with fixes but kept the same version number, the Update button reported "RelicBot is up to date" and stopped there. The version numbers matched, so it concluded you already had the files — which is not the same thing.
+- The dialog now offers **Reinstall** in that case, so you can pull the current build without hunting down a ZIP by hand. It is a normal install, not a repair: your profiles, settings and recordings are kept exactly as an update would keep them.
+- The "Use a downloaded ZIP…" button has always ignored version numbers entirely, and still does — it remains the way to install any build over any other.
+
 ### Added: failure dumps for "the bot stopped in the menus"
 - When a run aborts because the bot could not find its way through the menus, it now saves **a screenshot of what was actually on screen** at that moment, into a `failure_dumps` folder inside that run's output folder.
 - Alongside each screenshot is a text file listing what the bot read there: every word its text recognition picked up, whether it found the Equipment menu, which menu row it believed was highlighted and by how much, the window that held focus, and whether the game was running at a higher privilege level than RelicBot.
