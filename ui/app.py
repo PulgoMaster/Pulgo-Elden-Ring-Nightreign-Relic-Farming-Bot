@@ -4705,6 +4705,13 @@ class RelicBotApp(tk.Tk):
                         self._log(
                             f"  [MenuNav] Input dropped at {_cur_item} "
                             f"(retry {_retry + 1})")
+                        # Every key reports OK even when Windows is discarding
+                        # it, so report WHO can actually receive input. Once per
+                        # nav attempt — this is noisy and only useful the first
+                        # time it happens.
+                        if not getattr(self, "_input_diag_done", False):
+                            self._input_diag_done = True
+                            self._log_input_delivery_report()
                         continue
                 elif _item is not None:
                     # Ended up somewhere unexpected — could be input doubling
@@ -13037,6 +13044,110 @@ class RelicBotApp(tk.Tk):
         except Exception as e:
             try:
                 self._log(f"WARNING: install health check failed: {e}")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _process_integrity_level(pid: int) -> str:
+        """Windows integrity level of a process, or "" if it cannot be read.
+
+        Injected input is silently discarded when the target process runs at a
+        HIGHER integrity level than the sender -- and SendInput still returns
+        success, so nothing upstream looks wrong. That is indistinguishable
+        from a game ignoring input unless we compare the two levels directly.
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            TOKEN_QUERY = 0x0008
+            TokenIntegrityLevel = 25
+            k32, adv = ctypes.windll.kernel32, ctypes.windll.advapi32
+
+            # LOAD-BEARING: declare restypes. These return POINTERS, and without
+            # a restype ctypes assumes c_int and truncates them to 32 bits on a
+            # 64-bit build, so the SID read silently yields garbage and the whole
+            # probe returns "" — which looks identical to "could not determine".
+            adv.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+            adv.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+            adv.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
+            adv.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+            k32.OpenProcess.restype = wintypes.HANDLE
+            k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+
+            h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not h:
+                return ""
+            try:
+                tok = wintypes.HANDLE()
+                if not adv.OpenProcessToken(h, TOKEN_QUERY, ctypes.byref(tok)):
+                    return ""
+                try:
+                    need = wintypes.DWORD()
+                    adv.GetTokenInformation(tok, TokenIntegrityLevel, None, 0,
+                                            ctypes.byref(need))
+                    if not need.value:
+                        return ""
+                    buf = ctypes.create_string_buffer(need.value)
+                    if not adv.GetTokenInformation(tok, TokenIntegrityLevel, buf,
+                                                   need, ctypes.byref(need)):
+                        return ""
+                    # TOKEN_MANDATORY_LABEL { SID_AND_ATTRIBUTES Label }
+                    # SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes; }
+                    sid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+                    n = adv.GetSidSubAuthorityCount(sid)[0]
+                    rid = adv.GetSidSubAuthority(sid, n - 1)[0]
+                finally:
+                    k32.CloseHandle(tok)
+            finally:
+                k32.CloseHandle(h)
+
+            for _floor, _name in ((0x4000, "System"), (0x3000, "High"),
+                                  (0x2000, "Medium"), (0x1000, "Low")):
+                if rid >= _floor:
+                    return _name
+            return "Untrusted"
+        except Exception:
+            return ""
+
+    def _log_input_delivery_report(self, exe: str = "") -> None:
+        """Explain why injected input may not be reaching the game.
+
+        Called when input is OBSERVED to fail (the highlight did not move), not
+        on a timer -- this is the one moment the information is worth having.
+        """
+        try:
+            import os as _os
+            _me = self._process_integrity_level(_os.getpid()) or "unknown"
+            _game_pids = []
+            try:
+                _game_pids = input_controller._pids_for_exe(exe or "nightreign.exe")
+            except Exception:
+                pass
+            _game = (self._process_integrity_level(_game_pids[0])
+                     if _game_pids else "") or "unknown"
+
+            self._log(f"  [InputDiag] RelicBot integrity: {_me}   "
+                      f"game integrity: {_game}")
+            try:
+                self._log(f"  [InputDiag] foreground window: {self._active_window_desc()}")
+            except Exception:
+                pass
+
+            _order = {"Untrusted": 0, "Low": 1, "Medium": 2, "High": 3, "System": 4}
+            if _me in _order and _game in _order and _order[_game] > _order[_me]:
+                self._log(
+                    "  [InputDiag] *** The game is running at a HIGHER privilege "
+                    "level than RelicBot. Windows silently discards keyboard "
+                    "input sent to it, which is why every key reports OK but "
+                    "nothing happens. Run RelicBot as administrator, or launch "
+                    "the game without elevation. ***")
+            elif _game == "unknown":
+                self._log("  [InputDiag] Could not read the game's privilege level "
+                          "— it may have exited, or be protected by anti-cheat.")
+        except Exception as _e:
+            try:
+                self._log(f"  [InputDiag] unavailable: {_e}")
             except Exception:
                 pass
 
