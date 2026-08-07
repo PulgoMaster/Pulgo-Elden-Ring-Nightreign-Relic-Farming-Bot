@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 
 ---
 
-## [1.9.2] — 2026-08-07 — RUNS NO LONGER STOP AFTER THE FIRST ITERATION
+## [1.9.1] — 2026-08-07 — RUNS NO LONGER STOP AFTER THE FIRST ITERATION
 
 ### Fixed: the bot could get stranded on the title screen and never recover
 - On some launches — most often the second and later iterations of a run, and more often on slower PCs — the bot would sit on the Elden Ring Nightreign title screen until the run aborted. The log claimed it was in-game and then reported dropped inputs, so it looked like a keyboard or focus problem. It was neither.
@@ -16,10 +16,6 @@ All notable changes to this project are documented here.
 
 ### Why runs stopped after exactly one iteration
 - The first launch of a run usually reaches the game before the bot makes this judgement, so iteration 1 nearly always worked. Later launches follow a different timing and were the ones that got caught. That is why a run would complete one full iteration perfectly and then fail repeatedly on the second.
-
----
-
-## [1.9.1] — 2026-08-07 — THE BOT NOW SHOWS YOU THE SCREEN IT GOT LOST ON
 
 ### Added: failure dumps for "the bot stopped in the menus"
 - When a run aborts because the bot could not find its way through the menus, it now saves **a screenshot of what was actually on screen** at that moment, into a `failure_dumps` folder inside that run's output folder.
