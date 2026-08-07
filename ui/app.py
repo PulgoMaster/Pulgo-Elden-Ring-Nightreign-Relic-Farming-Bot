@@ -51,7 +51,7 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.9.2"
 
 # Cross-flavor flag. Mainline = False, CE branch flips this to True.
 # Drives title string + support-link routing so the CE build deep-links to
@@ -5036,7 +5036,9 @@ class RelicBotApp(tk.Tk):
 
         Replaces the fixed Game Load Time wait. Each cycle:
           1. Spam F for 7 s at 0.15 s intervals (~47 presses) to advance through
-             all title/splash/offline screens.
+             all title/splash/offline screens. F is the ONLY key pressed here —
+             it walks the title screen, its menu and into the world unaided.
+             Nothing in this phase ever navigates.
           2. Wait 1 s to let the game settle.
           3. Press ESC.
           4. Wait 1 s then OCR-check for the Equipment menu.
@@ -5059,6 +5061,7 @@ class RelicBotApp(tk.Tk):
         _game_rendered = False
         _consecutive_black = 0
         _BLACK_SUSTAINED_THRESHOLD = 3
+        _title_logged = False
 
         self._log("[Phase -0.5] Adaptive load wait — watching for in-game state…")
 
@@ -5108,8 +5111,15 @@ class RelicBotApp(tk.Tk):
                             _ext_added = max(0.0, _new_start - _start)
                             _black_frame_total_extended_s += _ext_added
                             _start = _new_start
-                        time.sleep(2.0)
-                        continue
+                            # Only a SUSTAINED black screen is a loading screen
+                            # worth waiting out. Completing e201077, whose
+                            # message already claimed brief transition blacks
+                            # were ignored: the skip below sat outside this
+                            # threshold, so a single transition frame still cost
+                            # a 2 s sleep and a whole F burst. On a slow boot
+                            # that is what starved F-spam of the title screen.
+                            time.sleep(2.0)
+                            continue
                     else:
                         _consecutive_black = 0
                 except Exception:
@@ -5167,6 +5177,47 @@ class RelicBotApp(tk.Tk):
                     time.sleep(1.0)
                     continue
                 _consecutive_black = 0
+
+                # ── Are we still on the pre-game menu? ──────────────────── #
+                # F alone walks the whole pre-game sequence: title screen, its
+                # menu, and into the world. Nothing else is ever pressed here.
+                #
+                # Until now this question could not be asked. The only OCR in
+                # this method reads the top 15% of the frame, which on the title
+                # screen is empty sky, so "the screen is not black" stood in for
+                # "the game world is rendered" -- and a title screen satisfies
+                # it. F-spam then stopped on the exact screen that needs it, and
+                # the highlight fallback below confirmed in-game from the blue
+                # NIGHTREIGN logo (y~0.44, which collides with visual_codex at
+                # 0.448). Phase 0 then walked its shop-nav sequence across the
+                # title menu, one confirm away from NEW GAME.
+                #
+                # Whether the title menu appears before or after a given F burst
+                # is a race against boot speed -- won on a fast machine, lost on
+                # a slow one. Recognising the screen removes the race instead of
+                # tuning it.
+                _is_title, _title_hits = relic_analyzer.is_title_screen(_img)
+                if _is_title:
+                    if _game_rendered:
+                        # b00ae97 made this transition permanent to stop it
+                        # bouncing on menu-close blacks; e201077 fixed that
+                        # bounce properly 26 minutes later and the permanence
+                        # was never removed. A recognised title screen is far
+                        # stronger evidence than a black frame, so it is safe
+                        # to go back -- and going back is the whole recovery.
+                        _game_rendered = False
+                        _title_logged = True
+                        self._log("[Phase -0.5] Title screen — resuming F to advance "
+                                  "(had been treating this as the game world).")
+                    elif not _title_logged or _cycle % 8 == 0:
+                        # Always report the FIRST sighting. A cycle-number
+                        # throttle can skip it entirely on a short boot, and
+                        # "we were on the title screen" is the single most
+                        # useful line in the log when this phase misbehaves.
+                        _title_logged = True
+                        self._log("[Phase -0.5] Title screen — pressing F to continue…")
+                    continue
+
                 _equip_found = relic_analyzer.check_text_visible(
                     _img, "equipment", top_fraction=0.15)
                 # Fallback: if OCR can't find "equipment" text, check whether

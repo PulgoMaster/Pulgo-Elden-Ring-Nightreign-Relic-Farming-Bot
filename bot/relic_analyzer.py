@@ -1664,17 +1664,22 @@ def read_murk(image_bytes: bytes,
     return candidates[0][1], region
 
 
-def scan_text_tokens(image_bytes: bytes, top_fraction: float = 0.50) -> list:
-    """OCR the top band of a screenshot and return the raw [(text, conf), ...].
+def scan_text_tokens(image_bytes: bytes, top_fraction: float = 0.50,
+                     from_fraction: float = 0.0) -> list:
+    """OCR a horizontal band of a screenshot and return raw [(text, conf), ...].
 
-    This is the read that `check_text_visible` makes its decision on, factored
-    out so a failure dump can record exactly what the bot saw rather than
-    re-reading the screen through a second, subtly different path. A dump that
-    OCRs differently from the check it is explaining is worse than no dump.
+    Scans from `from_fraction` down to `top_fraction` of the frame height, full
+    width. With the default `from_fraction=0.0` this is the top band, which is
+    the read `check_text_visible` makes its decision on — factored out so a
+    failure dump can record exactly what the bot saw rather than re-reading the
+    screen through a second, subtly different path. A dump that OCRs
+    differently from the check it is explaining is worse than no dump.
     """
     img = _to_array(image_bytes, max_width=0)
     h, w = img.shape[:2]
-    scan_region = img[:max(1, int(h * top_fraction)), :]
+    _y0 = max(0, min(h - 1, int(h * from_fraction)))
+    _y1 = max(_y0 + 1, min(h, int(h * top_fraction)))
+    scan_region = img[_y0:_y1, :]
     _rh, _rw = scan_region.shape[:2]
     if _rw > _MAX_OCR_WIDTH:
         _scale = _MAX_OCR_WIDTH / _rw
@@ -1702,6 +1707,32 @@ def check_text_visible(image_bytes: bytes, text: str, top_fraction: float = 0.50
     results = scan_text_tokens(image_bytes, top_fraction)
     all_text = " ".join(t for t, c in results if c > 0.3).lower()
     return text.lower() in all_text
+
+
+# The Nightreign pre-game menu. Matched with whitespace stripped because OCR
+# reads "NEW GAME" as "NEWGAME" often enough to matter.
+_TITLE_SCREEN_WORDS = ("continue", "loadgame", "newgame", "login")
+_TITLE_BAND_FROM = 0.68   # the menu block sits low-centre; the top of the
+_TITLE_BAND_TO   = 0.95   # frame is empty sky and reads nothing at all
+
+
+def is_title_screen(image_bytes: bytes) -> tuple:
+    """Is this the pre-game title menu? Returns (bool, [words matched]).
+
+    The bot spent months unable to answer this. Phase -0.5 only ever OCR'd the
+    top 15% of the frame, which on the title screen is empty sky, so it could
+    not distinguish "sitting on CONTINUE" from "loading into the world" and
+    inferred the latter from the screen merely not being black.
+
+    Requires TWO of the four menu words so a single stray token cannot strand
+    the bot in title-screen handling while it is genuinely in game.
+    """
+    toks = scan_text_tokens(image_bytes, top_fraction=_TITLE_BAND_TO,
+                            from_fraction=_TITLE_BAND_FROM)
+    blob = "".join(t for t, c in toks if c > 0.3).lower()
+    blob = "".join(ch for ch in blob if ch.isalnum())
+    hits = [w for w in _TITLE_SCREEN_WORDS if w in blob]
+    return len(hits) >= 2, hits
 
 
 def verify_shop_item(image_bytes: bytes, relic_type: str) -> tuple:

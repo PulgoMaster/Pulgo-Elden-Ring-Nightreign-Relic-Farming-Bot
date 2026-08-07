@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.9.2] — 2026-08-07 — RUNS NO LONGER STOP AFTER THE FIRST ITERATION
+
+### Fixed: the bot could get stranded on the title screen and never recover
+- On some launches — most often the second and later iterations of a run, and more often on slower PCs — the bot would sit on the Elden Ring Nightreign title screen until the run aborted. The log claimed it was in-game and then reported dropped inputs, so it looked like a keyboard or focus problem. It was neither.
+- Cause: while waiting for the game to load, the bot decided it had reached the game world as soon as the screen stopped being black. A title screen is not black, so it counted. At that point it stopped pressing the one key that advances the title screen, and could never start again.
+- It compounded from there: with no text to read, it mistook the blue glow in the NIGHTREIGN logo for a menu highlight, concluded it was in the game, and began running its shop-navigation keys against the title menu.
+- **The bot now recognises the title screen directly** and keeps pressing to advance until it is genuinely in the game. Whether the title screen appears a second earlier or later no longer decides whether the run survives — which is why this hit slower PCs far harder.
+- If the bot ever finds itself back on the title screen mid-run, it now resumes advancing instead of being stuck for good.
+- Loading is only treated as loading after several consecutive black frames. Single black frames during menu transitions were costing a full round of keypresses each time, which on a slow boot was part of how the bot lost this race.
+
+### Why runs stopped after exactly one iteration
+- The first launch of a run usually reaches the game before the bot makes this judgement, so iteration 1 nearly always worked. Later launches follow a different timing and were the ones that got caught. That is why a run would complete one full iteration perfectly and then fail repeatedly on the second.
+
+---
+
 ## [1.9.1] — 2026-08-07 — THE BOT NOW SHOWS YOU THE SCREEN IT GOT LOST ON
 
 ### Added: failure dumps for "the bot stopped in the menus"
