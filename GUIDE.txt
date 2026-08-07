@@ -108,6 +108,13 @@ SETTING UP PATHS
     Where batch results go. The default "batch_output" folder inside
     RelicBot works fine.
 
+    If a run ever stops early because the bot got lost in the menus, look
+    for a "failure_dumps" folder inside that run's output folder. It holds
+    a screenshot of what was actually on screen at the moment it gave up,
+    plus a text file listing what the bot read there. Attach both when
+    reporting the problem — they answer in one glance what the logs alone
+    cannot.
+
 
 ================================================================================
   1A. CUSTOM LAUNCHER (ADVANCED — OPTIONAL)

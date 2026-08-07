@@ -51,7 +51,7 @@ _APP_CONFIG_FILE    = os.path.join(_REPO_ROOT, "relicbot_config.json")
 
 # Single source of truth for the app version. Used in the window title and
 # embedded in diagnostic log headers so bug reports identify their build.
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 # Cross-flavor flag. Mainline = False, CE branch flips this to True.
 # Drives title string + support-link routing so the CE build deep-links to
@@ -677,6 +677,8 @@ class RelicBotApp(tk.Tk):
         self._batch_log_path: str = ""        # set while a batch run is active (process log)
         self._batch_relic_log_path: str = ""  # set while a batch run is active (relic log)
         self._batch_matches_log_path: str = ""  # set while a batch run is active (matches log)
+        self._batch_run_dir: str = ""         # set while a batch run is active (output folder)
+        self._failure_dumps_written: int = 0  # bound on unrecognised-screen dumps per run
 
         # Manual iteration reset (user-triggered soft nuke from overlay)
         self._reset_iter_requested = False
@@ -3168,7 +3170,7 @@ class RelicBotApp(tk.Tk):
             return
 
         reserved = set(self._BRANCH_ROOT_AGGREGATES) | {
-            "buy_qty_fails", self._BRANCH_PREVIEW_DIR}
+            "buy_qty_fails", "failure_dumps", self._BRANCH_PREVIEW_DIR}
         groups, iter_owner, best_folder = {}, {}, None
         for entry in entries:
             if entry in reserved or entry.startswith("Branch "):
@@ -4780,6 +4782,13 @@ class RelicBotApp(tk.Tk):
                 self._log(
                     f"  [MenuNav] Failed to move from {_cur_item} "
                     f"after {_MAX_RETRIES_PER_STEP} retries.")
+                # Either the keys are not landing or we are not in the menu we
+                # think we are in. The two are identical from here; the picture
+                # separates them immediately.
+                self._dump_unrecognised_screen(
+                    "nav_stuck", region,
+                    note=(f"highlight would not move off '{_cur_item}' toward "
+                          f"'{_expected_item}' after {_MAX_RETRIES_PER_STEP} tries"))
                 return False
 
         self._log(f"  [MenuNav] Confirmed on {target_item}.")
@@ -4982,6 +4991,7 @@ class RelicBotApp(tk.Tk):
             self._focus_game_window(_exe, timeout=3.0)
         self._log("[Recovery] ESC recovery — pressing ESC until Equipment menu appears…")
         deadline = time.time() + 45
+        _last_img = None
         while time.time() < deadline:
             if not self.bot_running:
                 return False
@@ -4994,6 +5004,7 @@ class RelicBotApp(tk.Tk):
             _ocr_t0 = time.perf_counter()
             try:
                 _rec_img = screen_capture.capture(region)
+                _last_img = _rec_img
                 _ocr_result = relic_analyzer.check_text_visible(_rec_img, "equipment", top_fraction=0.15)
                 _ocr_dur = time.perf_counter() - _ocr_t0
                 if self._diag:
@@ -5013,6 +5024,11 @@ class RelicBotApp(tk.Tk):
                                        "equipment (ESC recovery)", None, _ocr_dur, error=str(_re))
                 self._log(f"[Recovery] OCR error: {_re}")
         self._log("[Recovery] Could not find Equipment menu within 45 s — aborting.")
+        # ~70 ESC presses without the Equipment menu ever appearing means ESC
+        # is doing nothing on this screen. Keep the last frame we looked at.
+        self._dump_unrecognised_screen(
+            "esc_recovery_failed", region, image=_last_img,
+            note="45 s of ESC presses never revealed the Equipment menu")
         return False
 
     def _confirm_in_game(self, region, exe_name: str) -> tuple:
@@ -5057,6 +5073,9 @@ class RelicBotApp(tk.Tk):
             if _elapsed >= _MAX_WAIT:
                 self._log(
                     f"[Phase -0.5] Could not confirm in-game state within {int(_MAX_WAIT)} s — aborting.")
+                self._dump_unrecognised_screen(
+                    "confirm_timeout", region,
+                    note=f"no in-game confirmation in {int(_MAX_WAIT)} s")
                 return False, 0.0
 
             _cycle += 1
@@ -5163,6 +5182,16 @@ class RelicBotApp(tk.Tk):
                                     f"[Phase -0.5] Menu highlight detected "
                                     f"({_hl_item}) — confirming in-game via "
                                     f"highlight fallback.")
+                                # This confirm is the weak one: it accepts a
+                                # rendered highlight without ever reading
+                                # "equipment". When it is wrong, everything
+                                # downstream fails for reasons that look like
+                                # dropped input. Keep the frame it decided on.
+                                self._dump_unrecognised_screen(
+                                    "fallback_confirm", region, image=_img,
+                                    note=(f"confirmed in-game from highlight "
+                                          f"'{_hl_item}' alone; 'equipment' was "
+                                          f"not found"))
                             else:
                                 # Highlight is visible but the game does NOT hold
                                 # focus, so ESC/DOWN won't land — confirming here
@@ -5868,6 +5897,11 @@ class RelicBotApp(tk.Tk):
                     self._batch_matches_log_path = matches_log_path
                 except Exception:
                     pass
+                # Where _dump_unrecognised_screen writes. Carried on self for
+                # the same reason as the log paths above: the phase methods are
+                # siblings of _batch_loop and never receive run_dir.
+                self._batch_run_dir = run_dir
+                self._failure_dumps_written = 0
                 self._log(f"Batch output folder: {run_dir}")
                 # ── Run configuration summary ─────────────────────────────
                 # Passive readout so users can verify their settings at a
@@ -13163,6 +13197,155 @@ class RelicBotApp(tk.Tk):
             except Exception:
                 pass
 
+    # Bound on unrecognised-screen dumps per run. Every failure of this class
+    # repeats identically, so a handful of frames answers it; the cap exists so
+    # a long run cannot quietly fill a disk with the same picture.
+    _FAILURE_DUMP_MAX = 12
+
+    def _dump_unrecognised_screen(self, reason: str, region=None,
+                                  image: bytes = None, note: str = "") -> str:
+        """Save the frame the bot could not make sense of, plus what it read.
+
+        Fires when the bot is lost on a screen it has no model for: the
+        highlight fallback confirming in-game without finding "equipment",
+        Phase -0.5 timing out, menu navigation unable to move, or ESC recovery
+        giving up. Those are the moments where the logs record a decision but
+        not the evidence behind it.
+
+        Why this exists: four separate investigations have been spent on this
+        class, and each one ended with someone LOOKING at the screen because
+        the logs structurally could not say what was on it. A run would report
+        every SendInput OK, every OCR check false, and no screenshot anywhere —
+        nothing is captured before Phase 3. A dump written at the point of
+        failure collapses that into one glance.
+
+        `image` should be the exact capture the failing decision was made on
+        wherever the caller has it; re-capturing here would photograph a
+        different moment. Falls back to a fresh capture when it does not.
+
+        Returns the dump path, or "" if nothing was written. Never raises:
+        diagnostics must not be able to kill a run.
+        """
+        try:
+            if not self._batch_run_dir:
+                return ""
+            if self._failure_dumps_written >= self._FAILURE_DUMP_MAX:
+                return ""
+            self._failure_dumps_written += 1
+            _n = self._failure_dumps_written
+
+            _img = image
+            if _img is None:
+                _img = screen_capture.capture(region)
+
+            _dir = os.path.join(self._batch_run_dir, "failure_dumps")
+            os.makedirs(_dir, exist_ok=True)
+            _iter = getattr(self, "_diag_cur_iter", 0) or 0
+            _stem = f"{_n:02d}_{reason}_iter{_iter:03d}_{time.strftime('%H%M%S')}"
+            _jpg = os.path.join(_dir, _stem + ".jpg")
+            _txt = os.path.join(_dir, _stem + ".txt")
+
+            with open(_jpg, "wb") as _f:
+                _f.write(_img)
+
+            # What the bot read, through the SAME path check_text_visible uses.
+            _tokens, _ocr_err = [], ""
+            try:
+                _tokens = relic_analyzer.scan_text_tokens(_img, top_fraction=0.15)
+            except Exception as _te:
+                _ocr_err = f"{type(_te).__name__}: {_te}"
+            _joined = " ".join(t for t, c in _tokens if c > 0.3).lower()
+
+            # Which rows the highlight detector considered, and by how much the
+            # winner won. A false confirm and a real one are indistinguishable
+            # from the name alone -- the margin is what separates them.
+            _hl_item, _hl_br, _hl_vals = None, 0.0, {}
+            try:
+                _hl_item, _hl_br, _hl_vals = screen_capture.find_highlighted_item(region)
+            except Exception:
+                pass
+
+            _lines = [
+                "RelicBot — unrecognised screen dump",
+                "=" * 60,
+                f"Reason      : {reason}",
+                f"Note        : {note}" if note else "Note        : —",
+                f"Time        : {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"Iteration   : {_iter}",
+                f"Version     : v{APP_VERSION}",
+                f"Screenshot  : {os.path.basename(_jpg)}",
+                "",
+                "FOREGROUND",
+                "-" * 60,
+            ]
+            try:
+                _lines.append(f"Window      : {self._active_window_desc()}")
+            except Exception:
+                _lines.append("Window      : unavailable")
+            try:
+                _me = self._process_integrity_level(os.getpid()) or "unknown"
+                _pids = input_controller._pids_for_exe(
+                    os.path.basename(self.game_exe_var.get().strip()) or "nightreign.exe")
+                _gm = (self._process_integrity_level(_pids[0]) if _pids else "") or "unknown"
+                _lines.append(f"Integrity   : RelicBot={_me}  game={_gm}")
+            except Exception:
+                _lines.append("Integrity   : unavailable")
+
+            _lines += [
+                "",
+                "OCR — top 15% of screen (the band 'equipment' is looked for in)",
+                "-" * 60,
+            ]
+            if _ocr_err:
+                _lines.append(f"OCR FAILED: {_ocr_err}")
+            elif not _tokens:
+                _lines.append("(no text read at all)")
+            else:
+                for _t, _c in _tokens:
+                    _lines.append(f"  {_c:5.2f}  {_t}")
+            _lines.append("")
+            _lines.append(f"'equipment' present : {'equipment' in _joined}")
+
+            _lines += [
+                "",
+                "MENU HIGHLIGHT — blue-minus-red per row (detector input)",
+                "-" * 60,
+                f"Winner      : {_hl_item}  (B-R {_hl_br:.1f})",
+            ]
+            try:
+                _ranked = sorted(_hl_vals.items(), key=lambda kv: kv[1], reverse=True)
+                if len(_ranked) >= 2:
+                    _lines.append(f"Margin      : {_ranked[0][1] - _ranked[1][1]:.1f}"
+                                  f" over {_ranked[1][0]}")
+                for _name, _val in _ranked:
+                    _lines.append(f"  {_val:7.1f}  {_name}")
+            except Exception:
+                _lines.append("(row values unavailable)")
+
+            _lines += [
+                "",
+                "-" * 60,
+                "If the picture is not the Roundtable menu, the bot was confirmed",
+                "in-game on a screen it has no model for and every key after that",
+                "went nowhere. The picture is the answer; the numbers explain why",
+                "the detector was fooled.",
+            ]
+
+            with open(_txt, "w", encoding="utf-8") as _f:
+                _f.write("\n".join(_lines) + "\n")
+
+            self._log(f"  [Dump] Saved unrecognised screen → "
+                      f"failure_dumps/{os.path.basename(_jpg)}"
+                      + (f"  ({_n}/{self._FAILURE_DUMP_MAX})"
+                         if _n >= self._FAILURE_DUMP_MAX else ""))
+            return _jpg
+        except Exception as _e:
+            try:
+                self._log(f"  [Dump] could not save screen: {_e}")
+            except Exception:
+                pass
+            return ""
+
     @staticmethod
     def _bundled_torch_version() -> str:
         """Version of the torch this build SHIPPED, without importing torch.
@@ -14996,6 +15179,7 @@ class RelicBotApp(tk.Tk):
         self._batch_log_path = ""        # stop mirroring to process log
         self._batch_relic_log_path = ""  # stop mirroring to relic log
         self._batch_matches_log_path = ""  # stop mirroring to matches log
+        self._batch_run_dir = ""           # no run folder to dump failures into
         self._hide_mouse_blocker()
         if self._overlay:
             self._overlay.destroy()

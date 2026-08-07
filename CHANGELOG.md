@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ---
 
+## [1.9.1] — 2026-08-07 — THE BOT NOW SHOWS YOU THE SCREEN IT GOT LOST ON
+
+### Added: failure dumps for "the bot stopped in the menus"
+- When a run aborts because the bot could not find its way through the menus, it now saves **a screenshot of what was actually on screen** at that moment, into a `failure_dumps` folder inside that run's output folder.
+- Alongside each screenshot is a text file listing what the bot read there: every word its text recognition picked up, whether it found the Equipment menu, which menu row it believed was highlighted and by how much, the window that held focus, and whether the game was running at a higher privilege level than RelicBot.
+- This fires on the four ways the bot gets lost: confirming it is in-game from a highlight alone without ever reading "equipment", failing to confirm at all within the timeout, being unable to move the menu highlight, and ESC recovery giving up after 45 seconds.
+- Why it matters: until now these aborts were reported with every keypress logged as delivered, every text check logged as failed, and **no picture anywhere** — nothing is captured before the relic-scanning phase. Four separate investigations ended with someone watching the screen because the logs structurally could not say what was on it. Now the run says so itself.
+- Capped at 12 dumps per run so a long run cannot fill a disk, and written in a way that can never interrupt a run in progress.
+
+### Changed: diagnostic reporting
+- The reported text recognition now comes from the same read the bot made its decision on, rather than a second look at the screen — so a dump can never disagree with the check it is explaining.
+
+---
+
 ## [1.9.0] — 2026-08-06 — RELIC SCANNING REPAIRED + GPU ACCELERATION ACTUALLY WORKS
 
 ### Fixed: relic scanning could not start at all in v1.8.8 – v1.8.11

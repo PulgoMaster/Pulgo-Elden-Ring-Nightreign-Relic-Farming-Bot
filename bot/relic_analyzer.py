@@ -1664,16 +1664,13 @@ def read_murk(image_bytes: bytes,
     return candidates[0][1], region
 
 
-def check_text_visible(image_bytes: bytes, text: str, top_fraction: float = 0.50) -> bool:
-    """
-    Check if text appears anywhere in the top portion of the screen.
-    Scans the full width so tab-bar labels at any horizontal position are found.
-    Used for Equipment menu detection during ESC recovery.
+def scan_text_tokens(image_bytes: bytes, top_fraction: float = 0.50) -> list:
+    """OCR the top band of a screenshot and return the raw [(text, conf), ...].
 
-    Pass a top_fraction appropriate to where the text sits on screen
-    (e.g. 0.15 for "small jar bazaar" near the top, 0.15 for equipment tabs).
-    Downscaling to _MAX_OCR_WIDTH gives ~2-3× speedup; the region must be at
-    least 50 px tall after downscaling to keep text legible.
+    This is the read that `check_text_visible` makes its decision on, factored
+    out so a failure dump can record exactly what the bot saw rather than
+    re-reading the screen through a second, subtly different path. A dump that
+    OCRs differently from the check it is explaining is worse than no dump.
     """
     img = _to_array(image_bytes, max_width=0)
     h, w = img.shape[:2]
@@ -1688,8 +1685,22 @@ def check_text_visible(image_bytes: bytes, text: str, top_fraction: float = 0.50
                     (_MAX_OCR_WIDTH, _new_h), Image.LANCZOS,
                 )
             )
-    results = nav_ocr(scan_region)
-    all_text = " ".join(t for _, t, c in results if c > 0.3).lower()
+    return [(t, c) for _, t, c in nav_ocr(scan_region)]
+
+
+def check_text_visible(image_bytes: bytes, text: str, top_fraction: float = 0.50) -> bool:
+    """
+    Check if text appears anywhere in the top portion of the screen.
+    Scans the full width so tab-bar labels at any horizontal position are found.
+    Used for Equipment menu detection during ESC recovery.
+
+    Pass a top_fraction appropriate to where the text sits on screen
+    (e.g. 0.15 for "small jar bazaar" near the top, 0.15 for equipment tabs).
+    Downscaling to _MAX_OCR_WIDTH gives ~2-3× speedup; the region must be at
+    least 50 px tall after downscaling to keep text legible.
+    """
+    results = scan_text_tokens(image_bytes, top_fraction)
+    all_text = " ".join(t for t, c in results if c > 0.3).lower()
     return text.lower() in all_text
 
 
